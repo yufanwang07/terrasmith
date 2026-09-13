@@ -126,8 +126,17 @@ export const GEO_VENT_PREFIX = 'GeoVent';
 
 /**
  * The engine reads feature-type names into a fixed `char[16384][32]` table
- * (SMFMapFile.h). More types than this is a hard `content_error`; names longer
- * than 31 bytes are silently truncated at read time.
+ * (SMFMapFile.h). More types than this is a hard `content_error`.
  */
 export const MAX_FEATURE_TYPES = 16384;
-export const MAX_FEATURE_TYPE_NAME_BYTES = 32;
+
+/**
+ * Longest feature-type name the engine can read, in bytes, excluding the NUL.
+ *
+ * The read loop copies at most 31 bytes per name and stops at the first NUL
+ * within them, so a 31-byte name leaves its terminator unread — and because the
+ * names are a back-to-back stream with no lengths, that one unread byte shifts
+ * every following name and the whole feature block turns to garbage. Thirty is
+ * the last safe length.
+ */
+export const MAX_FEATURE_TYPE_NAME_BYTES = 30;

@@ -9,6 +9,15 @@ the vendored 7‑Zip SDK in `https://github.com/beyond-all-reason/pr-downloader`
 (`src/lib/7z/`, which is where the engine's `7zip` CMake target comes from — see
 `rts/CMakeLists.txt:88` and `rts/System/FileSystem/Archives/CMakeLists.txt:45`).
 
+> **Adversarially re‑checked 2026‑09‑13.** Every load‑bearing claim below was re‑verified against
+> primary sources (raw engine source fetched with `curl`, a fresh clone of `maps-metadata@main`,
+> Beherith's `pymapconv` source, and a re‑download + re‑parse of `comet_catcher_remake_1.8.sd7`).
+> Line numbers were corrected throughout, five substantive claims were corrected (see
+> **Verification log** at the end: §2.1 `modinfo.lua`, §5.1 `bitmaps/foam.jpg`, §5.7
+> `splatDetailTex`, §8 `derived_map_info` defaults, §10 `atmosphere.skyDir`), and everything that
+> could not be confirmed from a primary source is now marked
+> **UNVERIFIED — needs confirmation** inline.
+
 All "what real BAR maps do" claims are measured from actual `.sd7` files downloaded from the BAR
 CDN on 2026‑09‑13:
 
@@ -46,8 +55,16 @@ Pack with:
 7z a -t7z -m0=lzma2 -mx=9 -ms=off -mmt=on out/<name>.sd7 ./<staging>/*
 ```
 
-`-ms=off` (non‑solid) is **mandatory** — BAR's CI rejects solid archives and the engine refuses to
-index them (§1.4).
+`-ms=off` (non‑solid) is **mandatory in practice** — BAR's CI rejects solid archives outright and the
+whitelist is empty (`check_archive_not_solid.ts`). The *engine's* own class‑1 rejection path exists but
+is currently **dormant** on RecoilEngine master (nothing overrides `HasLowReadingCost()`, §1.4), so a
+solid archive still loads — just serialised onto one thread. Ship non‑solid anyway.
+
+> ⚠ The flag set above is **inferred**, not quoted from BAR documentation. See the verification log:
+> no `7z a` / `-ms=off` command line appears anywhere in the `beyond-all-reason` GitHub org or in the
+> public mapping guides. What *is* measured is the result: all six sampled archives are LZMA2,
+> `solid = False`, one folder per file — which is what `-t7z -m0=lzma2 -ms=off` produces. Dictionary
+> size, `fb` and `mt` remain **UNVERIFIED — needs confirmation**.
 
 ---
 
@@ -66,7 +83,11 @@ index them (§1.4).
 | `sd7` | `CSevenZipArchive` | `SD7 = 3` | 7z, via the LZMA SDK `SzArEx_*` API |
 | `sdv` | `CVirtualArchive` | `SDV = 4` | in‑memory, engine‑internal |
 
-(`rts/System/FileSystem/Archives/ArchiveTypes.h:6-14`.)
+(`rts/System/FileSystem/Archives/ArchiveTypes.h:6-14`. The same enum also carries
+`ARCHIVE_TYPE_CNT = 5` and `ARCHIVE_TYPE_BUF = 6`; neither is a loadable file type.)
+The extension each factory claims is **not** hard‑coded in `ArchiveLoader` — it comes from
+`factory.GetDefaultExtension()` (`ArchiveLoader.cpp:28`), and dispatch is a `std::lower_bound` over the
+sorted `{extension, factory}` list (`:55`, `:71`).
 
 Extension → factory is an exact string match on the lowercase extension, so `MyMap.SD7` works but
 `MyMap.7z` does **not**.
@@ -99,7 +120,7 @@ static BoolInt IS_MAIN_METHOD(UInt32 m) {
     case k_LZMA2:           /* 0x21      — LZMA2           */
     #endif
     #ifdef _7ZIP_PPMD_SUPPPORT
-    case k_PPMD:            /* 0x030401                     */
+    case k_PPMD:            /* 0x30401 (7zDec.c:41)         */
     #endif
       return True;
   }
@@ -114,15 +135,15 @@ and `7zDec.c:8` says:
 ```
 
 — **commented out**. ⇒ **PPMd is NOT compiled in.** A `.sd7` written with `-m0=PPMd` opens as
-`SZ_ERROR_UNSUPPORTED` ("Unsupported archive", `SevenZipArchive.cpp:111`) and the archive is
+`SZ_ERROR_UNSUPPORTED` ("Unsupported archive", `SevenZipArchive.cpp:112`) and the archive is
 recorded as broken.
 
-**Filters accepted as a second coder** — `7zDec.c:320-348`: `k_Delta (3)`, `k_BCJ (0x3030103)`,
+**Filters accepted as a second coder** — `7zDec.c:320-350`: `k_Delta (3)`, `k_BCJ (0x3030103)`,
 `k_PPC`, `k_IA64`, `k_ARM`, `k_ARMT`, `k_SPARC`. Plus the 4‑coder `k_BCJ2 (0x303011B)` layout
-(`7zDec.c:352-370`). So 7‑Zip's automatic x86 filter on executables is fine; there are none in a
+(`7zDec.c:353-370`). So 7‑Zip's automatic x86 filter on executables is fine; there are none in a
 map anyway.
 
-**Folder shape limits** (`CheckSupportedFolder`, `7zDec.c:305-372`): `NumCoders` must be 1, 2 or 4;
+**Folder shape limits** (`CheckSupportedFolder`, `7zDec.c:306-373`): `NumCoders` must be 1, 2 or 4;
 with 2 coders exactly one bond `1→0` and one pack stream; the 4‑coder form must be exactly the
 BCJ2 topology. Anything else ⇒ `SZ_ERROR_UNSUPPORTED`.
 
@@ -140,7 +161,7 @@ LZMA. Every real BAR `.sd7` measured has a small compressed header (e.g. Comet C
 **Filename encoding.** Names are stored UTF‑16 in 7z and converted to UTF‑8
 (`SevenZipArchive.cpp:27-90`). `GetFileName()` uses a **2048‑element buffer** and returns
 `std::nullopt` (file silently skipped, with an error log) if `SzArEx_GetFileNameUtf16` reports
-`utf16len >= 2048` (`SevenZipArchive.cpp:73-81`). Keep paths well under 2048 UTF‑16 code units.
+`utf16len >= 2048` (`SevenZipArchive.cpp:74-81`). Keep paths well under 2048 UTF‑16 code units.
 
 **Per‑file size is truncated to `int`.** `SevenZipArchive.cpp:152` casts
 `SzArEx_GetFileSize()` to `int`, and `IArchive::ExtractedSize()` accumulates into `uint32_t`
@@ -156,8 +177,10 @@ directory entries and 61 file entries.
 
 `CZipArchive` uses the vendored minizip (`rts/lib/minizip/unzip.c`) over zlib.
 
-* **Encryption is compiled out.** `rts/lib/minizip/CMakeLists.txt:23` —
-  `add_definitions(-DNOCRYPT -DNOUNCRYPT)`. Encrypted entries are unreadable.
+* **Encryption is compiled out.** `rts/lib/minizip/CMakeLists.txt:21` —
+  `add_definitions(-DNOCRYPT -DNOUNCRYPT)`, inside the `else(MINIZIP_FOUND)` branch that builds the
+  vendored copy. (A build that finds a *system* minizip does not get those defines; every official
+  Recoil/BAR build uses the vendored one.) Encrypted entries are unreadable.
 * **Methods:** store (`0`) and **deflate** (`Z_DEFLATED = 8`) only.
   `unzip.c:1402-1408` also *lets through* `Z_BZIP2ED (12)`, but `unzip.c:1420-1445` only
   initialises a bzip2 stream `#ifdef HAVE_BZIP2`, which the engine's build never defines —
@@ -168,13 +191,14 @@ directory entries and 61 file entries.
   (`unzip.c:925`), but the engine opens with `unzOpen()` (`ZipArchive.cpp:29`), i.e.
   `unzOpenInternal(path, NULL, 0)` with `is64bitOpenFunction = 0` (`unzip.c:698`). Stay under
   4 GiB and under 65535 entries to be safe.
-* **Filename buffer is 512 bytes** (`ZipArchive.cpp:44-46`); longer names are skipped by
+* **Filename buffer is 512 bytes** (`char fName[512]`, `ZipArchive.cpp:44`, passed to
+  `unzGetCurrentFileInfo` at `:46`); longer names are skipped by
   `unzGetCurrentFileInfo` failing.
 * Entries whose name ends in `/` or `\` are treated as directories and skipped
   (`ZipArchive.cpp:54-56`).
 * CRC is verified on read: `unzCloseCurrentFile() == UNZ_CRCERROR` ⇒ `GetFileImpl` returns 0 and
   the buffer is cleared (`ZipArchive.cpp:157-162`).
-* `info.uncompressed_size` is cast to `int` (`ZipArchive.cpp:64`) — same < 2 GiB per‑file rule.
+* `info.uncompressed_size` is cast to `int` (`ZipArchive.cpp:63`) — same < 2 GiB per‑file rule.
 
 A zip is never "solid", so `CZipArchive::CheckForSolid()` inherits the base `return false`
 (`IArchive.h:136`) and the solidity gate in §1.4 is a no‑op for `.sdz`. `maps-metadata`'s own
@@ -194,7 +218,7 @@ considerSolid = (db.db.NumFolders == 1)
 parallelAccessNum = !CheckForSolid() ? ThreadPool::GetNumThreads() : 1;
 ```
 
-and `CArchiveScanner::CheckCompression()` (`ArchiveScanner.cpp:571-598`) then **rejects the whole
+and `CArchiveScanner::CheckCompression()` (`ArchiveScanner.cpp:571-599`) then **rejects the whole
 archive** if a "class 1" meta file is expensive to read:
 
 ```
@@ -256,7 +280,7 @@ For `.sdz`: `zip -r -9 my_map_v1.0.sdz .` (deflate, no `-e`).
 
 `CArchiveScanner::GetArchiveChecksum()` (`ArchiveScanner.cpp:979-1090`) SHA‑512s every file, then
 XORs `sha512(lowercase(filename)) ^ sha512(content)` over all files sorted case‑insensitively. The
-ignore filter is built by `CreateIgnoreFilter()` (`ArchiveScanner.cpp:958-970`):
+ignore filter is built by `CreateIgnoreFilter()` (`ArchiveScanner.cpp:959-971`):
 
 ```cpp
 ignore->AddRuleRegex("^\\..*$");                       // anything starting with '.'
@@ -266,7 +290,15 @@ if (ar->GetFile("springignore.txt", buf) && !buf.empty())
 
 So dotfiles (`.git`, `.DS_Store`, …) never affect the archive hash — but they *are* still in the
 archive and still downloaded by every player. Strip them at pack time. Shipping a
-`springignore.txt` lets you exclude e.g. source files from the sync hash.
+`springignore.txt` lets you exclude e.g. source files from the sync hash. Note the rule is
+`^\..*$` — a *leading* dot. Windows junk that does **not** start with a dot is hashed and shipped:
+Comet Catcher carries six `desktop.ini` files (136 B each). Whether the regex is matched against the
+full VFS path or only the basename (i.e. whether `maps/.foo` is ignored) was not traced into
+`IFileFilter` — **UNVERIFIED — needs confirmation**.
+
+The XOR fold is order‑independent, so the case‑insensitive `std::stable_sort` at
+`ArchiveScanner.cpp:1056-1064` does not affect the result; what matters for reproducibility is only
+the *set* of non‑ignored files and their lower‑cased names.
 
 **Filename case is irrelevant to lookups.** Every archive builds `lcNameIndex` from
 `StringToLower(origName)` (`SevenZipArchive.cpp:157`, `ZipArchive.cpp:69`, `DirArchive.cpp:48`),
@@ -294,8 +326,18 @@ Only three things are engine‑mandated for a map archive:
 3. **A `.smt`** reachable at `dirname(mapfile) + <name stored in the .smf tile header>`
    (§3.4).
 
-**`modinfo.lua` must NOT be present** — `ArchiveScanner.cpp:753-765` checks `mapinfo.lua` first,
-but an archive with both is ambiguous and `modinfo.lua` alone makes it a *game* archive.
+**What if both `mapinfo.lua` and `modinfo.lua` are present?** Not ambiguous — `mapinfo.lua` wins,
+cleanly. `ScanArchive()` reads `hasModInfo` / `hasMapInfo` at `ArchiveScanner.cpp:745-746` and then
+branches `if (hasMapInfo) … else if (hasModInfo) … else …` (`:753-766`): only `mapinfo.lua` is
+executed, `modinfo.lua` is never even opened, and the `if (hasMapInfo || !arMapFile.empty())` arm at
+`:784` still classifies the archive as a map and forces `modType = modtype::map` (`:796`).
+So shipping a stray `modinfo.lua` is harmless but pointless — and `modinfo.lua` *alone* makes the
+archive a game. Don't ship one.
+
+**`modtype = 3` in `mapinfo.lua` is belt‑and‑braces, not the switch.** The scanner overwrites it
+with `modtype::map` for any archive it decides is a map (`ArchiveScanner.cpp:796`). It is still
+listed as a *required* known tag (`knownTags`, `ArchiveScanner.cpp:83`: "0=hidden, 1=primary,
+(2=unused), 3=map, 4=base, 5=menu"), and unitsync/lobbies read it, so set it.
 
 ### 2.2 The de‑facto BAR layout
 
@@ -307,8 +349,8 @@ Top‑level directories observed across the six sampled archives (a `·` means p
 | `mapoptions.lua` | · | · | | · | · | · | lobby‑exposed map options |
 | `maps/` | · | · | · | · | · | · | `.smf`, `.smt`, all map textures |
 | `maphelper/mapinfo.lua` | · | · | | · | · | · | 1‑line back‑compat shim (§2.4) |
-| `mapconfig/` | · | · | | · | · | · | feature placement + mapinfo overrides |
-| `LuaGaia/` | · | · | | · | · | · | Gaia gadget host + FeaturePlacer |
+| `mapconfig/` | ·¹ | · | | · | · | · | feature placement + mapinfo overrides |
+| `LuaGaia/` | ·² | · | | · | · | · | Gaia gadget host + FeaturePlacer |
 | `features/` | (empty) | · | | · | · | · | map‑local `FeatureDef` Lua |
 | `objects3d/` | (empty) | · | | · | · | · | `.s3o` models for those features |
 | `unittextures/` | (empty) | · | | · | · | · | textures for those models |
@@ -316,8 +358,19 @@ Top‑level directories observed across the six sampled archives (a `·` means p
 | `bitmaps/` | · | | | | | | water/foam overrides |
 | `libs/` | · | | | | | | vendored Lua libs (s11n, LCS) |
 
+¹ Comet Catcher's `mapconfig/` is **not** a feature‑placer directory: it holds `mapconfig/model.lua`
+(9 B, `return {}`) and an *empty* `mapconfig/mapinfo/`. Only hooked / c2c / altair / boreal ship
+`mapconfig/featureplacer/`.
+² Comet Catcher's `LuaGaia/Gadgets/` holds `precipitation.lua`, `s11n_gadget_load.lua` and
+`s11n_load_map_features.lua` — **no `FP_featureplacer.lua`**; it places its decoration through s11n
+instead. Its `features/`, `objects3d/` and `unittextures/` directories are empty.
+
 `speedmetal_bar_v2.sd7` is the minimum viable shape: `mapinfo.lua` + `maps/` and nothing else
 (10 files total).
+
+Comet Catcher also ships six `desktop.ini` files (Windows folder metadata, 136 B each) scattered
+through `LuaGaia/` and `LuaUI/`. They do not start with `.`, so they are **not** filtered out of the
+archive checksum (§1.6). Don't emit them.
 
 ### 2.3 Inside `maps/`
 
@@ -416,17 +469,19 @@ end
 Three tiny files, identical across hooked / c2c / altair / boreal / comet:
 
 ```lua
--- LuaGaia/main.lua (127 B)
+-- LuaGaia/main.lua (129 B)
 if AllowUnsafeChanges then AllowUnsafeChanges("USE AT YOUR OWN PERIL") end
 VFS.Include("LuaGadgets/gadgets.lua",nil, VFS.BASE)
 
--- LuaGaia/draw.lua (52 B)
+-- LuaGaia/draw.lua (53 B)
 VFS.Include("LuaGadgets/gadgets.lua",nil, VFS.BASE)
 ```
 
-plus `LuaGaia/Gadgets/<your gadgets>.lua`. BAR maps ship
+plus `LuaGaia/Gadgets/<your gadgets>.lua`. Most BAR maps ship
 `LuaGaia/Gadgets/FP_featureplacer.lua` (2 234 B, "feature placer, Gnome/Smoth") and sometimes
 `LuaGaia/effects/{drop,snowflake}.png` (used by `custom.precipitation.texture` in `mapinfo.lua`).
+Comet Catcher is the exception: it ships `precipitation.lua` + the s11n loader pair and no
+FeaturePlacer at all.
 
 `LuaRules/` is *permitted* in a map archive but none of the six sampled maps use it; BAR strongly
 prefers `LuaGaia` for map gadgets (it runs in the Gaia context and cannot break game rules).
@@ -441,7 +496,7 @@ These are **four independent names** and confusing them is the most common packa
 
 ### 3.1 `mapinfo.name` + `mapinfo.version` ⇒ the **springname**
 
-`CArchiveScanner::ArchiveData::ArchiveData()` (`ArchiveScanner.cpp:186-196`):
+`CArchiveScanner::ArchiveData::ArchiveData()` (`ArchiveScanner.cpp:129`, body `:187-200`):
 
 ```cpp
 const std::string& name    = GetNameVersioned();
@@ -458,6 +513,12 @@ if (!version.empty()) {
 So the canonical springname is **`name .. " " .. version`**, unless `version` is already a
 substring of `name` (in which case a warning is logged and `name` is used as‑is). The un‑suffixed
 name is kept as `name_pure` (`ArchiveScanner.cpp:199-200`).
+
+> ⚠ `name` there is a `const std::string&` bound to the *stored* info item, and
+> `SetInfoItemValueString("name", …)` mutates that item before `name_pure` is written, so on current
+> master `name_pure` can end up holding the **versioned** name rather than the pure one. Do not rely
+> on `name_pure`; derive your own. (Behaviour read from source, not executed —
+> **UNVERIFIED — needs confirmation**.)
 
 Worked from real files:
 
@@ -555,17 +616,25 @@ if (!tileFile.FileExists())                       // try absolute path
 
 So the embedded name is **relative to the `.smf`'s directory**. Comet Catcher stores
 `"CCRXR.smt"` → resolved to `maps/CCRXR.smt`. If the file is missing, all tiles are memset to
-`0xAA` and the whole map renders red (`SMFGroundTextures.cpp:156-166`).
+`0xAA` and the whole map renders red (`SMFGroundTextures.cpp:151-160`).
+
+⚠ **Hard limit on the embedded name: 254 bytes.** `LoadTiles()` reads it into
+`char fileNameBuffer[256] = {{0}}` and calls
+`ifs->ReadString(&fileNameBuffer[0], sizeof(char) * (sizeof(fileNameBuffer) - 1))`
+(`SMFGroundTextures.cpp:134`, `:137`), i.e. at most 255 bytes are read and the last is the
+terminator. Longer names are silently truncated and the tile file will not be found.
 
 `mapinfo.smf.smtFileName0..N` **override** the embedded names, but only when the count matches
-`tileHeader.numTileFiles` exactly (`SMFGroundTextures.cpp:126-129`, else a warning and the override
-is ignored). Note the override is *also* prefixed with `maps/` first, so Comet Catcher's
+`tileHeader.numTileFiles` exactly (`SMFGroundTextures.cpp:126-130`, else a warning and the override
+is ignored; the engine then falls back to the embedded names). Note the override is *also* prefixed with `maps/` first, so Comet Catcher's
 `smtFileName0 = "maps/CCRXR.smt"` first tries `maps/maps/CCRXR.smt`, fails, then falls back to the
 bare string and works. Either spelling works; `"<Name>.smt"` is the cleaner one.
 
 The `.smt` header is re‑validated: magic `"spring tilefile"`, `version == 1`, `tileSize == 32`,
 `compressionType == 1` — any mismatch throws `content_error`
-(`SMFGroundTextures.cpp:165-173`).
+(`SMFGroundTextures.cpp:165-171`). Note the tile *payload* is read as
+`numSmallTiles × SMALL_TILE_SIZE` raw bytes (`:173-175`), with no bounds check against the file's own
+`numTiles`.
 
 ### 3.5 Summary of what must / mustn't match
 
@@ -611,8 +680,36 @@ The `.smt` header is re‑validated: magic `"spring tilefile"`, `version == 1`, 
 | 72 | `int32` | `featurePtr` | → `MapFeatureHeader` |
 | 76 | `int32` | `numExtraHeaders` | count of `ExtraHeader`s that follow at offset 80 |
 
-Validation (`rts/Map/SMF/SMFMapFile.cpp:16-27`) rejects anything where `version != 1`,
-`tilesize != 32`, `texelPerSquare != 8`, `squareSize != 8`, or the magic mismatches.
+Validation (`CheckHeader`, `rts/Map/SMF/SMFMapFile.cpp:16-28`) rejects anything where
+`version != 1`, `tilesize != 32`, `texelPerSquare != 8`, `squareSize != 8`, or
+`strcmp(h.magic, "spring map file") != 0`.
+
+⚠ **`mapx`/`mapy` divisibility is *not* validated by `CheckHeader`.** The real constraint comes from
+`CSMFReadMap::ParseHeader()`: `numBigTexX = header.mapx / bigSquareSize` with
+`bigSquareSize = 32 * tileScale = 128` (`SMFReadMap.h:181-182`, `SMFReadMap.cpp:120-121`), and
+`tileCount = (mapx * mapy) / 16` (`:125`). A `mapx` that is not a multiple of 128 silently truncates
+the big‑texture grid and leaves a strip of the map untextured. Stick to multiples of 128
+(= whole "map units" of 64 twice over; BAR sizes are `mapx / 64` × `mapy / 64`).
+
+**Independent cross‑check of the whole struct set.** Beherith's compiler (`pymapconv`,
+`github.com/Beherith/springrts_smf_compiler`, CC0‑1.0) declares exactly the same little‑endian
+layouts in `src/pymapconv.py:38-79`, which is the definitive writer‑side confirmation:
+
+```python
+SMFHeader_struct       = struct.Struct('< 16s i i i i i i i f f i i i i i i i')   # 80 bytes
+ExtraHeader_struct     = struct.Struct('< i i i')                                 # 12 (size,type,pos)
+MapTileHeader_struct   = struct.Struct('< i i')                                   # 8
+MapFeatureHeader_struct= struct.Struct('< i i')                                   # 8
+MapFeatureStruct_struct= struct.Struct('< i f f f f f')                           # 24
+TileFileHeader_struct  = struct.Struct('< 16s i i i i')                           # 32
+MINIMAP_SIZE = 699048
+```
+
+and its write order (`pymapconv.py:1050-1069`) is exactly: grass/vegetation map → heightmap
+(`'<H'`) → typemap → `minimapdata[:MINIMAP_SIZE]` ("dont even write more than needed, or else
+produced map will crash!") → metalmap → `MapTileHeader` → `int count` + NUL‑terminated `.smt` name
+→ `int32[mapx*mapy/16]` tile indices → `MapFeatureHeader` → NUL‑terminated type names →
+`MapFeatureStruct[]`. That is the byte budget in §4.2, emitted by the reference implementation.
 
 `ExtraHeader` = `{ int32 size; int32 type; }` (`SMFFormat.h:83-86`); `type == MEH_Vegetation (1)`
 is followed by an `int32 pos` pointing at `uint8[(mapx/4)*(mapy/4)]` grass data
@@ -673,6 +770,15 @@ Full byte budget — every pointer is reproduced by summing the block before it:
 
 **File size = 2 914 770 bytes**, which is exactly the size stored in the archive. ✔
 
+> **Independently re‑verified 2026‑09‑13** by re‑downloading `comet_catcher_remake_1.8.sd7`
+> (md5 `478e53f181d0940b76d028411093b47a`, 41 565 457 B) from the CDN and re‑parsing the header with
+> `struct.unpack('<16s i i i i i i i f f i i i i i i i', b[:80])`. Every value above reproduces
+> exactly, including `ExtraHeader = (12, 1, 92)`, `MapTileHeader = (1, 49153)`, the tile‑file entry
+> `(49153, "CCRXR.smt")` ending at 2 717 980, and `MapFeatureHeader = (17, 0)` with the 17 names
+> `TreeType0..TreeType15, GeoVent` occupying 174 bytes and ending at 2 914 770 = EOF.
+> Note `numTiles` (49 153) is one more than the tile‑index count (49 152) — the `.smt` carries one
+> extra tile; do not assume they are equal.
+
 `MINIMAP_SIZE = 699048` (`SMFFormat.h:34`) is the 9‑level DXT1 chain for 1024²:
 `Σ_{n=0..8} (max(1, 1024>>n)/4)² × 8` = 524288 + 131072 + 32768 + 8192 + 2048 + 512 + 128 + 32 + 8.
 `MINIMAP_NUM_MIPMAP = 9` (`SMFFormat.h:31`). Level 0 is 1024×1024; the last level is 4×4.
@@ -722,9 +828,14 @@ static void FIND_MAP_TEXTURE(std::string* filePath, const std::string& defaultDi
 ```
 
 ⇒ **a bare name like `"Hooked_normals.dds"` resolves to `maps/Hooked_normals.dds`**, and any path
-that already exists verbatim is used as‑is. So `"bitmaps/foam.jpg"` (Comet Catcher's
-`water.foamTexture`) resolves to the archive‑root `bitmaps/` dir, and `"maps/foo/bar.dds"` would
-work too.
+that already exists verbatim is used as‑is. `"maps/foo/bar.dds"` therefore works too.
+
+⚠ **`SPRING_VFS_ZIP` spans every mounted archive, not just yours.** Comet Catcher's mapinfo sets
+`water.foamTexture = "bitmaps/foam.jpg"` — and that file is **not in the map archive** (the archive
+ships `bitmaps/Foam.tga`, which nothing references). It resolves against BAR's own
+`bitmaps/foam.jpg`. So "the path already exists" can be satisfied by the *game* archive, and a name
+collision with game content silently changes which file you get. Prefer map‑unique filenames under
+`maps/`.
 
 The single exception is the *default* `detailTex`, which falls back to `bitmaps/` instead
 (`MapInfo.cpp:378-382`): if `resources.detailTex` is empty, the engine reads
@@ -733,7 +844,7 @@ under `bitmaps/`.
 
 ### 5.2 The nine `resources` string keys
 
-`CMapInfo::ReadSMF()` (`rts/Map/MapInfo.cpp:355-376`) reads exactly this table:
+`CMapInfo::ReadSMF()` (`rts/Map/MapInfo.cpp:354-429`) reads exactly this table (`:361-371`):
 
 ```cpp
 const std::array<std::pair<std::string*, std::string>, 9> texNames = {{
@@ -749,8 +860,8 @@ const std::array<std::pair<std::string*, std::string>, 9> texNames = {{
 }};
 ```
 
-plus `grassBladeTex` (`MapInfo.cpp:198`) and the DNTS array, which accepts **two spellings**
-(`MapInfo.cpp:384-399`):
+plus `grassBladeTex` (`MapInfo.cpp:198-199`, read in `ReadGrass()`) and the DNTS array, which
+accepts **two spellings** (`MapInfo.cpp:384-400`; the nested form's flag key is `alpha`, `:385`):
 
 ```lua
 -- preferred, nested:
@@ -767,16 +878,22 @@ The loop stops at the first missing index, and `CSMFReadMap` hard‑caps at
 `NUM_SPLAT_DETAIL_NORMALS` = 4 (`SMFReadMap.cpp:304-306`).
 
 There is a second, separate `smf = { … }` table for **overrides of compiled data**
-(`MapInfo.cpp:406-420`): `minHeight`, `maxHeight`, `minimapTex`, `metalmapTex`, `typemapTex`,
-`grassmapTex`, `smtFileName0..N`. The four `*Tex` ones replace the corresponding data *inside*
-the `.smf` and are also run through `FIND_MAP_TEXTURE`. `metalmapTex`/`typemapTex`/`grassmapTex`
-are loaded as **grayscale** and must match the SMF info‑map dimensions exactly or they're rejected
-with a warning (`SMFReadMap.cpp:939-960`).
+(`MapInfo.cpp:404-428`): `minHeight`, `maxHeight` (`:406-409`), `minimapTex`, `metalmapTex`,
+`typemapTex`, `grassmapTex` (`:411-419`) and `smtFileName0..N` (`:421-428`). The four `*Tex` ones
+replace the corresponding data *inside* the `.smf`. Note the asymmetry: the four `*Tex` names are run
+through `FIND_MAP_TEXTURE` (`:416-419`) but **`smtFileName*` is not** — `SMFGroundTextures` prefixes
+it with the `.smf`'s directory itself (§3.4).
+
+`metalmapTex`/`typemapTex`/`grassmapTex` are loaded with `CBitmap::LoadGrayscale` and must match the
+SMF info‑map dimensions **exactly** or they are discarded with a warning and the embedded data is
+used instead (`CSMFReadMap::GetInfoMap`, `SMFReadMap.cpp:924-970`; the size test is at `:951-962`).
+`minimapTex` is handled separately in `LoadMinimap()` (`SMFReadMap.cpp:161-170`) and has **no** size
+constraint — any bitmap replaces the 1024² DXT1 chain.
 
 ### 5.3 UV mapping — what each sampler is indexed by
 
 From `cont/base/springcontent/shaders/GLSL/SMFFragProg.glsl` and the uniforms in
-`rts/Map/SMF/SMFRenderState.cpp:185-193`:
+`rts/Map/SMF/SMFRenderState.cpp` (`normalTexGen` `:185`, `infoTexGen` `:191`, `specularTexGen` `:193`):
 
 ```cpp
 normalTexGen   = 1 / ((normTexSize.x - 1) * SQUARE_SIZE),  1 / ((normTexSize.y - 1) * SQUARE_SIZE)
@@ -784,8 +901,9 @@ infoTexGen     = 1 / (mapDims.pwr2mapx * SQUARE_SIZE),     1 / (mapDims.pwr2mapy
 specularTexGen = 1 / (mapDims.mapx * SQUARE_SIZE),         1 / (mapDims.mapy * SQUARE_SIZE)
 ```
 
-`normTexSize` is the engine's own heightmap‑derived normal texture, sized `(mapx+1, mapy+1)`
-(`SMFReadMap.cpp:388`), so `normalTexGen == 1/(mapx*8) == specularTexGen`. **Both `specTexCoords`
+`normTexSize` is the engine's own heightmap‑derived normal texture, sized
+`(mapDims.mapxp1, mapDims.mapyp1)` = `(mapx+1, mapy+1)` (`CreateNormalTex`, `SMFReadMap.cpp:388`),
+so `normalTexGen = 1/((mapx+1-1)*8) = 1/(mapx*8) = specularTexGen`. **Both `specTexCoords`
 and `normTexCoords` are therefore plain 0…1 across the whole world.**
 
 | sampler | texcoord in shader | meaning |
@@ -793,12 +911,13 @@ and `normTexCoords` are therefore plain 0…1 across the whole world.**
 | `specularTex` | `specTexCoords = worldPos.xz * specularTexGen` | stretched 0…1 over the map |
 | `skyReflectModTex` | `specTexCoords` | stretched 0…1 |
 | `lightEmissionTex` | `specTexCoords` | stretched 0…1 |
-| `parallaxHeightTex` | `specTexCoords` | stretched 0…1 — **"specularTex and parallaxHeightTex must have equal size"** (`SMFFragProg.glsl:284-285`) |
+| `parallaxHeightTex` | `specTexCoords` | stretched 0…1 — **"specularTex and parallaxHeightTex must have equal size"** (`SMFFragProg.glsl:284-285`; the offset is then rescaled per‑sampler at `:291-293`) |
 | `splatDistrTex` | `specTexCoords` (passed as `uv`) | stretched 0…1 |
 | `blendNormalsTex` (= `detailNormalTex`) | `normTexCoords` | stretched 0…1 |
-| `detailTex` | `worldPos.xz * SMF_DETAILTEX_RES` where `SMF_DETAILTEX_RES = 0.02` (`SMFFragProg.glsl:25`) | **tiles**, 1 repeat per 50 elmos |
+| `detailTex` | `worldPos.xz * SMF_DETAILTEX_RES` where `SMF_DETAILTEX_RES = 0.02` (`SMFFragProg.glsl:25`, used `:157`) | **tiles**, 1 repeat per 50 elmos |
 | `splatDetailTex` / `splatDetailNormalTex1..4` | `worldPos.xzxz * splatTexScales.rrgg / .bbaa` | **tiles**, per‑channel scale from `mapinfo.splats.texScales` |
-| `diffuseTex` (from `.smt`) | per‑square, `SMF_TEXSQUARE_SIZE = 1024.0` | the compiled atlas |
+| `diffuseTex` (from `.smt`) | per‑square, `SMF_TEXSQUARE_SIZE = 1024.0` (`SMFFragProg.glsl:5`) | the compiled atlas |
+| `grassShadingTex` | `worldPos.xz * (1/(mapx*8), 1/(mapy*8))` — `shadingTexCoords.pq` in `GrassVertProg.glsl:155`, uniform `mapSize` set in `GrassDrawer.cpp:329` | stretched 0…1, **same gen as `specularTex`** |
 
 **Consequence:** the full‑map textures can be any pixel size — the GPU stretches them — but their
 **aspect ratio should equal `mapx : mapy`** or the map is visibly distorted in specular/normal.
@@ -817,22 +936,32 @@ Let `S = mapx/64` and `T = mapy/64` (the "20×10" style map size). Then `mapx = 
 | minimap (in `.smf`) | `1024 × 1024` DXT1 + 8 mips | fixed | `MINIMAP_SIZE` |
 | `detailNormalTex` | `512S × 512T` | **512** | measured |
 | `specularTex` | `256S × 256T` | **256** | measured |
-| `skyReflectModTex` | = `specularTex` | 256 | measured (Boreal) |
-| `parallaxHeightTex` | **must equal** `specularTex` | 256 | shader comment |
-| `lightEmissionTex` | same family as specular | 256 | shader (untested in pool) |
+| `skyReflectModTex` | = `specularTex` (one sample only — **UNVERIFIED**) | 256 | measured (Boreal) |
+| `parallaxHeightTex` | **must equal** `specularTex` | 256 | shader comment (`SMFFragProg.glsl:284-285`) |
+| `lightEmissionTex` | free; sampled with `specTexCoords`, so `mapx:mapy` aspect (**UNVERIFIED** — unused by any pool map) | 256 | shader only |
 | `splatDistrTex` | `128S × 128T`, usually rounded up to pow‑2 | **128** | measured |
 | `splatDetailNormalTex1..4` | tiling, 512² or 1024² (2048² for metal maps) | n/a | measured |
 | `splatDetailTex` | tiling, 512²; only needed when *not* using DNTS | n/a | measured |
 | `detailTex` | tiling, 256² or 512², 8‑bit BMP | n/a | measured |
-| `grassShadingTex` | free; **defaults to the 1024² minimap** | n/a | `SMFReadMap.cpp:330-343` |
+| `grassShadingTex` | stretched over the whole map (§5.3); **defaults to the 1024² minimap** | n/a | `SMFReadMap.cpp:328-342` |
 | skybox (`atmosphere.skyBox`) | DDS **cubemap**, 2048²/face | n/a | measured (Boreal) |
 
 The public BAR guide ([File Structure & Prerequisites](https://www.beyondallreason.info/guide/mapping-1-file-structure-prerequisites))
-states the same numbers for heightmap (`64 x [yourmap size] + 1`), diffuse (`512 x`), normalmap
-(`512 x`, "1:1 with the texture"), specular (`256 x`) and grass (`16 x`). Its *metal* and *type*
-entries say "`16 x [yourmap size]`" but its own worked example contradicts that — "A 20x10 map has
+states the same numbers for heightmap ("A 20x10 map has a 1281 x 641 px heightmap. Calculate:
+64 x [yourmap size] + 1"), diffuse ("10240 x 5120 … Calculate: 512 x"), normalmap ("10240 x 5120 …
+1:1 with the texture"), specular ("at least a 5120 x 2560 px specularmap. Calculate: 256 x") and
+grass ("320 x 160 px (1/8 or 12.5% of the heightmap)" = `16 x`). Its *metal* and *type* entries say
+"Calculate: 16 x [yourmap size]" but its own worked example contradicts that — "A 20x10 map has
 a 640 x 320 px (1/4 or 25% of the heightmap)" = `32 x`. **Trust `32 x` (= `mapx/2`), which is what
 the engine reads.**
+
+The guide's DNTS entry ("A 20x10 map has a 2048 x 1024 px splatmap") also disagrees with the `128 x`
+rule (`128 × 20 = 2560`); it looks like a pow‑2 convenience figure. The measured pool follows
+`128 x` closely (Hooked 6×4 → 768×512; C2C 12×8 → 1536×1024; Altair 8×8 → 1024×1024; Boreal 14×14 →
+2048² rounded up from 1792). Either is fine — the sampler is stretched 0…1 either way.
+The guide's *Reflect map* section says only that it is "optional, and rarely used" and to consult
+Beherith for specifications — so the `skyReflectModTex = specularTex size` rule below rests on a
+single sample and is **UNVERIFIED — needs confirmation**.
 
 Raw measurements (dimensions read from the actual file headers inside the archives):
 
@@ -851,7 +980,8 @@ follows `512S / 256S / 128S` is strictly safer than the pool average.
 ### 5.5 Channel semantics
 
 **`splatDistrTex` (RGBA)** — per‑texel weights for the four DNTS layers.
-`SMFFragProg.glsl:176-187`:
+`GetSplatDetailTextureNormal`, `SMFFragProg.glsl:174-198` (the `normalize(mix(...))` line is in
+`main()` at `:328`):
 
 ```glsl
 vec4 splatCofac = texture2D(splatDistrTex, uv) * splatTexMults;
@@ -874,27 +1004,30 @@ Fallback if absent: `AllocDummy(SColor(255,0,0,0))` — all weight on channel R
 (`SMFReadMap.cpp:284-295`).
 
 **`splatDetailNormalTexN` (RGBA)** — RGB is a standard tangent‑space normal map in `[0,1]`
-(decoded `*2-1`); **A is the diffuse‑detail term** when
-`splatDetailNormalDiffuseAlpha` is truthy (`SMFFragProg.glsl:191-193`, define
-`SMF_DETAIL_NORMAL_DIFFUSE_ALPHA`), used as `detailCol = vec4(splatDetailStrength.y)` — a
-signed brightness offset added to the diffuse. Every BAR map sets
-`splatDetailNormalDiffuseAlpha = 1`.
+(decoded `*2-1`); **A is the diffuse‑detail term** when `splatDetailNormalDiffuseAlpha` is truthy
+(define `SMF_DETAIL_NORMAL_DIFFUSE_ALPHA`, set from `mapRendering->splatDetailNormalDiffuseAlpha` in
+`SMFRenderState.cpp:121`). The shader does
+`splatDetailStrength.y = clamp(splatDetailNormal.a, -1.0, 1.0)` (`SMFFragProg.glsl:191-193`) and then
+`detailCol = vec4(splatDetailStrength.y)` (`:323`) — a signed brightness offset added to the diffuse
+at `:381`. Note the alpha is *already weighted* by `splatCofac`, so it is a weighted sum, not a
+lookup. Every BAR map sets `splatDetailNormalDiffuseAlpha = 1`.
 
-Fallback per‑channel if a DNTS file fails to load (`SMFReadMap.cpp:310-318`):
+Fallback per‑channel if a DNTS file fails to load — a **1×1** RGBA bitmap
+(`SMFReadMap.cpp:310-316`):
 `{127, 127, 255, 127}` — "RGB is packed standard normal map… With a single upward (+Z) pointing
 vector. Alpha is diffuse as in old‑style detail textures."
 
-Note the tangent frame (`SMFFragProg.glsl:268-272`): "for a regular vertex normal equal to
+Note the tangent frame (`SMFFragProg.glsl:272-278`): "for a regular vertex normal equal to
 `<0,1,0>`, the S‑ and T‑tangents are aligned with Spring's +x and +z axes", i.e. **+Z of your
 normal map points up out of the terrain, +X is world +X, +Y is world +Z**. This is why the
 fallback is `(127,127,255)`.
 
-**`specularTex` (RGBA)** — `SMFFragProg.glsl:405-419`: RGB = specular colour, **A × 16.0 =
-specular exponent**. With no `specularTex`, `groundSpecularColor` and `groundSpecularExponent`
+**`specularTex` (RGBA)** — `SMFFragProg.glsl:403-424`: RGB = specular colour, **A × 16.0 =
+specular exponent** (`:413`). With no `specularTex`, `groundSpecularColor` and `groundSpecularExponent`
 from `mapinfo.lighting` are used instead. Fallback bitmap is opaque white
 (`AllocDummy(SColor(255,255,255,255))`, `SMFReadMap.cpp:202-205`).
 
-**`detailNormalTex` / `blendNormalsTex` (RGBA)** — `SMFFragProg.glsl:298-306`:
+**`detailNormalTex` / `blendNormalsTex` (RGBA)** — `SMFFragProg.glsl:299-307`:
 
 ```glsl
 vec4 dtSample = texture2D(blendNormalsTex, normTexCoords);
@@ -906,17 +1039,18 @@ RGB = tangent‑space normal, **A = blend strength against the heightmap normal*
 (as every BAR map ships) has no alpha ⇒ alpha reads as 1.0 ⇒ full replacement. If you want partial
 blending you need DXT5/RGBA.
 
-**`skyReflectModTex` (RGB)** — `SMFFragProg.glsl:343-347`:
+**`skyReflectModTex` (RGB)** — `SMFFragProg.glsl:341-350`:
 `diffuseCol.rgb = mix(diffuseCol.rgb, textureCube(skyReflectTex, reflectDir).rgb, reflectMod)`.
 Per‑channel reflectivity mask. Requires `atmosphere.skyBox` to be set for the cubemap to exist.
 No fallback texture — the feature is simply off if the file is missing
 (`SMFReadMap.cpp:211-218`, "no default 1x1 textures for these").
 
-**`lightEmissionTex` (RGBA)** — `SMFFragProg.glsl:393-400`:
+**`lightEmissionTex` (RGBA)** — `SMFFragProg.glsl:392-401`:
 `fragColor.rgb = fragColor.rgb * (1.0 - emissionCol.a) + emissionCol.rgb`. RGB = emitted colour,
 A = how much it occludes lit colour. Unshadowed glow.
 
-**`parallaxHeightTex` (RGBA)** — `SMFFragProg.glsl:124-139`, fully documented in the shader:
+**`parallaxHeightTex` (RGBA)** — `GetParallaxUVOffset`, `SMFFragProg.glsl:123-141`, fully
+documented in the shader:
 
 ```
 // RG: height in [ 0.0, 1.0] (256^2 strata)
@@ -935,7 +1069,13 @@ Fallback `AllocDummy(SColor(127,127,127,127))` = neutral.
 verbatim by four of the six maps.
 
 **`grassShadingTex`** — if absent, `grassShadingTex` *is* the minimap texture, declared as
-1024×1024 (`SMFReadMap.cpp:330-333`).
+1024×1024 (`CreateGrassTex`, `SMFReadMap.cpp:328-342`; the default is set at `:331-332` and a
+supplied bitmap simply replaces both id and size at `:340-341`). **Resolved:** it is sampled with
+`shadingTexCoords.pq = worldPos.xz * mapSize` where
+`mapSize = (1/(mapx*SQUARE_SIZE), 1/(mapy*SQUARE_SIZE))` (`GrassVertProg.glsl:155`,
+`GrassDrawer.cpp:329`, consumed at `GrassFragProg.glsl:45`) — i.e. **stretched once over the whole
+map, never tiled**, exactly like `specularTex`. A supplied texture should therefore have
+`mapx : mapy` aspect; its pixel size is free.
 
 ### 5.6 Colour space: everything is raw, nothing is sRGB
 
@@ -968,18 +1108,43 @@ A `texScale` of `0.02` means one tile repeat per 50 elmos; Boreal Falls uses
 `{0.0075, 0.013888, 0.001806, 0.001806}` (133 / 72 / 554 / 554 elmos per repeat) with
 `texMults = {0.437, 0.300, 0.23, 2.5}`.
 
-⚠ **The DNTS path needs `splatDetailTex` non‑empty even though it is unused.**
-`SMFReadMap.cpp:68-80`:
+⚠ **`splatDetailTex` placeholder: historically load‑bearing, no longer required on master.**
+
+Every BAR map sets a deliberately nonexistent placeholder —
+`splatDetailTex = "iwantDNTS.tga"` (Hooked, C2C, Altair, Boreal) or `"irrelevant.tga"`
+(Comet Catcher, re‑verified in its `mapinfo.lua:101`). The file genuinely does not exist in the
+archive; the engine logs *"Invalid SMF splatDetailTex … Creating fallback texture"* and carries on.
+
+The reason was `SMFReadMap.cpp:68-69`:
 
 ```cpp
+haveSpecularTexture           = !(mapInfo->smf.specularTexName.empty());
 haveSplatDetailDistribTexture = (!splatDetailTexName.empty() && !splatDistrTexName.empty());
 ```
 
-which is why every BAR map sets a deliberately nonexistent placeholder:
-`splatDetailTex = "iwantDNTS.tga"` (Hooked, C2C, Altair, Boreal) or `"irrelevant.tga"`
-(Comet Catcher). The file genuinely does not exist in the archive; the engine logs
-*"Invalid SMF splatDetailTex … Creating fallback texture"* and carries on. **Reproduce this
-placeholder** — it is load‑bearing.
+combined with an old early‑out in `CreateSplatDetailTextures()` that returned unless
+`haveSplatDetailDistribTexture` was true — so an empty `splatDetailTex` killed the DNTS path.
+
+**That was fixed.** On current master (`CreateSplatDetailTextures`, `SMFReadMap.cpp:249-325`, commit
+`510b1aea` *"Fix SMF DNTS gating and fallback textures"*, 2026‑07‑23) the gate is:
+
+```cpp
+if (!haveSplatDetailDistribTexture && !haveSplatNormalDistribTexture)
+    return;                                                   // :252-253
+if (haveSplatNormalDistribTexture && !haveSplatDetailDistribTexture)
+    LOG_L(L_DEBUG, "... DNTS active without complete classic splat pair; using fallback ...");
+```
+
+and both `splatDetailTex` (`:266-274`, dummy `SColor(127,127,127,127)`) and `splatDistrTex`
+(`:284-292`, dummy `SColor(255,0,0,0)`) now get fallback bitmaps when the name is empty *or*
+unloadable. The shader flag `SMF_DETAIL_NORMAL_TEXTURE_SPLATTING` only needs
+`GetSplatDistrTexture() != 0 && HaveSplatNormalTexture()` (`SMFRenderState.cpp:120`), which the dummy
+satisfies.
+
+**Practical advice, unchanged:** keep the placeholder. It costs nothing, it is what every pool map
+does, and BAR pins engine versions — a map that omits it breaks on any pre‑2026‑07 engine.
+What *is* genuinely load‑bearing is **`splatDistrTex`**: its fallback is `(255,0,0,0)`, i.e. all
+weight on channel R, so omitting it collapses your four DNTS layers into one.
 
 ---
 
@@ -1087,7 +1252,8 @@ to 117 kB (Hooked, ~1500 objects) to 42 kB (Altair).
 
 ### 6.4 Which features come from the game archive
 
-BAR ships only **nine** `features/*.lua` files (`gh api` tree of `Beyond-All-Reason@master`):
+BAR ships only **eight** `features/*.lua` files plus one disabled `.lua.test`
+(`gh api repos/beyond-all-reason/Beyond-All-Reason/contents/features`, read 2026‑09‑13):
 
 ```
 features/candycane.lua
@@ -1098,19 +1264,22 @@ features/raptor_egg.lua
 features/rocks30.lua
 features/tombstones.lua
 features/xmascomwreck.lua
-features/invalid_models.lua.test
+features/invalid_models.lua.test   <- .lua.test, so VFS.DirList("features/","*.lua") skips it
 ```
 
 * **Trees.** `features/enginetrees_override.lua` defines `treetype0` … `treetype15` (a 0‑A.D. fir
-  set by Beherith), overriding the engine's identical `cont/base/springcontent/features/treetype.lua`
-  (it only bumps `damage` from 5 to 250). So an SMF that places `TreeType0..15` works out of the
+  set, `model_author = "Beherith, 0 A.D."`), overriding the engine's otherwise identical
+  `cont/base/springcontent/features/treetype.lua` — the only changed value is `damage`, 5 → 250
+  (both files compared field by field; `energy` is 250 in both). So an SMF that places `TreeType0..15` works out of the
   box with no map‑side assets. The file's own comment: *"In theory it's possible to have treetype16
   or higher. However in practice Spring struggles to render tree types higher than 15… making maps
   with them really rare."*
 * **Rocks.** `features/rocks30.lua` generates `rocks30_{def,snow,moss,desert,map}_01..30` — 150
-  rock defs with `object = "rocks30/rocks30_<biome>_<nn>.s3o"`, ground decals, `randomrotate`,
-  `metal = 9 + i`, `damage = 100 + i*50`. **Use these instead of shipping your own rocks** — BAR
-  provides ~2 059 files under `objects3d/`.
+  rock defs (5 biomes × 30, `for i = 1, 30`) with `object = "rocks30/rocks30_<biome>_<nn>.s3o"`,
+  ground decals (`decalinfo_texfile`), `randomrotate`, `metal = 9 + i`, `damage = 100 + i*50`,
+  `footprintX/Z = floor(i/8) + 1`. **Use these instead of shipping your own rocks.** (The claim that
+  BAR provides ~2 059 files under `objects3d/` was not re‑counted —
+  **UNVERIFIED — needs confirmation**.)
 * **Geo vents.** `features/geovent.lua` provides `editor_geovent` / `editor_geocrack`
   (`geothermal = true`). Historically the name in SMF feature tables is `GeoVent`; BAR's file notes
   it deliberately uses `editor_*` names "so maps that ship their own `geovent`/`geocrack`/`geo.dds`
@@ -1132,7 +1301,7 @@ There are **no map wrecks** in the modern BAR pool — none of the six archives 
 
 ### 7.1 The ground truth is the SMF metalmap
 
-`CReadMap::LoadMap()` (`rts/Map/ReadMap.cpp:162-170`):
+`CReadMap::LoadMap()` (`rts/Map/ReadMap.cpp:162-167`):
 
 ```cpp
 unsigned char* metalmapPtr = rm->GetInfoMap("metal", &mbi);
@@ -1141,7 +1310,8 @@ assert(mbi.height == mapDims.hmapy);      // mapy / 2
 metalMap.Init(metalmapPtr, mbi.width, mbi.height, mapInfo->map.maxMetal);
 ```
 
-and `CMetalMap::GetMetalAmount` (`rts/Map/MetalMap.cpp:76-83`):
+and `CMetalMap::GetMetalAmount` (`rts/Map/MetalMap.cpp:76-83`; `metalScale` is set in
+`CMetalMap::Init`, `:29-44` — note it is forced to `1.0f` when the source pointer is null):
 
 ```cpp
 return distributionMap[(z * sizeX) + x] * metalScale;   // metalScale == mapInfo->map.maxMetal
@@ -1153,7 +1323,9 @@ So:
   (`Game.metalMapSquareSize == 16`).
 * Each cell is one byte, `0…255`.
 * Metal income per cell = `byte × mapinfo.maxMetal`. `maxMetal` defaults to `0.02`
-  (`MapInfo.cpp:105`, `mapdefaults.lua:21`).
+  (`MapInfo.cpp:106`, `cont/base/maphelper/maphelper/mapdefaults.lua:21`) and is clamped to
+  `>= 0` (`MapInfo.cpp:115`). `extractorRadius` defaults to `500.0` (`MapInfo.cpp:107`,
+  `mapdefaults.lua:22`).
 * Authoring format is an **8‑bit RGB BMP where only the red channel matters**; the BAR guide says
   *"Full RED (255,0,0) is max metal. Preferably use a sharp pixel pen with the exact color‑value you
   want with a 4px radius dots (no anti‑aliasing/smoothing)."*
@@ -1187,8 +1359,9 @@ There is no spot list to emit for the engine or for maps‑metadata.
 
 ### 7.3 The Lua escape hatch: `mapconfig/map_metal_layout.lua`
 
-BAR's `luarules/gadgets/map_metal_spot_placer.lua` ("Places metal spots according to lua metal map",
-raaar, 2017) lets a map declare spots in Lua **only when the SMF metalmap is empty**:
+BAR's `luarules/gadgets/map_metal_spot_placer.lua` ("Map Lua Metal Spot Placer" / "Places metal spots
+according to lua metal map", raaar, 2017, `layer = -10`, synced) lets a map declare spots in Lua
+**only when the SMF metalmap is empty**:
 
 ```lua
 local MAPSIDE_METALMAP = "mapconfig/map_metal_layout.lua"
@@ -1251,7 +1424,8 @@ cloud/map-parser/          <- Cloud Run service that parses an sd7 into images +
 cloud/serving/             <- Cloudflare worker serving gen/ + imagor image proxy
 cloud/rowy/functions/      <- Rowy (Firestore) hooks
 cloud/github-trigger/      <- "Open PR" button backend
-gen/                       <- build output (gitignored)
+gen/                       <- build output directory; empty in the repo, populated by `make`
+                              (it is NOT listed in .gitignore)
 Makefile                   <- the whole build/validate/deploy graph
 ```
 
@@ -1447,10 +1621,18 @@ JSON and TMD upload.
 | `check_startpos.ts` | §7.4 rules |
 | `typecheck_scripts` | `tsc --noEmit` |
 
-`derived_map_info.ts` additionally **throws** if any of `width, height, mapHeightMin, mapHeightMax,
-windMin, windMax, tidalStrength, voidWater, tags, terrainOrdered, minPlayerCount` is missing — so
-`mapinfo.atmosphere.minWind/maxWind` and `tidalStrength` must be present (or inherit sane
-defaults).
+`derived_map_info.ts` builds an `info` object and **throws** `Missing value for map X key K` if any
+key is `undefined` or `''`, skipping only `windAvg` and `version`
+(`scripts/js/src/derived_map_info.ts:126-152`). In practice only one field can actually be missing:
+
+* `windMin` / `windMax` — wrapped in `orDefault(…, 5)` / `orDefault(…, 25)` (`:132-133`), so they
+  are **not** required in `mapinfo.lua`.
+* `voidWater` — `orDefault(…, false)` (`:140`), also not required.
+* `minPlayerCount` — falls back to `Math.ceil(playerCount * 0.6)` (`:142`).
+* **`tidalStrength` has no default** (`:138`) — `meta.mapInfo.tidalstrength` must be present in
+  `mapinfo.lua` or the maps‑metadata build fails.
+
+`width`/`height`/`mapHeightMin`/`mapHeightMax` come from the parsed archive, not from you.
 
 ### Step 5 — automatic fan‑out on merge
 
@@ -1480,12 +1662,23 @@ Full `gen/` target list from the `Makefile`: `map_list.validated.json`, `mapDeta
 
 ### 9.1 Inside the archive
 
-* **The engine minimap lives in the `.smf`**: 1024×1024 DXT1 with 8 further mip levels, 699 048
-  bytes at `minimapPtr` (§4.2). The map compiler generates it from the diffuse; the BAR guide notes
-  it *"sometimes requires lightening with pymapconv"*.
+* **The engine minimap lives in the `.smf`**: 1024×1024 DXT1 with 8 further mip levels
+  (`MINIMAP_NUM_MIPMAP = 9` total), 699 048 bytes at `minimapPtr` (§4.2). It is uploaded level by
+  level with `glCompressedTexImage2DARB(..., GL_COMPRESSED_RGBA_S3TC_DXT1_EXT, mipsize, mipsize, ...)`
+  where `mipsize = 1024 >> i` and `size = ((mipsize+3)/4)² * 8` (`SMFReadMap.cpp:183-189`), so the
+  chain must be exactly 9 levels, 1024² down to 4², tightly packed.
+  pymapconv builds it by resizing the main texture to 1024×1024 with LANCZOS unless `-p/--minimap`
+  supplies a custom image, then compresses with `dxt1a` "else we can get spurious alpha pixels"
+  (`pymapconv.py:481-504`), and writes `minimapdata[:MINIMAP_SIZE]` — *"dont even write more than
+  needed, or else produced map will crash!"* (`:1057`).
+  The BAR **Map Checklist** says the minimap is *"sometimes required to lighten in a bit, use
+  pymapconv"* — note there is **no explicit lighten/brighten flag** in `pymapconv.py`'s argument
+  parser (`:1356-1447`); the intended workflow is presumably to brighten the source texture or feed
+  a pre‑lightened image via `-p/--minimap`. **UNVERIFIED — needs confirmation.**
 * `mapinfo.smf.minimapTex` can override it with an external file
-  (`MapInfo.cpp:411`, loaded via `CBitmap::Load` → `CreateTexture`, `SMFReadMap.cpp:161-169`).
-  **No BAR pool map uses this.**
+  (`MapInfo.cpp:411`, loaded via `CBitmap::Load` → `CreateTexture`, `SMFReadMap.cpp:161-170`);
+  unlike the metal/type/grass overrides there is **no dimension check**. **No BAR pool map uses
+  this.**
 * Loose preview images *do* get shipped but nothing reads them: Comet Catcher has
   `maps/mini.png` (1024×1024 PNG, 1.4 MB) and `maps/mini.dds` (1024×1024 DXT1 + 9 mips,
   = `MINIMAP_SIZE` + 128 B DDS header); Boreal Falls has `maps/BorealFalls.jpg` (1024×1024 JPEG)
@@ -1592,11 +1785,12 @@ local mapinfo = {
   },
 
   atmosphere = {
-    minWind = 5, maxWind = 25,                     -- BAR checklist: 0..30
-    fogStart = 0.6, fogEnd = 0.95,
+    minWind = 5, maxWind = 25,                     -- BAR checklist: 0..30; engine defaults 5/25
+    fogStart = 0.6, fogEnd = 0.95,                 -- engine defaults are 0.1 / 1.0
     fogColor = {0.5,0.5,0.5}, skyColor = {0.43,0.58,0.64},
     sunColor = {1.0,0.92,0.78}, cloudColor = {0.9,0.9,0.9},
-    skyDir = {0,0,-1},
+    -- skyDir = {0,0,-1},                          -- DEPRECATED: logged as L_DEPRECATED and ignored
+    -- skyAxisAngle = {0,0,1, 0},                   -- use this instead (MapInfo.cpp:145-161)
     skyBox = "MyMap_Skybox.dds",                   -- DDS CUBEMAP, 2048^2/face
   },
 
@@ -1622,26 +1816,41 @@ end
 return mapinfo
 ```
 
-Engine defaults worth knowing (`rts/Map/MapInfo.cpp`, `cont/base/maphelper/maphelper/mapdefaults.lua`):
-`maphardness 100`, `gravity 130`, `tidalStrength 0`, `maxMetal 0.02`, `extractorRadius 500`,
-`voidAlphaMin 0.9`, `minWind 5 / maxWind 25`, `splats.texScales {0.02…}`, `texMults {1.0…}`,
-`grass.bladeWidth 0.7 / bladeHeight 4.5 / bladeAngle 1.0 / maxStrawsPerTurf 150`,
-`lighting.specularExponent 100`.
+Engine defaults worth knowing, all from `rts/Map/MapInfo.cpp` (the authority — `mapdefaults.lua` is
+a *legacy TDF* default table and disagrees in places, see below):
+`maphardness 100` (`:98`), `gravity 130` (`:101`), `tidalStrength 0` (`:105`), `maxMetal 0.02`
+(`:106`), `extractorRadius 500` (`:107`), `voidAlphaMin 0.9` (`:108`), `voidWater/voidGround false`
+(`:109-110`), `autoShowMetal true` (`:124`), `minWind 5 / maxWind 25` (`:135-136`),
+`fogStart 0.1 / fogEnd 1.0` (`:138-139`), `cloudDensity 0.5` (`:166`),
+`splats.texScales {0.02,…} / texMults {1.0,…}` (`:181-182`),
+`grass.bladeWidth 0.7 / bladeHeight 4.5 / bladeAngle 1.0 / maxStrawsPerTurf 150` (`:192-195`),
+`lighting.specularExponent 100` (`:222`).
+
+⚠ Do **not** read grass defaults out of `mapdefaults.lua`: it lists
+`grassBladeWidth 0.32 / grassBladeHeight 4.0 / grassBladeAngle 1.57` (`:85-90`) under *different key
+names* from the ones `CMapInfo::ReadGrass()` actually reads (`bladeWidth`, `bladeHeight`,
+`bladeAngle`). The engine's values above are what applies. `mapdefaults.lua` agrees with the engine
+on `hardness/gravity/tidalStrength/maxMetal/extractorRadius` (`:18-22`) and on `splats` (`:92-95`).
 
 ---
 
 ## 11. Gotchas checklist for a map builder
 
-1. **`-ms=off`.** Solid `.sd7` = rejected by CI and (by design) by the engine.
+1. **`-ms=off`.** Solid `.sd7` = rejected by BAR CI (empty whitelist). The engine's own rejection is
+   currently dormant (§1.4) but a solid archive is still read single‑threaded.
 2. **No password, no `-mhe=on`, no PPMd, no bzip2‑in‑zip.** No AES decoder is compiled in.
-3. **`mapinfo.lua` at the archive root**, `modtype = 3`, and **no `modinfo.lua`**.
+3. **`mapinfo.lua` at the archive root** and `modtype = 3`. A stray `modinfo.lua` alongside it is
+   ignored (mapinfo wins, `ArchiveScanner.cpp:753-766`) but ship neither it nor a game archive's
+   layout.
 4. **Set `mapfile = "maps/<Name>.smf"`** — otherwise the scanner logs a warning and linear‑scans.
 5. **Exactly one `.smf`.** `SearchMapFile` takes the first match in archive order.
 6. **The `.smt` name inside the `.smf` must resolve** as `maps/<that name>`, or the map renders
-   solid red (`memset(..., 0xaa, ...)`).
-7. **`splatDetailTex` must be a non‑empty string** even in a pure‑DNTS map, or
-   `haveSplatDetailDistribTexture` is false and the splat path is skipped. Use the community
-   placeholder `"iwantDNTS.tga"` (the file need not exist).
+   solid red (`memset(..., 0xaa, ...)`). Max 254 bytes — the read buffer is `char[256]`
+   (`SMFGroundTextures.cpp:134`).
+7. **`splatDistrTex` is the one you cannot omit** — its fallback is `(255,0,0,0)`, all weight on
+   DNTS layer 1. `splatDetailTex` only *used* to be mandatory for the DNTS path; master fixed that
+   in `510b1aea` (§5.7). Still ship the community placeholder `"iwantDNTS.tga"` (the file need not
+   exist) for compatibility with pinned older engines.
 8. **`parallaxHeightTex` must be exactly the same dimensions as `specularTex`** — the shader
    indexes both with `specTexCoords` and the offset rescale assumes equal size.
 9. **Keep aspect ratios `mapx : mapy`** on specular / normal / splat‑distribution / reflect /
@@ -1661,14 +1870,22 @@ Engine defaults worth knowing (`rts/Map/MapInfo.cpp`, `cont/base/maphelper/maphe
     `cdn_maps.yaml`'s `^[^ ]+\.(sd7|sdz)$` and by 226/226 pool convention.
 16. **Springname must be globally unique and exactly reproducible** (`name + " " + version`); the
     CDN worker 400s on an ambiguous or mismatching springname.
-17. **`atmosphere.minWind` / `maxWind` / `tidalStrength` must be present** or
-    `derived_map_info.ts` throws during the maps‑metadata build.
+17. **`tidalStrength` must be present** or `derived_map_info.ts` throws during the maps‑metadata
+    build. `minWind`/`maxWind`/`voidWater` have defaults there (5 / 25 / false) and are not strictly
+    required — but set them anyway; the BAR checklist ranges are wind 0..30, tidal 0..25.
 18. **Map size hard limit for the pool:** *"Maps larger than 32x32 or 32 in any dimension will not
-    be accepted."* (`mapx` divisible by 128 is the engine constraint; `mapx ≤ 2048`.)
+    be accepted."* (BAR Map Checklist) — i.e. `mapx ≤ 2048`. The engine constraint is separate:
+    `mapx`/`mapy` must be multiples of **128** (`bigSquareSize = 32 * tileScale`,
+    `SMFReadMap.h:181-182`), and this is *not* validated by `CheckHeader` — a bad value just
+    truncates the big‑texture grid.
 19. **`maphelper/mapinfo.lua`** inside the map is legacy and optional — but if you ship one, ship
     the exact 412‑byte shim, not a copy of your mapinfo.
 20. **Case collisions.** The VFS index is lower‑cased; `Rock.tga` and `rock.tga` in the same
     archive is undefined behaviour.
+21. **Don't collide with game content.** `FIND_MAP_TEXTURE` probes `SPRING_VFS_ZIP`, which spans the
+    *game* archive too, so a bare path that also exists in BAR resolves to BAR's copy (§5.1).
+22. **Strip `desktop.ini` / `Thumbs.db`.** They don't start with `.`, so the checksum ignore filter
+    misses them and they ship to every player (Comet Catcher carries six).
 
 ---
 
@@ -1723,3 +1940,107 @@ Measured artefacts (downloaded 2026‑09‑13 from `files-cdn.beyondallreason.de
 `py7zr` 1.1.3): `comet_catcher_remake_1.8.sd7`, `hooked_1.1.1.sd7`, `speedmetal_bar_v2.sd7`,
 `coast_to_coast_bar_v1.0.sd7`, `altair_crossing_v4.1.sd7`, `boreal_falls_1.0.2.sd7`; plus the
 `/find` responses for all 226 `springName`s in `map_list.yaml`.
+
+Map compiler (github.com/**Beherith/springrts_smf_compiler** — note: *not* `Beherith/Spring_SMF_compiler`,
+which 404s; CC0‑1.0, default branch `master`, last push 2026‑06‑24):
+* `src/pymapconv.py` (:38‑79 struct definitions, :88 `MINIMAP_SIZE`, :481‑504 minimap generation,
+  :734‑736 hardcoded `featuretypes`, :1050‑1069 SMF write order, :1356‑1447 CLI arguments)
+* `resources/geovent.bmp`, `src/springrts_smf_minimapper.py`, `src/tree_placer_springrts.py`,
+  `src/springboard_model_lua_to_set_lua_feature_dumper.py`
+
+---
+
+## Verification log
+
+Adversarial re‑check performed 2026‑09‑13. Every engine file below was fetched raw from
+`raw.githubusercontent.com/beyond-all-reason/RecoilEngine/master/…` with `curl` and read in full;
+line numbers in this document have been corrected to match those exact files. Repository
+`beyond-all-reason/maps-metadata` was cloned at `main`. `comet_catcher_remake_1.8.sd7` was
+re‑downloaded from the CDN and re‑parsed independently.
+
+| # | Claim | Source checked | Verdict |
+|---:|---|---|---|
+| 1 | `SMFHeader` is 80 B, LE, with the exact field order in §4.1 | `rts/Map/SMF/SMFFormat.h:49-70`; independently `pymapconv.py:38` (`'< 16s i i i i i i i f f i i i i i i i'`) | **confirmed** (two independent sources) |
+| 2 | `MINIMAP_SIZE = 699048`, `MINIMAP_NUM_MIPMAP = 9`, `SMALL_TILE_SIZE = 680` | `SMFFormat.h:28`, `:31`, `:34`; `pymapconv.py:88` | **confirmed** |
+| 3 | `ExtraHeader = {int32 size; int32 type;}`, `MEH_Vegetation = 1`; the vegetation variant adds `int32 pos` | `SMFFormat.h:83-86`, `:103`; `SMFMapFile.cpp:239-270`; `pymapconv.py:60` (`'< i i i'`) | **confirmed** |
+| 4 | `MapTileHeader` 8 B, `MapFeatureHeader` 8 B, `MapFeatureStruct` 24 B, `TileFileHeader` 32 B | `SMFFormat.h:123-127`, `:135-139`, `:148-157`, `:175-183` | **confirmed** (doc's line refs corrected) |
+| 5 | Header validation rejects `version != 1`, `tilesize != 32`, `texelPerSquare != 8`, `squareSize != 8`, bad magic | `SMFMapFile.cpp:16-28` | **confirmed**; **corrected**: divisibility of `mapx`/`mapy` is *not* validated — the 128 constraint comes from `SMFReadMap.h:181-182` + `SMFReadMap.cpp:120` |
+| 6 | Info‑map sizes `height (mapx+1,mapy+1)`, `grass /4`, `metal /2`, `type /2` | `SMFMapFile.cpp:193-203` | **confirmed** |
+| 7 | Comet Catcher `.smf` byte budget in §4.2 reproduces every stored pointer and EOF | re‑downloaded `comet_catcher_remake_1.8.sd7` (md5 `478e53f181d0940b76d028411093b47a`) and re‑parsed with Python `struct` | **confirmed exactly**, incl. `mapid 509`, `ExtraHeader (12,1,92)`, `MapTileHeader (1,49153)`, 17 feature‑type names = 174 B, EOF 2 914 770 |
+| 8 | `.smt` = 32 + numTiles×680 = 33 424 072 | archive entry size for `maps/CCRXR.smt` | **confirmed** |
+| 9 | Five archive factories keyed on lowercase extension; `ARCHIVE_TYPE_*` values | `ArchiveLoader.cpp:19-34`, `:50`, `:65`; `ArchiveTypes.h:6-14` | **confirmed**; **added**: `CNT=5`, `BUF=6`; extension comes from `GetDefaultExtension()` |
+| 10 | PPMd is not compiled in; accepted main coders Copy/LZMA/LZMA2; folder shapes 1/2/4 coders; no AES | pr‑downloader `src/lib/7z/7zDec.c:8`, `:23-37`, `:41`, `:279-294`, `:306-373`; `src/lib/7z/CMakeLists.txt` | **confirmed**; line ranges **corrected** |
+| 11 | Engine's `7zip` target is pr‑downloader's vendored SDK | `rts/CMakeLists.txt:88`, `rts/System/FileSystem/Archives/CMakeLists.txt:45` | **confirmed** |
+| 12 | 7z filename buffer 2048 UTF‑16 units; per‑file size cast to `int`; dirs skipped; `lcNameIndex` lower‑cased | `SevenZipArchive.cpp:72-90`, `:140-142`, `:152`, `:157` | **confirmed** |
+| 13 | `considerSolid` heuristic and `parallelAccessNum` | `SevenZipArchive.cpp:166-168`; `SevenZipArchive.h` (`CheckForSolid() override { return considerSolid; }`) | **confirmed** |
+| 14 | `HasLowReadingCost()` has no override anywhere ⇒ engine class‑1 rejection dormant | GitHub code search `HasLowReadingCost repo:beyond-all-reason/RecoilEngine` → only `IArchive.h:131` (base) and the call site in `ArchiveScanner.cpp` | **confirmed** (open question resolved) |
+| 15 | Class‑1/class‑2 meta files and dirs | `ArchiveScanner.cpp:103-112` (files), `:114-120` (dirs), `CheckCompression` `:571-599` | **confirmed** |
+| 16 | minizip: `-DNOCRYPT -DNOUNCRYPT`; bzip2 falls through to `raw=1`; `unzOpen` is 32‑bit; 512‑byte name buffer | `rts/lib/minizip/CMakeLists.txt:21`; `unzip.c:1402-1408`, `:1420-1446`, `:698-700`; `ZipArchive.cpp:44`, `:63` | **corrected** (CMake line 21, not 23; the defines are only added in the `else(MINIZIP_FOUND)` branch) |
+| 17 | Checksum = XOR over `sha512(lc(name))` and `sha512(content)`; ignore filter `^\..*$` + `springignore.txt` | `ArchiveScanner.cpp:959-971`, `:1011-1087` | **confirmed**; **added**: XOR is order‑independent, and non‑dot junk (`desktop.ini`) is *not* filtered |
+| 18 | `mapinfo.lua` presence makes the archive a map; `Map Helper v1` auto‑dependency; `modType = modtype::map` | `ArchiveScanner.cpp:745-746`, `:753-766`, `:784-796`; `ArchiveScanner.h` `GetMapHelperContentName()`; `cont/base/maphelper/modinfo.lua` | **confirmed** |
+| 19 | Behaviour when both `mapinfo.lua` and `modinfo.lua` are present | `ArchiveScanner.cpp:753-766` (`if (hasMapInfo) … else if (hasModInfo)`) | **corrected** — not ambiguous: `mapinfo.lua` wins outright and `modinfo.lua` is never executed (open question resolved) |
+| 20 | springname = `name .. " " .. version` unless version already substrings name | `ArchiveScanner.cpp:187-197` | **confirmed**; **caveat added** about `name_pure` aliasing at `:199-200` |
+| 21 | `knownTags`, `modtype 3 = map` | `ArchiveScanner.cpp:74-87` (`std::array<KnownInfoTag, 12>`) | **confirmed** |
+| 22 | `SearchMapFile()` returns the first `.smf`; `mapfile` warning; `MapNameToMapFile` | `ArchiveScanner.cpp:601-615`, `:756-761`, `:1652-1663` | **confirmed** |
+| 23 | `.sdd` is the only type whose lua‑info mtime is re‑checked | `ArchiveScanner.cpp:814-818` | **confirmed** |
+| 24 | `MapParser` picks `mapinfo.lua` over the base archive's `maphelper/mapinfo.lua`; injects `Map.fileName/fullName/configFile` | `MapParser.cpp:19`, `:23-33`, `:37`, `:41-43`; `cont/base/maphelper/maphelper/mapinfo.lua:65-89` | **confirmed** |
+| 25 | `FIND_MAP_TEXTURE` = "verbatim path if it exists in `SPRING_VFS_ZIP`, else `maps/` + path"; `detailTex` falls back to `bitmaps/` | `MapInfo.cpp:35-44`, `:378-382` | **confirmed**; **corrected**: the doc's `bitmaps/foam.jpg` example resolves against the *game* archive, not Comet Catcher's own `bitmaps/` (which contains `Foam.tga`) |
+| 26 | The nine `resources` string keys and their field bindings, incl. `detailNormalTex → blendNormalsTexName` | `MapInfo.cpp:361-371` | **confirmed** |
+| 27 | DNTS accepts nested (`splatDetailNormalTex = {…, alpha = true}`) and flat (`splatDetailNormalTex1..4`) spellings; capped at 4 | `MapInfo.cpp:384-400`; `SMFReadMap.cpp:304-306`; `SMFReadMap.h:183` (`NUM_SPLAT_DETAIL_NORMALS = 4`) | **confirmed** |
+| 28 | `smf = {…}` overrides; metal/type/grass must match info‑map size exactly | `MapInfo.cpp:404-428`; `SMFReadMap.cpp:924-970` | **confirmed**; **added**: `smtFileName*` is *not* run through `FIND_MAP_TEXTURE`, and `minimapTex` has no size check |
+| 29 | `specularTexGen == normalTexGen == 1/(mapx*8)`; all full‑map samplers are stretched 0…1 | `SMFRenderState.cpp:185`, `:191`, `:193`; `SMFReadMap.cpp:388`; `SMFFragProg.glsl:262-265` | **confirmed** |
+| 30 | `splatDetailTex` must be non‑empty for the DNTS path | `SMFReadMap.cpp:249-325` on master + commit `510b1aea` "Fix SMF DNTS gating and fallback textures" (2026‑07‑23) | **corrected** — no longer true on master; both `splatDetailTex` and `splatDistrTex` now get fallback dummies. Advice kept for older pinned engines |
+| 31 | Shader channel semantics: `splatCofac` R→tex1…A→tex4; `specularCol.a * 16` = exponent; `dtSample.a` = blend; parallax RG/B/A packing; emission `1-a` mix | `SMFFragProg.glsl:174-198`, `:299-307`, `:323`, `:328`, `:341-350`, `:392-401`, `:403-424`, `:123-141` | **confirmed**; all line refs **corrected** |
+| 32 | Tangent frame: S‑tangent ≙ world +x, T‑tangent ≙ world +z, normal ≙ up | `SMFFragProg.glsl:272-278` (`mat3(sTangent, tTangent, normal)`) | **confirmed** |
+| 33 | No sRGB anywhere in the map texture path | GitHub code search `SRGB repo:beyond-all-reason/RecoilEngine path:rts/Map` → 0 hits; `grep -i srgb Bitmap.cpp` → 0 hits; `Bitmap.cpp:1181-1185` int‑format table | **confirmed** |
+| 34 | `grassShadingTex` sampling coordinates | `GrassVertProg.glsl:155` (`shadingTexCoords = worldPos.xzxz * vec4(mapSizePO2, mapSize)`), `GrassDrawer.cpp:329` (`mapSize = 1/(mapx*SQUARE_SIZE), 1/(mapy*SQUARE_SIZE)`), `GrassFragProg.glsl:45` (`.pq`) | **resolved (was an open question)** — stretched over the whole map, not tiled |
+| 35 | `splats` defaults `{0.02…}` / `{1.0…}`; `maxMetal 0.02`; `extractorRadius 500`; `gravity 130`; `specularExponent 100` | `MapInfo.cpp:106-107`, `:101`, `:181-182`, `:222`; `mapdefaults.lua:18-22`, `:92-95` | **confirmed**; **corrected**: the grass defaults cited in §10 are `MapInfo.cpp`'s, *not* `mapdefaults.lua`'s (which uses different key names and different numbers) |
+| 36 | `atmosphere.skyDir` | `MapInfo.cpp:145-147` — logs `L_DEPRECATED`, "was never used and now deprecated, use atmosphere.skyAxisAngle instead" | **corrected** — removed from the recommended skeleton |
+| 37 | Metal map is `mapx/2 × mapy/2`, one byte, `amount = byte × maxMetal` | `ReadMap.cpp:162-167`; `MetalMap.cpp:29-44`, `:76-82` | **confirmed** |
+| 38 | `mapconfig/map_metal_layout.lua`: only when the SMF metalmap is blank; 21‑cell plus at `metal × 0.43 × 9/21 × 255` | `luarules/gadgets/map_metal_spot_placer.lua:24-90` (BAR@master) | **confirmed**; **added** `layer = -10` |
+| 39 | `api_resource_spot_finder.lua` layer `-9`, hidden, publishes `mex_*` rules params, geo via `geoThermal`, metal‑map allowlist | `common/upgets/api_resource_spot_finder.lua:1-40`, `:94`, `:211-221` | **confirmed** |
+| 40 | Engine trees vs BAR override differ only in `damage` (5 → 250) | `cont/base/springcontent/features/treetype.lua` vs `features/enginetrees_override.lua` | **confirmed** |
+| 41 | BAR ships nine `features/*.lua` | `gh api …/contents/features` → 8 `.lua` + `invalid_models.lua.test` | **corrected** to eight |
+| 42 | `rocks30.lua` generates 150 defs, `metal = 9+i`, `damage = 100+i*50` | `features/rocks30.lua` | **confirmed** |
+| 43 | `gamedata/featuredefs.lua` merges `features/*.lua` from the map archive; `VFS_MODES = VFS.MAP..VFS.MOD..VFS.BASE` | `gamedata/featuredefs.lua`, `gamedata/defs.lua:23` | **confirmed** |
+| 44 | `map_list.yaml` has 226 maps; required fields; `terrain`/`gameType` enums; startboxes 0…200 ints; `maxPlayersPerStartbox` 1…16 | cloned `maps-metadata@main`: `map_list.yaml`, `schemas/map_list.yaml` | **confirmed** |
+| 45 | `cdn_maps.yaml` filename pattern `^[^ ]+\.(sd7\|sdz)$` | `schemas/cdn_maps.yaml` | **confirmed** |
+| 46 | `check_archive_not_solid.ts` whitelist empty; `check_uses_mapinfo_lua.ts` whitelist = `{Mescaline_V2}` | both files | **confirmed** |
+| 47 | `check_photo_aspect_ratio.ts` tolerance ±0.75 map units at `fit-in/512x512` | that file | **confirmed** |
+| 48 | `check_startboxes.ts` rules (one config per team count; `a.x<b.x && a.y<b.y`; `|2A| ≥ 1`; `boxes × maxPlayers ≤ playerCount`) | that file | **confirmed** |
+| 49 | `derived_map_info.ts` throws on missing `windMin/windMax/tidalStrength` | `derived_map_info.ts:126-152` | **corrected** — only `tidalStrength` lacks a default; wind defaults to 5/25, `voidWater` to false |
+| 50 | Version regex `/[_\s][vV]?(\d+(?:\.\d+)*)$/` and leading‑`v` strip | `derived_map_info.ts:52-72` | **confirmed** |
+| 51 | `gen_map_boxes_conf.ts` key is `${springName}.smf:${nBoxes}` | that file | **confirmed** |
+| 52 | Startbox modoption = `base64url(zlib(json))` with padding stripped; resolution order override → exact → larger → smaller; `scale = mapSize/200` | `gen_map_modoptions.ts:9-13`; `luarules/gadgets/include/startbox_utilities.lua:112-131`, `:168-169` | **confirmed** |
+| 53 | `parse-worker.ts` shells `7za l -x!* <archive>` and parses `Solid = +/-`; `.sdz` ⇒ false; `spring-map-parser ^6.4.2`; cache `cache-v3`; output file list | `cloud/map-parser/src/parse-worker.ts:19-48`, `:93-103`, `:113-160`; `src/shared.ts:4`; `package.json` | **confirmed** |
+| 54 | CDN worker: `result.length > 1` ⇒ 400, springname mismatch ⇒ "Non‑deterministic springname requested" | `beyond-all-reason/maps-hosting` `lib/index.ts:43-67`, `fetcher/src/index.ts` | **confirmed** |
+| 55 | The `/find` response shape and Comet Catcher's exact record | live query to `files-cdn.beyondallreason.dev/find?category=map&springname=Comet%20Catcher%20Remake%201.8` | **confirmed** byte for byte, incl. `size: 41565457` |
+| 56 | CI jobs, MQTT topic, `gen/` target list, `sync_map.yaml` cron `0 5 * * *` | `.github/workflows/ci.yaml`, `.github/workflows/sync_map.yaml`, `Makefile:2`, `:55-62` | **confirmed**; **corrected**: `gen/` is not gitignored, just empty in the repo |
+| 57 | BAR guide dimension formulas and the metal/type `16 x` vs `32 x` contradiction | beyondallreason.info/guide/mapping-1-file-structure-prerequisites | **confirmed**, with the exact quotes now inlined; **added**: the guide's DNTS splatmap figure (2048×1024 for 20×10) also disagrees with `128 x` |
+| 58 | "Maps larger than 32x32 or 32 in any dimension will not be accepted"; wind 0‑30; tidal 0‑25; "sometimes required to lighten in a bit, use pymapconv" | beyondallreason.info/guide/map-checklist | **confirmed** (all four quoted verbatim) |
+| 59 | pymapconv writes the `TreeType0..15`/`GeoVent` table unconditionally | `Beherith/springrts_smf_compiler`, `src/pymapconv.py:734-736`, `:1067-1069` | **resolved (was an open question)** — the list is a module‑level constant and all 17 names are always written; `numFeatureType` is always 17 |
+| 60 | pymapconv CLI flags / minimap "lighten" option | `src/pymapconv.py:1356-1447` | **partially resolved** — full flag list read (`-o -t -a -m -x -n -g -k -j -f -r -y -p -l -z -w -q -u -v -c --normalizemetal --specularscale --splatdistributionscale --highresheightmapfilter --numthreads -d -s`); **there is no lighten/brighten flag** |
+
+### Still UNVERIFIED after this pass
+
+1. **The exact 7‑Zip command line BAR map authors use.** `gh search code "org:beyond-all-reason
+   \"-ms=off\""` and `"7z a"` both return nothing; neither public guide documents packing. The flag
+   set in §0/§1.5 is *inferred* from the measured archive shape (LZMA2, non‑solid, one folder per
+   file). Dictionary size, `fb`, `mt`: unknown.
+2. **`lightEmissionTex` and `parallaxHeightTex` real‑world authored sizes/encodings.** No pool map
+   uses either; everything in §5.4/§5.5 for them comes from the shader alone.
+3. **`skyReflectModTex` sizing.** One data point (Boreal Falls). The public guide explicitly defers
+   to Beherith ("optional, and rarely used").
+4. **`maps/<mapname>/` as a texture subfolder.** Legal under `FIND_MAP_TEXTURE`, observed in zero
+   pool maps; a code search of `Spring-SpringBoard/SpringBoard-Core` for an `.sd7` exporter returned
+   nothing.
+5. **CDN/springfiles filename normalisation.** All 226 stored filenames are lowercase with
+   underscores, but no code path was found that performs the transformation; it may simply be
+   uploader convention.
+6. **Whether `CreateIgnoreFilter`'s `^\..*$` matches full VFS paths or only basenames** (i.e. is
+   `maps/.foo` ignored?). Not traced into `IFileFilter`.
+7. **`~2 059 files under objects3d/`** in the BAR game archive — not re‑counted.
+8. **`name_pure` aliasing** in `ArchiveScanner::ArchiveData::ArchiveData` — read from source, not
+   executed.
+9. **The `special` field in `map_list.yaml`** is `type: string` with no further constraint and no
+   consumer found; the Rowy legend itself says it may carry no semantic meaning. Treat as opaque.

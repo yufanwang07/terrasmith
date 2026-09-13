@@ -236,6 +236,16 @@ function worleyScalar(x: number, y: number, seed: number, metric: WorleyMetric):
 
 // --- Fractal stacking ------------------------------------------------------
 
+/** True when every default has already been filled in. */
+function isResolved(params: NoiseParams): params is ResolvedNoiseParams {
+  return (
+    (params as ResolvedNoiseParams).octaves !== undefined &&
+    (params as ResolvedNoiseParams).lacunarity !== undefined &&
+    (params as ResolvedNoiseParams).sharpness !== undefined &&
+    (params as ResolvedNoiseParams).worleyMetric !== undefined
+  );
+}
+
 function baseNoise(
   type: NoiseType,
   x: number,
@@ -255,6 +265,23 @@ function baseNoise(
   }
 }
 
+/** Fully resolved noise parameters, with every default filled in. */
+export type ResolvedNoiseParams = Required<Omit<NoiseParams, 'worleyMetric'>> & {
+  worleyMetric: WorleyMetric;
+};
+
+/**
+ * Resolve parameters once, outside a sampling loop.
+ *
+ * {@link fractalNoise2D} is called once per texel — tens of millions of times
+ * on a full-resolution build — and merging defaults inside it allocated an
+ * object per call. Hoisting that out is worth several times the runtime of
+ * everything else in the function.
+ */
+export function resolveNoiseParams(params: NoiseParams = {}): ResolvedNoiseParams {
+  return { ...DEFAULTS, ...params };
+}
+
 /**
  * Sample fractal noise at world coordinates.
  *
@@ -262,9 +289,12 @@ function baseNoise(
  * modes that rectify (`ridged`, `billow`, `hybrid`). That difference is
  * deliberate: a ridged layer used as an additive detail should not push terrain
  * downward.
+ *
+ * In a sampling loop, resolve the parameters once with
+ * {@link resolveNoiseParams} and pass the result: this function accepts either.
  */
 export function fractalNoise2D(x: number, y: number, params: NoiseParams = {}): number {
-  const p = { ...DEFAULTS, ...params };
+  const p = isResolved(params) ? params : resolveNoiseParams(params);
   let freq = p.frequency;
   let amp = 1;
   let sum = 0;
@@ -331,26 +361,59 @@ export function warpedNoise2D(
   x: number,
   y: number,
   params: NoiseParams,
-  warp: { amount: number; frequency: number; octaves?: number; iterations?: number } ,
+  warp: WarpParams | WarpPlan,
 ): number {
-  const iterations = warp.iterations ?? 1;
+  const plan = isWarpPlan(warp) ? warp : planWarp(params, warp);
   let wx = x;
   let wy = y;
-  const warpParams: NoiseParams = {
+  for (let i = 0; i < plan.iterations; i++) {
+    const ox = fractalNoise2D(wx + i * 5.2, wy + i * 1.3, plan.offsetX);
+    const oy = fractalNoise2D(wx + i * 1.7 + 3.1, wy + i * 9.2 + 7.7, plan.offsetY);
+    wx += ox * plan.amount;
+    wy += oy * plan.amount;
+  }
+  return fractalNoise2D(wx, wy, plan.base);
+}
+
+/** Domain-warp settings, in the same units as the noise being warped. */
+export interface WarpParams {
+  amount: number;
+  frequency: number;
+  octaves?: number;
+  iterations?: number;
+}
+
+/** A warp with everything resolved, for use inside a sampling loop. */
+export interface WarpPlan {
+  readonly __warpPlan: true;
+  amount: number;
+  iterations: number;
+  base: ResolvedNoiseParams;
+  offsetX: ResolvedNoiseParams;
+  offsetY: ResolvedNoiseParams;
+}
+
+/** Resolve a warp once, outside a sampling loop. */
+export function planWarp(params: NoiseParams, warp: WarpParams): WarpPlan {
+  const warpSeed = ((params.seed ?? 0) ^ 0x5f356495) | 0;
+  const common: NoiseParams = {
     type: params.type ?? 'perlin',
     fractal: 'fbm',
     octaves: warp.octaves ?? 3,
     frequency: warp.frequency,
-    seed: ((params.seed ?? 0) ^ 0x5f356495) | 0,
   };
-  for (let i = 0; i < iterations; i++) {
-    const ox = fractalNoise2D(wx + i * 5.2, wy + i * 1.3, warpParams);
-    const oy = fractalNoise2D(wx + i * 1.7 + 3.1, wy + i * 9.2 + 7.7, {
-      ...warpParams,
-      seed: ((warpParams.seed ?? 0) + 0x1337) | 0,
-    });
-    wx += ox * warp.amount;
-    wy += oy * warp.amount;
-  }
-  return fractalNoise2D(wx, wy, params);
+  return {
+    __warpPlan: true,
+    amount: warp.amount,
+    iterations: warp.iterations ?? 1,
+    base: resolveNoiseParams(params),
+    offsetX: resolveNoiseParams({ ...common, seed: warpSeed }),
+    // A second, unrelated seed: reusing one would make the X and Y offsets
+    // identical and collapse the warp onto a diagonal.
+    offsetY: resolveNoiseParams({ ...common, seed: (warpSeed + 0x1337) | 0 }),
+  };
+}
+
+function isWarpPlan(value: WarpParams | WarpPlan): value is WarpPlan {
+  return (value as WarpPlan).__warpPlan === true;
 }

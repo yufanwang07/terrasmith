@@ -12,13 +12,29 @@
  */
 
 import {
+  createField,
+  gaussianBlur,
   hydraulicErosionDroplet,
   hydraulicErosionPipe,
+  slopeDegreesField,
   thermalErosion,
   type Field,
 } from '@terrasmith/core';
 import { cellSize, type NodeDefinition } from '../types.js';
+import { alignToGrid, planSimulationGrid, runOnSimulationGrid } from './simulate.js';
 import { bool, choice, degrees, elmos, int, maskIn, num, requireField, seedParam, terrainIn, terrainOut } from './helpers.js';
+
+/**
+ * Cells a droplet's brush should span.
+ *
+ * Three is what the reference droplet implementations use, and it is the point
+ * where a brush stops being a single-cell scratch and starts carving a valley
+ * with sides. More cells cost time without adding structure.
+ */
+const BRUSH_CELLS = 3;
+
+/** Iterations a talus pass should take to move material its full run. */
+const TALUS_STEPS = 24;
 
 const EROSION_OUTPUTS = [
   terrainOut(),
@@ -129,62 +145,83 @@ export const hydraulicErosionNode: NodeDefinition<HydraulicParams> = {
   ],
   evaluate({ inputs, params, ctx, seed, nodeId }) {
     const terrain = requireField(inputs.terrain, 'Terrain');
-    let hardness = inputs.hardness as Field | null;
-
-    if (params.hardnessFromSlope && !hardness) {
-      hardness = slopeHardness(terrain);
-    }
-
-    const cs = cellSize(ctx);
-    // Erosion is a simulation on a grid, so its natural units are cells. The
-    // author's "feature scale" is in elmos; convert, and clamp to a radius the
-    // solver can actually act on.
-    const radius = Math.max(1, Math.min(16, Math.round(params.scale / cs)));
     const onProgress = (t: number) => ctx.onNodeProgress?.(nodeId, t);
     const signal = ctx.signal ? { get aborted() { return ctx.signal!.aborted; } } : undefined;
 
-    if (params.method === 'pipe') {
-      // Iterations scale with the requested amount but not with resolution:
-      // the pipe solver's per-step effect is already resolution-relative.
-      const iterations = Math.round(120 * params.amount * (ctx.quality === 'preview' ? 0.5 : 1));
-      const result = hydraulicErosionPipe(terrain, {
-        iterations: Math.max(10, iterations),
-        cellSize: cs,
-        depositRate: params.deposition,
-        evaporation: params.evaporation + 0.01,
-        hardness: hardness ?? undefined,
+    // The simulation runs on a grid sized by the valleys it is carving, not by
+    // whatever grid the graph happens to be on. See ./simulate.ts for why.
+    // Three cells per brush is what turns a droplet track into a valley with
+    // sides rather than a one-cell scratch.
+    const grid = planSimulationGrid(
+      ctx.width,
+      ctx.height,
+      ctx.worldWidth,
+      ctx.worldHeight,
+      params.scale / BRUSH_CELLS,
+      ctx.quality,
+    );
+
+    const { height, channels } = runOnSimulationGrid(terrain, grid, (field, cs) => {
+      let hardness = alignToGrid(inputs.hardness as Field | null, field);
+      if (params.hardnessFromSlope && !hardness) {
+        hardness = slopeHardness(field);
+      }
+      // The grid was chosen so this lands on BRUSH_CELLS, but clamp anyway: a
+      // very large feature scale on a small map can push it past the ceiling.
+      const radius = Math.max(1, Math.min(8, Math.round(params.scale / cs)));
+
+      if (params.method === 'pipe') {
+        // Iterations scale with the requested amount but not with the grid:
+        // the pipe solver's per-step effect is already resolution-relative.
+        const iterations = Math.max(10, Math.round(120 * params.amount));
+        const result = hydraulicErosionPipe(field, {
+          iterations,
+          cellSize: cs,
+          depositRate: params.deposition,
+          evaporation: params.evaporation + 0.01,
+          hardness,
+          onProgress,
+          signal,
+        });
+        return {
+          height: result.height,
+          channels: {
+            flow: result.flow,
+            wear: result.wear,
+            deposition: result.deposition,
+            water: result.water,
+          },
+        };
+      }
+
+      const result = hydraulicErosionDroplet(field, {
+        density: params.amount,
+        radius,
+        inertia: params.inertia,
+        depositSpeed: params.deposition,
+        evaporation: params.evaporation,
+        seed: (seed + params.seed) | 0,
+        hardness,
         onProgress,
         signal,
       });
       return {
-        out: maybeMask(terrain, result.height, inputs.mask),
-        flow: result.flow,
-        wear: result.wear,
-        deposition: result.deposition,
-        water: result.water,
+        height: result.height,
+        channels: {
+          flow: result.flow,
+          wear: result.wear,
+          deposition: result.deposition,
+          water: result.water,
+        },
       };
-    }
-
-    // Droplet count is a density, so the same "amount" erodes the same
-    // proportion of the map at any resolution.
-    const density = params.amount * (ctx.quality === 'preview' ? 0.4 : 1);
-    const result = hydraulicErosionDroplet(terrain, {
-      density,
-      radius,
-      inertia: params.inertia,
-      depositSpeed: params.deposition,
-      evaporation: params.evaporation,
-      seed: (seed + params.seed) | 0,
-      hardness: hardness ?? undefined,
-      onProgress,
-      signal,
     });
+
     return {
-      out: maybeMask(terrain, result.height, inputs.mask),
-      flow: result.flow,
-      wear: result.wear,
-      deposition: result.deposition,
-      water: result.water,
+      out: maybeMask(terrain, height, inputs.mask),
+      flow: channels.flow,
+      wear: channels.wear,
+      deposition: channels.deposition,
+      water: channels.water,
     };
   },
 };
@@ -233,16 +270,35 @@ export const thermalErosionNode: NodeDefinition<ThermalParams> = {
   ],
   evaluate({ inputs, params, ctx, nodeId }) {
     const terrain = requireField(inputs.terrain, 'Terrain');
-    const iterations = Math.max(1, Math.round(40 * params.amount * (ctx.quality === 'preview' ? 0.5 : 1)));
-    const result = thermalErosion(terrain, {
-      iterations,
-      talusAngle: params.angle,
-      cellSize: cellSize(ctx),
-      hardness: (inputs.hardness as Field | null) ?? undefined,
-      onProgress: (t) => ctx.onNodeProgress?.(nodeId, t),
-      signal: ctx.signal ? { get aborted() { return ctx.signal!.aborted; } } : undefined,
-    });
-    return { out: maybeMask(terrain, result, inputs.mask) };
+
+    // Material moves one cell per iteration, so "amount" has to mean a world
+    // distance or the same settings give different talus at different
+    // resolutions. One unit of amount is 400 elmos of run — about the length
+    // of a scree slope below a real cliff.
+    const travelElmos = Math.max(40, params.amount * 400);
+    const grid = planSimulationGrid(
+      ctx.width,
+      ctx.height,
+      ctx.worldWidth,
+      ctx.worldHeight,
+      travelElmos / TALUS_STEPS,
+      ctx.quality,
+    );
+    const iterations = Math.max(4, Math.min(96, Math.round(travelElmos / grid.cellSize)));
+
+    const { height } = runOnSimulationGrid(terrain, grid, (field, cs) => ({
+      height: thermalErosion(field, {
+        iterations,
+        talusAngle: params.angle,
+        cellSize: cs,
+        hardness: alignToGrid(inputs.hardness as Field | null, field),
+        onProgress: (t) => ctx.onNodeProgress?.(nodeId, t),
+        signal: ctx.signal ? { get aborted() { return ctx.signal!.aborted; } } : undefined,
+      }),
+      channels: {},
+    }));
+
+    return { out: maybeMask(terrain, height, inputs.mask) };
   },
 };
 
@@ -281,9 +337,8 @@ export const snowNode: NodeDefinition<SnowParams> = {
       description: 'How much snow gathers in hollows rather than lying evenly.',
     }),
   ],
-  async evaluate({ inputs, params, ctx }) {
+  evaluate({ inputs, params, ctx }) {
     const terrain = requireField(inputs.terrain, 'Terrain');
-    const { slopeDegreesField, gaussianBlur, createField } = await import('@terrasmith/core');
     const cs = cellSize(ctx);
     const slope = slopeDegreesField(terrain, { cellSize: cs });
     const coverage = createField(terrain.width, terrain.height);

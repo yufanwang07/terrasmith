@@ -25,12 +25,24 @@ interface Props {
   worldHeight: number;
   /** Water sits at world height 0 in BAR. */
   showWater: boolean;
+  /**
+   * Vertical exaggeration. 1 is true scale, which is what the slope readout and
+   * the passability overlay assume; anything higher is a viewing aid only.
+   */
+  exaggeration: number;
 }
 
 /** Colour of the water plane. Matches the mapinfo defaults closely enough to judge a coastline. */
 const WATER_COLOR = 0x2c4a5c;
 
-export function Viewport({ preview, overlay, worldWidth, worldHeight, showWater }: Props) {
+export function Viewport({
+  preview,
+  overlay,
+  worldWidth,
+  worldHeight,
+  showWater,
+  exaggeration,
+}: Props) {
   const mountRef = useRef<HTMLDivElement>(null);
   const stateRef = useRef<ViewportInternals | null>(null);
 
@@ -49,14 +61,15 @@ export function Viewport({ preview, overlay, worldWidth, worldHeight, showWater 
     const internals = stateRef.current;
     if (!internals) return;
     internals.setWater(showWater, worldWidth, worldHeight);
+    internals.frameIfUnframed(worldWidth, worldHeight);
   }, [showWater, worldWidth, worldHeight]);
 
   useEffect(() => {
     const internals = stateRef.current;
     if (!internals || !preview.result) return;
     if (preview.result.kind !== 'field') return;
-    internals.setTerrain(preview.result, worldWidth, worldHeight, overlay);
-  }, [preview.result, worldWidth, worldHeight, overlay]);
+    internals.setTerrain(preview.result, worldWidth, worldHeight, overlay, exaggeration);
+  }, [preview.result, worldWidth, worldHeight, overlay, exaggeration]);
 
   return (
     <div className="viewport" ref={mountRef}>
@@ -79,8 +92,11 @@ interface ViewportInternals {
     worldWidth: number,
     worldHeight: number,
     overlay: OverlayKind,
+    exaggeration: number,
   ): void;
   setWater(show: boolean, worldWidth: number, worldHeight: number): void;
+  /** Point the camera at the map before any terrain has arrived. */
+  frameIfUnframed(worldWidth: number, worldHeight: number): void;
   dispose(): void;
 }
 
@@ -153,8 +169,8 @@ function createViewport(mount: HTMLElement): ViewportInternals {
   let framed = false;
 
   return {
-    setTerrain(result, worldWidth, worldHeight, overlay) {
-      const geometry = buildTerrainGeometry(result, worldWidth, worldHeight, overlay);
+    setTerrain(result, worldWidth, worldHeight, overlay, exaggeration) {
+      const geometry = buildTerrainGeometry(result, worldWidth, worldHeight, overlay, exaggeration);
       terrain.geometry.dispose();
       terrain.geometry = geometry;
 
@@ -168,6 +184,11 @@ function createViewport(mount: HTMLElement): ViewportInternals {
       water.visible = show;
       water.scale.set(worldWidth * 1.5, worldHeight * 1.5, 1);
       water.position.set(0, 0, 0);
+    },
+
+    frameIfUnframed(worldWidth, worldHeight) {
+      if (framed) return;
+      orbit.frame(worldWidth, worldHeight, 0);
     },
 
     dispose() {
@@ -197,6 +218,7 @@ function buildTerrainGeometry(
   worldWidth: number,
   worldHeight: number,
   overlay: OverlayKind,
+  exaggeration: number,
 ): THREE.BufferGeometry {
   const { width, height, data } = result;
   const geometry = new THREE.BufferGeometry();
@@ -227,7 +249,10 @@ function buildTerrainGeometry(
     for (let x = 0; x < width; x++) {
       const i = y * width + x;
       positions[i * 3] = x * cellX - halfX;
-      positions[i * 3 + 1] = data[i];
+      // Only the drawn height is exaggerated. The slope used for the overlay is
+      // computed from the real heights above, so what the overlay says stays
+      // true no matter how the terrain is being displayed.
+      positions[i * 3 + 1] = data[i] * exaggeration;
       positions[i * 3 + 2] = y * cellZ - halfZ;
 
       const color = overlayColorFor(overlay, {

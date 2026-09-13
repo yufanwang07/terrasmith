@@ -16,13 +16,16 @@
 
 import {
   ambientOcclusion,
+  createMetalMap,
   curvatureField,
   findPalettePreset,
   normalizeCurvature,
+  paintMetalSpot,
   slopeDegreesField,
   TEMPERATE,
   type Field,
   type MaterialPalette,
+  type PaintedSpot,
 } from '@terrasmith/core';
 import {
   MINIMAP_SIZE_PX,
@@ -86,6 +89,8 @@ export interface BuildStats {
   rangeUtilization: number;
   /** Elmos per height quantisation step. */
   quantizationStep: number;
+  /** Metal spots whose blob hit the byte ceiling and yields less than asked. */
+  clippedMetalSpots: number;
 }
 
 export interface BuildArtifacts {
@@ -228,6 +233,7 @@ export async function buildMapFiles(
       smtBytes: smt.length,
       rangeUtilization: height.rangeUtilization,
       quantizationStep: height.quantizationStep,
+      clippedMetalSpots: derived.paintedSpots.filter((s) => s.clipped).length,
     },
   };
 }
@@ -259,6 +265,8 @@ interface DerivedMaps {
   grassMap?: Uint8Array;
   featureTypes: string[];
   features: MapFeature[];
+  /** What each declared metal spot will actually yield. */
+  paintedSpots: PaintedSpot[];
 }
 
 function buildDerivedMaps(
@@ -277,9 +285,12 @@ function buildDerivedMaps(
         cellSize,
       });
 
+  const spots = metalMapFromSpots(project, plan);
+  // An explicit metal output wins, but the painted spots still come back so the
+  // report can say what an extractor would really collect on each one.
   const metalMap = outputs.metal
     ? quantizeMetalMap(outputs.metal, plan.halfWidth, plan.halfHeight)
-    : metalMapFromSpots(project, plan);
+    : spots.data;
 
   const grassMap = outputs.grass
     ? quantizeGrassMap(outputs.grass, plan.quarterWidth, plan.quarterHeight)
@@ -290,50 +301,40 @@ function buildDerivedMaps(
       });
 
   const { featureTypes, features } = collectFeatures(project, heightfield, plan);
-  return { typeMap, metalMap, grassMap, featureTypes, features };
+  return { typeMap, metalMap, grassMap, featureTypes, features, paintedSpots: spots.painted };
 }
 
 /**
  * Paint the project's metal spots into the byte map.
  *
- * A spot is a blob rather than a single hot texel: extractors collect the metal
- * under their whole footprint, so a one-cell spike yields a fraction of what
- * the author intended and moves the best extractor position around
- * unpredictably.
+ * Delegated to the BAR rules layer, which knows the engine's actual data path:
+ * an extractor's income is `extractsMetal` times the sum of `byte * maxMetal`
+ * over every metal cell inside its radius. A single hot cell therefore caps out
+ * around an eighth of a standard spot, and the shape of a blob decides both
+ * what a mex collects and where BAR's spot finder thinks the spot is.
  */
-function metalMapFromSpots(project: Project, plan: BuildPlan): Uint8Array {
-  const out = new Uint8Array(plan.halfWidth * plan.halfHeight);
-  if (project.metalSpots.length === 0) return out;
-
-  // One metal cell covers 16x16 elmos.
-  const cellElmos = plan.worldWidth / plan.halfWidth;
-  const maxMetal = project.settings.maxMetal ?? 1;
-
+function metalMapFromSpots(
+  project: Project,
+  plan: BuildPlan,
+): { data: Uint8Array; painted: PaintedSpot[] } {
+  const map = createMetalMap(plan.mapx, plan.mapy);
+  const painted: PaintedSpot[] = [];
   for (const spot of project.metalSpots) {
-    const radiusCells = Math.max(1, (spot.radius ?? 48) / cellElmos);
-    const cx = spot.x / cellElmos;
-    const cy = spot.z / cellElmos;
-    // Income is expressed per second; the byte is a density, so normalise by
-    // the map's declared maxMetal.
-    const peak = Math.min(1, spot.income / Math.max(maxMetal, 1e-6));
-
-    const x0 = Math.max(0, Math.floor(cx - radiusCells));
-    const x1 = Math.min(plan.halfWidth - 1, Math.ceil(cx + radiusCells));
-    const y0 = Math.max(0, Math.floor(cy - radiusCells));
-    const y1 = Math.min(plan.halfHeight - 1, Math.ceil(cy + radiusCells));
-
-    for (let y = y0; y <= y1; y++) {
-      for (let x = x0; x <= x1; x++) {
-        const d = Math.hypot(x + 0.5 - cx, y + 0.5 - cy) / radiusCells;
-        if (d >= 1) continue;
-        const falloff = 1 - d * d;
-        const value = Math.round(peak * falloff * 255);
-        const i = y * plan.halfWidth + x;
-        if (value > out[i]) out[i] = value;
-      }
-    }
+    painted.push(
+      paintMetalSpot(
+        map,
+        { x: spot.x, z: spot.z, income: spot.income },
+        {
+          maxMetal: project.settings.maxMetal,
+          extractorRadius: project.settings.extractorRadius,
+          // Additive so two spots close enough to share cells accumulate
+          // rather than one silently erasing the other.
+          additive: true,
+        },
+      ),
+    );
   }
-  return out;
+  return { data: map.data, painted };
 }
 
 function collectFeatures(

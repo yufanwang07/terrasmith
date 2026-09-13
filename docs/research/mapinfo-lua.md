@@ -6,6 +6,15 @@ Complete, implementation-grade reference for `mapinfo.lua` as parsed by the **Re
 Every key, default, clamp and side effect below was read out of engine source at
 `master` (fetched 2026-09-13) — not recalled. Inline citations give repo path + line numbers.
 
+> **Adversarial review pass, 2026-09-13.** This document has been independently re-checked against
+> primary sources (raw files from `beyond-all-reason/RecoilEngine@master`,
+> `beyond-all-reason/map_blueprint@master`, `beyond-all-reason/map-parser@master`,
+> `beyond-all-reason/Beyond-All-Reason@master`, and `kcat/openal-soft@master` for the AL constants).
+> Six substantive errors were found and corrected — see the **Verification log** (§18) for the full
+> claim-by-claim ledger and for what remains unverified.
+> The §13 SMF binary header was re-derived field-by-field from `SMFFormat.h` **and** from
+> `CSMFMapFile::ReadMapHeader`, and every offset is confirmed.
+
 **Primary sources**
 
 | What | Path |
@@ -201,6 +210,26 @@ const std::array<KnownInfoTag, 12> knownTags = {
 If `name` ends up empty the scanner sets both `name` and `name_pure` to the `.smf` basename
 (`ArchiveScanner.cpp:786-790`).
 
+### 2.1 `name` and `modtype` are hard requirements at scan time (GAP — added 2026-09-13)
+
+The `required` column of `knownTags` is enforced. `ArchiveData::IsValid`
+(`ArchiveScanner.cpp:221-246`) walks `knownTags` for any tag with `required == true` that has no
+info-item, and fails with `"Missing required tag \"<name>\"."`. Only two tags are `required`:
+**`name`** and **`modtype`**. `ScanArchiveLua` turns that into
+`"Error in mapinfo.lua: Missing required tag ..."` and returns `false`
+(`ArchiveScanner.cpp:944-955`).
+
+In practice this is a soft failure for maps: `ScanArchive`'s map branch ignores the return value
+(`ArchiveScanner.cpp:753-761`), the partially-filled `ArchiveData` has already been assigned, `name`
+is then back-filled from the `.smf` basename if empty, and `modType` is force-set to
+`modtype::map` (`:787-796`). You still get a scan-log error, and any lobby that surfaces
+`IsValid` will reject the archive — **always write both keys.**
+
+Related: the archive cache file is `ArchiveCache<INTERNAL_VER>.lua` with
+`INTERNAL_VER = 22` (`ArchiveScanner.cpp:62`); the scanner accepts the three previous versions when
+`loadOldVersion` is set (`:622-631`). Bumping `mapinfo.lua` content does not invalidate it — the
+archive's mtime does.
+
 Deprecated / ignored: `startpic`, `StartMusic` (commented out in every template).
 
 ---
@@ -279,7 +308,7 @@ for (int i = 0; /* no test */; i++) {
 | `minHeight` | float | *(SMF header value)* | Overrides `SMFHeader.minHeight`. **Presence** is what matters — `KeyExists` sets `minHeightOverride`, so `minHeight = 0` is a real override, not a no-op. |
 | `maxHeight` | float | *(SMF header value)* | Overrides `SMFHeader.maxHeight`. |
 | `smtFileName0`, `smtFileName1`, … `smtFileNameN` | string | — | Replace the `.smt` filenames baked into the `.smf`'s `MapTileHeader`. Scanned from **index 0 upward, stopping at the first missing index**. |
-| `minimapTex` | string | `""` | Replaces the DXT1 minimap block inside the `.smf`. Loaded as a normal `CBitmap` (`SMFReadMap.cpp:166`). |
+| `minimapTex` | string | `""` | Replaces the DXT1 minimap block inside the `.smf`. Loaded as a normal `CBitmap` with **no dimension check at all** and the resulting bitmap's own size is kept (`CSMFReadMap::LoadMinimap`, `SMFReadMap.cpp:163-175`). Any size works. **But**: if you rely on the default `grassShadingTex`, see the 1024×1024 note in §5.2. |
 | `metalmapTex` | string | `""` | Replaces the metal info-map. |
 | `typemapTex` | string | `""` | Replaces the type info-map (terrain-type indices). |
 | `grassmapTex` | string | `""` | Replaces the `MEH_Vegetation` grass info-map. |
@@ -299,8 +328,21 @@ exactly how BAR's water-level map option works — `map_blueprint/mapconfig/mapi
 rewrites `mapinfo.smf.minheight/maxheight` to `(-505, 495)`, `(-300, 700)`, `(-610, 390)`,
 `(-750, 250)` or `(-900, 100)` depending on `mapOptions.waterlevel`.
 
-**Info-map override rules.** `CSMFReadMap::GetInfoMap` (`SMFReadMap.cpp:923-970`) loads the override
-with `LoadGrayscale` and **requires exact dimensions** `hmapx × hmapy` = `(mapx/2) × (mapy/2)`:
+**Info-map override rules.** `CSMFReadMap::GetInfoMap` (`SMFReadMap.cpp:924-970`) loads the override
+with `LoadGrayscale` and **requires exact dimensions**, which are **per info-map**, taken from
+`CSMFMapFile::GetInfoMapSize` (`rts/Map/SMF/SMFMapFile.cpp:193-203`):
+
+| info-map | `mapinfo` key | required size |
+| --- | --- | --- |
+| `"metal"` | `smf.metalmapTex` | `mapx/2 × mapy/2` |
+| `"type"` | `smf.typemapTex` | `mapx/2 × mapy/2` |
+| `"grass"` | `smf.grassmapTex` | **`mapx/4 × mapy/4`** |
+
+> **CORRECTED (2026-09-13).** An earlier revision stated a blanket `(mapx/2) × (mapy/2)` for all
+> three. That is wrong for `grassmapTex`, which must be quarter-resolution.
+
+`minimapTex` is **not** an info-map and goes through a different path entirely
+(`LoadMinimap`, below) with no dimension check. The check itself:
 
 ```
 if (infomapBM.xsize == bmInfo->width && infomapBM.ysize == bmInfo->height) -> use it
@@ -397,9 +439,9 @@ for synced textures (typemap, metalmap, …)"). Engine-fallback textures use `de
 | --- | --- | --- | --- |
 | `detailTex` | `smf.detailTexName` | falls back to `resources.lua → graphics.maps.detailtex`, then `"detailtex2.bmp"` under `bitmaps/` | Tiled RGB detail texture. Sampled at `worldPos.xz * SMF_DETAILTEX_RES` (**0.02**, `SMFFragProg.glsl:25`). Unused when detail-normal splatting is active. Fallback if `Load` fails: 1×1 `{127,127,127,0}`. |
 | `specularTex` | `smf.specularTexName` | `""` | Map-sized RGB(A) specular/gloss map. **Presence flips `haveSpecularTexture` and the `SMF_SPECULAR_LIGHTING` shader flag** — i.e. this one texture is the master switch for the whole SSMF ("Spring Splatted Map Format") advanced shading path. Sampled with `specularTexGen = 1/(mapx*8), 1/(mapy*8)`. Fallback on load failure: 1×1 white. |
-| `splatDetailTex` | `smf.splatDetailTexName` | `""` | 4-channel *intensity* detail texture for classic splatting. Enables splatting together with `splatDistrTex`: `haveSplatDetailDistribTexture = (!splatDetailTexName.empty() && !splatDistrTexName.empty())` (`SMFReadMap.cpp:69`). Fallback: 1×1 `{127,127,127,127}`. In BAR maps that use DNTS this is set to a **deliberately nonexistent filename** (`"iwantDNTS.tga"`) purely to satisfy the non-empty check. |
+| `splatDetailTex` | `smf.splatDetailTexName` | `""` | 4-channel *intensity* detail texture for classic splatting. Enables **classic** splatting together with `splatDistrTex`: `haveSplatDetailDistribTexture = (!splatDetailTexName.empty() && !splatDistrTexName.empty())` (`SMFReadMap.cpp:69`). Fallback if the file is missing or fails to load: 1×1 `{127,127,127,127}`. BAR maps that use DNTS set it to a **deliberately nonexistent filename** (`"iwantDNTS.tga"` — `map_blueprint/mapinfo.lua:52`, commented *"this file does not have to exist, but must be specified"*). On **current Recoil master this is no longer required for DNTS** — see §5.5. |
 | `splatDistrTex` | `smf.splatDistrTexName` | `""` | Map-sized **RGBA distribution/weight map**: each channel is the blend weight of one of the four splat textures. Fallback: 1×1 `{255,0,0,0}` (all-red = channel 1 everywhere). |
-| `grassShadingTex` | `smf.grassShadingTexName` | `""` → **defaults to the minimap texture** | Colourises engine grass. `CreateGrassTex` seeds `grassShadingTex` from `minimapTex` (1024×1024) and only overrides it if this loads (`SMFReadMap.cpp:334-346`). |
+| `grassShadingTex` | `smf.grassShadingTexName` | `""` → **defaults to the minimap texture** | Colourises engine grass. `CreateGrassTex` (`SMFReadMap.cpp:328-343`) seeds `grassShadingTex` with `minimapTex.GetID()` and **hardcodes its raw size to 1024×1024**, then only overrides both if this texture loads. See the size caveat below the table. |
 | `skyReflectModTex` | `smf.skyReflectModTexName` | `""` | Per-texel modulation of cube-map sky reflection. Must match `specularTex` dimensions. Sets `SMF_SKY_REFLECTIONS`. No 1×1 fallback — absent means feature off. |
 | `detailNormalTex` | `smf.blendNormalsTexName` | `""` | **Note the name mismatch**: mapinfo key `detailNormalTex` → C++ `blendNormalsTexName`. A map-sized tangent-space normal map blended into the geometric normals. Sets `SMF_BLEND_NORMALS`. |
 | `lightEmissionTex` | `smf.lightEmissionTexName` | `""` | Emissive RGB added after lighting. Sets `SMF_LIGHT_EMISSION`. |
@@ -414,6 +456,28 @@ Only the **first four** DNTS entries are ever turned into textures
 `i == NUM_SPLAT_DETAIL_NORMALS`, `SMFReadMap.cpp:305`). A DNTS entry that fails to load becomes a
 1×1 `{127,127,255,127}` (flat +Z normal, mid-grey diffuse alpha) rather than disabling the feature
 (`SMFReadMap.cpp:310-317`).
+
+**`grassShadingTex` size caveat (verified 2026-09-13).** `CreateGrassTex` unconditionally does
+
+```cpp
+// rts/Map/SMF/SMFReadMap.cpp:328-343
+grassShadingTex.SetRawTexID(minimapTex.GetID());
+grassShadingTex.SetRawSize(int2(1024, 1024));       // <- hardcoded, before the override attempt
+
+CBitmap grassShadingTexBM;
+if (!grassShadingTexBM.Load(mapInfo->smf.grassShadingTexName))
+    return;                                          // keep the minimap + the 1024x1024 claim
+
+grassShadingTex.SetRawTexID(grassShadingTexBM.CreateMipMapTexture());
+grassShadingTex.SetRawSize(int2(grassShadingTexBM.xsize, grassShadingTexBM.ysize));
+```
+
+while `LoadMinimap` records the **real** size of a `smf.minimapTex` override
+(`minimapTex.SetRawSize(int2(bm.xsize, bm.ysize))`, `SMFReadMap.cpp:163-175`). So a map that ships a
+non-1024 `smf.minimapTex` **and no `grassShadingTex`** ends up with a `grassShadingTex` whose reported
+raw size (1024×1024) does not match the texture bound to it. Only `GetTexSize`/Lua-facing consumers
+read that raw size (`SMFReadMap.h:82`), so it is a reporting bug rather than a rendering one — but if
+you replace the minimap at a non-1024 resolution, **ship an explicit `grassShadingTex` too**.
 
 ### 5.3 `resources` vs a "flat smf form" — which does Recoil prefer?
 
@@ -472,8 +536,58 @@ Texture units (same file, `:150-170`): `diffuseTex 0`, `heightMapTex 1`, `detail
 `splatDetailNormalTex1..4 = 15,16,17,18`, `shadowColorTex 19`.
 
 Practical recipe for a modern BAR-style map: ship `specularTex` (turns on SSMF),
-`splatDistrTex`, a dummy `splatDetailTex`, and `splatDetailNormalTex1..4` +
-`splatDetailNormalDiffuseAlpha = 1`.
+`splatDistrTex`, `splatDetailNormalTex1..4` and `splatDetailNormalDiffuseAlpha = 1`.
+A dummy `splatDetailTex` is **not** needed on current Recoil (§5.5) but is conventional and harmless.
+
+Note `SMF_ADV_SHADING` is set unconditionally to `true` on the GLSL path
+(`SMFRenderState.cpp:115`) — it is not gated on any mapinfo key.
+
+### 5.5 What actually activates DNTS splatting — CORRECTED
+
+The long-standing folklore (and a comment still in BAR's map generator) is that
+`resources.splatDetailTex` must be a non-empty string for detail-normal splatting to switch on, even
+when you supply `splatDetailNormalTex1..4`. **On current Recoil `master` that is no longer true.**
+
+```cpp
+// rts/Map/SMF/SMFReadMap.cpp:68-79 (ctor)
+haveSpecularTexture           = !(mapInfo->smf.specularTexName.empty());
+haveSplatDetailDistribTexture = (!mapInfo->smf.splatDetailTexName.empty() && !mapInfo->smf.splatDistrTexName.empty());
+haveSplatNormalDistribTexture = false;
+for (const std::string& texName: mapInfo->smf.splatDetailNormalTexNames)
+    haveSplatNormalDistribTexture |= !texName.empty();
+
+// rts/Map/SMF/SMFReadMap.cpp:249-257
+void CSMFReadMap::CreateSplatDetailTextures() {
+    if (!haveSplatDetailDistribTexture && !haveSplatNormalDistribTexture)
+        return;                                     // <- OR, not AND
+    if (haveSplatNormalDistribTexture && !haveSplatDetailDistribTexture)
+        LOG_L(L_DEBUG, "... DNTS active without complete classic splat pair; using fallback splatDetailTex/splatDistrTex");
+    ...
+}
+```
+
+Inside, both `splatDetailTex` and `splatDistrTex` get 1×1 fallbacks when absent or unloadable
+(`SMFReadMap.cpp:260-296`), so `GetSplatDistrTexture() != 0` holds either way and the shader flag
+
+```cpp
+SetFlag("SMF_DETAIL_NORMAL_TEXTURE_SPLATTING", (smfMap->GetSplatDistrTexture() != 0 && smfMap->HaveSplatNormalTexture()));
+```
+
+(`SMFRenderState.cpp:120`) is set. **Minimum set for DNTS today: `splatDetailNormalTex1..4` plus a
+real `splatDistrTex`.** `splatDetailTex` is optional.
+
+Two caveats that keep the folklore useful in practice:
+
+1. Omitting `splatDistrTex` gives you the 1×1 `{255,0,0,0}` fallback — i.e. channel R at full weight
+   over the entire map — so DNTS "works" but with a useless distribution. Always ship a real
+   `splatDistrTex`.
+2. The BAR comment the folklore comes from is real and current:
+   *"Compatibility gate: some engine paths still key splat activation on splatDetailTex being
+   non-empty even when DNTS normals are provided."*
+   (`beyond-all-reason/Beyond-All-Reason` → `mapgenerator/mapinfo_template.lua:350-351`). It is a
+   BAR-side belief about older/other engine builds, not a statement about Recoil master. Shipping the
+   dummy `"iwantDNTS.tga"` remains harmless (it just triggers one `L_WARNING` about an invalid
+   splatDetailTex and takes the 1×1 grey fallback) and is the safer choice for portability.
 
 ---
 
@@ -594,8 +708,42 @@ independent of the texture's own resolution**; it is a map-sized mask, not a til
 | `sunColor` | float3 | `{1, 1, 1}` | — | Sun disc / sky sun tint. |
 | `cloudColor` | float3 | `{1, 1, 1}` | — | Procedural cloud tint. |
 | `cloudDensity` | float | `0.5` | `max(0, ·)` | Procedural cloud density. |
-| `fluidDensity` | float | `1.2 * 0.25` = **0.3** | — | Air density in kg/m³ (quarter-scaled). Feeds aerodynamic drag: `GetDragAccelerationVec(mapInfo->atmosphere.fluidDensity, mapInfo->water.fluidDensity, 1.0f, 0.1f)` (`rts/Sim/Features/Feature.cpp:603`, also `GroundMoveType.cpp`). Not in any template. |
+| `fluidDensity` | float | `1.2 * 0.25` = **0.3** | — | Air density in kg/m³ (quarter-scaled). Feeds aerodynamic drag: `GetDragAccelerationVec(mapInfo->atmosphere.fluidDensity, mapInfo->water.fluidDensity, 1.0f, 0.1f)` (`rts/Sim/Features/Feature.cpp:603`; `AAirMoveType.cpp` and `GroundMoveType.cpp` call it too). **Linear in drag** — see the formula below the table. Not in any template. |
 | `skyBox` | string | `""` | — | Cube-map / equirect skybox. **Path is hard-prefixed with `maps/`**, not run through `FIND_MAP_TEXTURE`: `sky = std::make_unique<CSkyBox>("maps/" + mapInfo->atmosphere.skyBox)` (`rts/Rendering/Env/ISky.cpp:75-79`). Non-empty → `CSkyBox`, empty → `CModernSky` (procedural). |
+
+### 7.1 What `fluidDensity` actually does (GAP — added 2026-09-13)
+
+`CSolidObject::GetDragAccelerationVec` (`rts/Sim/Objects/SolidObject.cpp:331-360`) is the sole
+consumer of both `atmosphere.fluidDensity` and `water.fluidDensity`:
+
+```cpp
+static constexpr auto STOPPING_SPEED = 0.5f;                  // elmos/second
+if (const float perSecSpeed = speed.w * GAME_SPEED; perSecSpeed < STOPPING_SPEED)
+    return float3(-speed.x, -speed.y, -speed.z);              // hard stop, density ignored
+
+static constexpr float MATERIAL_DENSITY = 8000.0f;            // kg/m^3, assumed
+const float assumedRadius      = cbrtf((3.0f * mass) / (4.0f * PI * MATERIAL_DENSITY));
+const float assumedSectionArea = PI * assumedRadius * assumedRadius;
+
+const float3 dragScaleVec = float3(
+    (IsInAir() || IsOnGround()) * dragScales.x * (0.5f * atmosphericDensity * dragCoeff * assumedSectionArea),
+    IsInWater()                 * dragScales.y * (0.5f * waterDensity       * dragCoeff * assumedSectionArea),
+    ...
+);
+```
+
+Practical consequences for tuning:
+
+* Drag acceleration is **linear** in the density, so doubling `atmosphere.fluidDensity` doubles the
+  aerodynamic drag term. There is no clamp on either key in `CMapInfo`, and `0` disables that term.
+* The air term applies while `IsInAir() || IsOnGround()`; the water term only while `IsInWater()`.
+  They are independent columns of the same vector, so an amphibious object gets both.
+* Objects slower than 0.5 elmos/second are stopped outright before density is consulted.
+* Callers: `Feature.cpp:603` passes `(atmosphere.fluidDensity, water.fluidDensity, 1.0f, 0.1f)`;
+  `GroundMoveType.cpp` and `AAirMoveType.cpp` also call it.
+* Realistic starting points are the defaults themselves — air `0.3`, water `240` — i.e. the
+  real-world kg/m³ figures quarter-scaled. Both are absent from every template and every shipped BAR
+  map, so there is **no field-tested range**; change them in small multiples and test.
 
 Runtime override: `Spring.SetAtmosphere{fogColor, skyColor, sunColor, cloudColor, skyAxisAngle,
 fogStart, fogEnd}` (`LuaUnsyncedCtrl.cpp:4147-4176`).
@@ -614,7 +762,7 @@ light.sunDir.ANormalize();
 
 | mapinfo key | C++ field | Type | Default | Notes |
 | --- | --- | --- | --- | --- |
-| `sunDir` | `light.sunDir` | float3 **or** float4 | `{0, 1, 2, 1}` | Read as float4 first; if a 3-element value parses, `.xyz` is replaced and `.w` is kept from the float4 read (so a float3 leaves `.w = 1`). `.xyz` is then `ANormalize`d. `.w` is documented as "intensity" in `MapInfo.h:119`; BAR maps conventionally write `1e9` to mean "static sun". `ISkyLight` seeds itself from this (`rts/Rendering/Env/SkyLight.cpp:11`). |
+| `sunDir` | `light.sunDir` | float3 **or** float4 | `{0, 1, 2, 1}` | Read as float4 first; if a 3-element value parses, `.xyz` is replaced and `.w` is kept from the float4 read (so a float3 leaves `.w = 1`). `.xyz` is then `ANormalize`d. `.w` is documented as "intensity" in `MapInfo.h:119`; BAR maps conventionally write `1e9` to mean "static sun". `ISkyLight` seeds itself from this (`rts/Rendering/Env/SkyLight.cpp:11`). **`.w` has exactly one consumer, found 2026-09-13:** `CModernSky` passes it as the **alpha component of the `sunColor` uniform** to the procedural-sky shader — `skyShader->SetUniform("sunColor", sunColor.x, sunColor.y, sunColor.z, sunDir.w); // sunDir.w -- intensity` (`rts/Rendering/Env/ModernSky.cpp:79-82`). It is **not** read by the ground shader, by `CSunLighting`, or by `CSkyBox`. So on a map that sets `atmosphere.skyBox` (most BAR maps) `sunDir.w` is inert, and on a procedural-sky map the conventional `1e9` feeds a huge alpha into the sky shader. *UNVERIFIED — needs confirmation:* what the `sunColor.a` channel does inside `ModernSkyFragProg`; I did not read the shader. Treat `1e9` as a load-bearing convention to copy verbatim, not a value to tune. |
 | `groundAmbientColor` | `light.groundAmbientColor` | float3 | `{0.5, 0.5, 0.5}` | |
 | `groundDiffuseColor` | `light.groundDiffuseColor` | float3 | `{0.5, 0.5, 0.5}` | Also the **default for `water.specularColor`** (§9) — `ReadLight` runs before `ReadWater`. |
 | `groundSpecularColor` | `light.groundSpecularColor` | float3 | `{0.1, 0.1, 0.1}` | |
@@ -646,7 +794,7 @@ which is why a BAR map that omits, say, `unitspecularcolor` gets a console warni
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `damage` | float | `0.0` | **Multiplied by `UNIT_SLOWUPDATE_RATE * INV_GAME_SPEED` = `15/30` = 0.5 at parse time.** Applied in `CUnit::SlowUpdate → DoWaterDamage` once per 15 frames (`rts/Sim/Units/Unit.cpp:987, 1215-1229`), so 2×/s × 0.5 ⇒ **the mapinfo value is HP per second**. `Game.waterDamage` reports the already-scaled (halved) number. |
-| `fluidDensity` | float | `960 * 0.25` = **240** | Water density kg/m³ for drag (`Feature.cpp:603`). Not in templates. |
+| `fluidDensity` | float | `960 * 0.25` = **240** | Water density kg/m³ for drag (`Feature.cpp:603`), same formula as `atmosphere.fluidDensity` (§7). Applies only while `IsInWater()`. Not in templates. |
 | `repeatX`, `repeatY` | float | `0.0` each | Water texture repeat; `0` means "let the renderer compute it from map size". |
 | `absorb` | float3 | `{0, 0, 0}` | Per-channel absorption **per elmo of depth**. Uniform `waterAbsorbColor` in the ground shader. |
 | `baseColor` | float3 | `{0, 0, 0}` | Colour shallow water starts from (`waterBaseColor`). |
@@ -679,7 +827,7 @@ which is why a BAR map that omits, say, `unitspecularcolor` gets a console warni
 | `causticsStrength` | float | `0.08` | |
 | `shoreWaves` | bool | `true` | |
 | `forceRendering` | bool | `false` | Render water even when `currentMinMapHeight >= 0` (`MapInfo.h:167`). |
-| `numTiles` | int | `4` | `clamp(·, 1, 16)`. **Overwritten to 4 when `normalTexture` is empty** — the engine's built-in `waterbump_4tiles.dds` is a 4×4 tile set; user normal maps are expected to be 1×1 with no DynWaves (`MapInfo.cpp:301-313`). |
+| `numTiles` | int (stored as `unsigned char`, `MapInfo.h:169`) | `4` | `clamp(·, 1, 16)`. **Overwritten when `normalTexture` is empty** (`MapInfo.cpp:301-313`): it is forced to `4` — the engine's built-in `waterbump_4tiles.dds` is a 4×4 tile set; user normal maps are expected to be 1×1 with no DynWaves — **unless** the game's `gamedata/resources.lua` defines `graphics.maps.waternormaltex`, in which case `numTiles` is re-read as `clamp(graphics.maps.numTiles, 1, 16)` (default 4). Note the re-read key is `numTiles` **inside `graphics.maps`**, not next to the texture name. |
 | `texture` | string | `""` → `resources.lua graphics.maps.watertex` → `"ocean.jpg"` | `FIND_MAP_TEXTURE` with `maps/` first, then `bitmaps/` for the fallback. |
 | `foamTexture` | string | `""` → `graphics.maps.waterfoamtex` → `"foam.jpg"` | |
 | `normalTexture` | string | `""` → `graphics.maps.waternormaltex` → `"waterbump_4tiles.dds"` | |
@@ -709,19 +857,40 @@ All of these (minus `damage` and `fluidDensity`) are copied into `CWaterRenderin
 | mapinfo key | C++ field | Type | Engine default | Template value |
 | --- | --- | --- | --- | --- |
 | `bladeWaveScale` | `grass.bladeWaveScale` | float | `1.0` | `1.0` |
-| `bladeWidth` | `grass.bladeWidth` | float | **`0.7`** | `0.32` |
-| `bladeHeight` | `grass.bladeHeight` | float | **`4.5`** | `4.0` |
-| `bladeAngle` | `grass.bladeAngle` | float | **`1.0`** | `1.57` |
+| `bladeWidth` | `grass.bladeWidth` | float | **`0.7`** | `1` |
+| `bladeHeight` | `grass.bladeHeight` | float | **`4.5`** | `2.5` |
+| `bladeAngle` | `grass.bladeAngle` | float | **`1.0`** | `2.57` |
 | `maxStrawsPerTurf` | `grass.maxStrawsPerTurf` | int | `150` | (never written) |
 | `bladeColor` | `grass.color` | float3 | `{0.10, 0.40, 0.10}` | `{0.59, 0.81, 0.57}` |
 | *(in `resources`)* `grassBladeTex` | `grass.bladeTexName` | string | `""` | commented out |
 
-Actual blade height is `bladeHeight + randf(0, bladeHeight)` (`MapInfo.h:110`); `bladeWaveScale = 0`
-disables vertex animation. The `maphelper/mapdefaults.lua` numbers (`0.32 / 4.0 / 1.57`) differ from
-the engine defaults and are what the BAR templates copied.
+Actual blade height is `bladeHeight + randf(0, bladeHeight)` (`MapInfo.h:110`), implemented as
+`length = bladeHeight * (1.0 + lngRnd)` (`rts/Rendering/Env/GrassDrawer.cpp:778`); `bladeWaveScale = 0`
+disables vertex animation (it multiplies the wind vector, `GrassDrawer.cpp:354`).
 
-BAR does not use the engine grass drawer in practice — `luaui/Widgets/map_grass_gl4.lua` replaces it
-and takes its configuration from `custom.grassConfig` (§12.4).
+**`maxStrawsPerTurf` is a cap, not a count.** `GrassDrawer.cpp:286`:
+`strawPerTurf = std::min(50 + int(sqrt(detail_lim) * 10), mapInfo->grass.maxStrawsPerTurf)` — the
+`GrassDetail` config value (default 7, `GrassDrawer.cpp:37`) sets the actual density and the mapinfo
+key only clamps it from above.
+
+> **CORRECTED (2026-09-13).** An earlier revision listed the `map_blueprint` template values as
+> `0.32 / 4.0 / 1.57`. That is wrong. `map_blueprint/mapinfo.lua:105-107` ships
+> `bladeWidth = 1`, `bladeHeight = 2.5`, `bladeAngle = 2.57`.
+> The `0.32 / 4.0 / 1.57` triple lives in `cont/base/maphelper/maphelper/mapdefaults.lua:86-89`,
+> under the **legacy `.smd` names** `grassBladeWaveScale` / `grassBladeWidth` / `grassBladeHeight` /
+> `grassBladeAngle`, which `parse_tdf_map.lua:132-139` strips the `grass` prefix off when converting a
+> `.smd`. Those defaults therefore apply **only to the legacy `.smd` path**, never to a
+> `mapinfo.lua` map — a `mapinfo.lua` map that omits `grass` gets the engine defaults
+> (`0.7 / 4.5 / 1.0`), not the mapdefaults ones.
+
+**Does the `grass` table do anything in BAR?** The engine path *is* reached: `CWorldDrawer` constructs
+`new CGrassDrawer()` unconditionally (`rts/Rendering/WorldDrawer.cpp:123-124`) and calls
+`grassDrawer->Draw()` (`:354`); `GrassDetail` defaults to `7` (headless `0`). Engine grass only appears
+where the map actually has grass coverage — the `MEH_Vegetation` extra-header block, or a
+`smf.grassmapTex` override. Separately, BAR ships `luaui/Widgets/map_grass_gl4.lua`, which draws its
+own grass from `custom.grassConfig` (§12.4). *UNVERIFIED — needs confirmation:* whether BAR forces
+`GrassDetail = 0` in its shipped springsettings; `GrassDetail` appears in
+`Beyond-All-Reason/luaintro/springconfig.lua`, which I did not read.
 
 ### 10.2 `terrainTypes` — 256 slots
 
@@ -796,7 +965,19 @@ sub-table is parsed for nothing (commented out).
 | `maxNodesSearched` | uint | `0` | |
 | `maxRelativeNodesSearched` | float | `0.0` | |
 
-No published BAR map sets these.
+No published BAR map sets these, so there is no field-tested tuning.
+
+**Are they honoured?** Partially answered. `pfs.qtpfs_constants` is read back by
+`rts/Sim/Path/QTPFS/NodeLayer.cpp`, `Node.cpp`, `PathManager.cpp` and `PathSearch.cpp` (confirmed by
+repository-wide symbol search on 2026-09-13), so the QTPFS keys above do reach the pathfinder in a
+build that uses QTPFS. The `legacyConstants` sub-table is genuinely dead: both the `LuaTable` fetch
+and the `pfs_t::legacy_constants_t` assignment are commented out (`MapInfo.cpp:464`, `:467`), and
+`legacy_constants_t` is an empty struct (`MapInfo.h:210-211`).
+*UNVERIFIED — needs confirmation:* the per-key effect of each QTPFS constant; I confirmed only that
+the fields are referenced, not what each one does. Types are `unsigned int` for every key except
+`minSpeedModVal` / `maxSpeedModVal` / `maxRelativeNodesSearched`, which are `float`
+(`MapInfo.h:213-224`); they are read with `GetInt`, so a negative or fractional Lua value is
+truncated and then reinterpreted as a huge unsigned.
 
 ### 10.4 `sound`
 
@@ -804,13 +985,45 @@ No published BAR map sets these.
 
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `preset` | string | `"default"` | Looked up in `eaxPresets`. If not found the props stay at their zero-initialised `EAXSfxProps()` values (there is no `"default"` entry in `EFXPresets.cpp` — the table has `"generic"`, `"room"`, `"cave"`, `"mountains"`, `"forest"`, `"plain"`, `"underwater"`, the `castle_*`/`city_*` families, etc.). |
+| `preset` | string | `"default"` | Looked up in `eaxPresets` (`MapInfo.cpp:490`). **`"default"` is a real preset, aliased to `"outdoors_valley"`** — see below. If the name is not found the props stay at the `EAXSfxProps()` default-constructed state, which is **four empty maps** (`EFXPresets.h:15`, `EAXSfxProps() {}`), i.e. *no* `alEffectf`/`alFilterf` calls are emitted for it at commit time and whatever the EFX slot already held persists. |
 | `passfilter.gainlf` | float | *(preset)* | `AL_LOWPASS_GAIN` |
 | `passfilter.gainhf` | float | *(preset)* | `AL_LOWPASS_GAINHF` |
 | `reverb.*` | — | — | **Read but never used — see below.** |
 
-Only two names exist in `nameToALFilterParam` (`rts/System/Sound/OpenAL/EFXPresets.cpp:212-213`):
+Only two names exist in `nameToALFilterParam` (built from `alFilterParamToName`,
+`rts/System/Sound/OpenAL/EFXPresets.cpp:211-212` + `:216-220`):
 `"gainlf"` → `AL_LOWPASS_GAIN`, `"gainhf"` → `AL_LOWPASS_GAINHF`.
+
+**`preset = "default"` resolves to `outdoors_valley` — RESOLVED, corrected.**
+`EFXPresets.cpp` itself really does not define a preset called `"default"`. But
+`CEFX::Init` registers one at sound-init time, before any map is loaded:
+
+```cpp
+// rts/System/Sound/OpenAL/EFX.cpp:17
+static const std::string default_preset = "outdoors_valley";//"bathroom";
+
+// rts/System/Sound/OpenAL/EFX.cpp:55-56
+eaxPresets["default"] = eaxPresets[default_preset];
+sfxProperties         = eaxPresets[default_preset];
+```
+
+So the universal BAR idiom `sound = { preset = "default" }` selects the **`outdoors_valley`** EAX
+reverb (`EFXPresets.cpp`, in the `outdoors_*` family), not a null/neutral profile. The map's props
+are then applied wholesale at the end of loading:
+
+```cpp
+// rts/Game/LoadScreen.cpp:190-193
+#if !defined(HEADLESS) && !defined(NO_SOUND)
+// NB: sound is initialized at this point, but EFX support is *not* guaranteed
+efx.CommitEffects(mapInfo->efxprops);
+#endif
+```
+
+`CommitEffects` iterates `reverb_props_{f,i,v}` and `filter_props_f` and issues one
+`alEffectf`/`alEffecti`/`alEffectfv`/`alFilterf` per **present** entry
+(`EFX.cpp:245-255`) — which is why an empty `EAXSfxProps()` is a no-op rather than a zeroing.
+Caveat: `CEFX::Init` is only reached in a build with sound, and `CommitEffects` returns immediately
+unless `ALC_EXT_EFX` is present, so on a machine without EFX none of this is audible.
 
 **Engine bug worth knowing.** `ReadSound` evaluates `soundTable.SubTable("reverb")` and *discards
 the result*, then runs the second loop over `filterTable` (= `sound.passfilter`) again:
@@ -1029,7 +1242,8 @@ So: **`mapinfo.lua` is engine-facing; `mapconfig/` is game-facing** (plus the on
 
 ### 12.3 What BAR's game code reads out of `mapinfo.lua`
 
-All via `pcall(VFS.Include, "mapinfo.lua")` and all with **lowercased** keys:
+Mostly via `pcall(VFS.Include, "mapinfo.lua")`, and all with **lowercased** keys. (Not universally
+pcall'd: `gfx_volumetric_clouds.lua:42` uses a bare `local mapcfg = VFS.Include("mapinfo.lua")`.)
 
 | Consumer | Reads |
 | --- | --- |
@@ -1072,8 +1286,10 @@ case-insensitive match against the default table's own CamelCase names
 (`map_grass_gl4.lua:130-158`). Recognised keys and defaults:
 
 `patchResolution` 32, `patchPlacementJitter` 0.66, `patchSize` 4, `grassBladeScale` 0.5,
-`grassMinSize` 0.55, `grassMaxSize` 1.5, `grassBladeColorTex`, `mapGrassColorModTex` (`"$grass"`),
-`grassWindPerturbTex`, `grassWindMult` 4.5, `maxWindSpeed` 20, `grassDistTGA` `""`, plus a nested
+`grassMinSize` 0.55, `grassMaxSize` 1.5,
+`grassBladeColorTex` (`"LuaUI/Images/luagrass/grass_field_medit_flowering.dds.cached.dds"`),
+`grassWindPerturbTex` (`"bitmaps/GPL/perlin_noise.jpg"`), `mapGrassColorModTex` (`"$grass"`),
+`grassWindMult` 4.5, `maxWindSpeed` 20, `grassDistTGA` `""`, plus a nested
 `grassShaderParams` table (merged the same way) with `MAPCOLORFACTOR` 0.6, `MAPCOLORBASE` 1.0,
 `ALPHATHRESHOLD` 0.01, `WINDSTRENGTH` 0.06, `WINDSCALE` 0.33, `WINDSAMPLESCALE` 0.0007,
 `FADESTART` 5000, `FADEEND` 8000, `SHADOWFACTOR` 0.25, `HASSHADOWS` 1, `GRASSBRIGHTNESS` 1.0,
@@ -1087,8 +1303,12 @@ case-insensitive match against the default table's own CamelCase names
 **`custom.precipitation`** (`weather`, `density`, `size`, `speed`, `windscale`, `texture`) appear in
 every BAR map and in `mapgenerator/mapinfo_template.lua`, but a repo-wide code search of
 `beyond-all-reason/Beyond-All-Reason` for `fogatten` / `precipitation` finds **only**
-`mapgenerator/mapinfo_template.lua` and the unrelated weather-brush widgets. **Current BAR game code
-does not consume `custom.fog` or `custom.precipitation`** — they are inherited boilerplate from the
+`mapgenerator/mapinfo_template.lua` and the unrelated weather-brush widgets.
+**UNVERIFIED — needs confirmation.** This is a negative claim resting on one repo-wide code search
+that I could not re-run during the 2026-09-13 review (GitHub code-search rate limit). Treat it as
+"probably unread by BAR core" rather than proven; a map may also ship its own LuaGaia consumer.
+On that basis: **current BAR game code appears not to consume `custom.fog` or
+`custom.precipitation`** — they look like inherited boilerplate from the
 Spring-era `gfx_fog` / precipitation widgets. Keep them if you want (they are typed by BAR's
 `map-parser` `Custom` model), but do not expect them to do anything.
 
@@ -1107,8 +1327,52 @@ Set `mapfile = "maps/<Name>.smf"`. Without it the scanner walks the whole archiv
 
 ## 13. What `smf.*` overrides, in binary terms
 
-`rts/Map/SMF/SMFFormat.h`. The header is a packed, little-endian, 32-bit-int struct at file
-offset 0:
+`rts/Map/SMF/SMFFormat.h:49-70`. **Re-verified byte-for-byte against `master` on 2026-09-13 — every
+offset below is confirmed.** The header sits at file offset 0.
+
+A note on "packed": there is **no `#pragma pack`** anywhere in `SMFFormat.h`, and it does not matter,
+because the engine never memcpy's the struct. `CSMFMapFile::ReadMapHeader`
+(`rts/Map/SMF/SMFMapFile.cpp:293-313`) reads the header **field by field, in declaration order**:
+
+```cpp
+file.Read(head.magic, sizeof(head.magic));   // 16 bytes
+head.version        = ReadInt(file);         // 4
+head.mapid          = ReadInt(file);
+head.mapx           = ReadInt(file);
+head.mapy           = ReadInt(file);
+head.squareSize     = ReadInt(file);
+head.texelPerSquare = ReadInt(file);
+head.tilesize       = ReadInt(file);
+head.minHeight      = ReadFloat(file);
+head.maxHeight      = ReadFloat(file);
+head.heightmapPtr   = ReadInt(file);
+head.typeMapPtr     = ReadInt(file);
+head.tilesPtr       = ReadInt(file);
+head.minimapPtr     = ReadInt(file);
+head.metalmapPtr    = ReadInt(file);
+head.featurePtr     = ReadInt(file);
+head.numExtraHeaders= ReadInt(file);
+```
+
+so the **on-disk** layout is unconditionally 16 bytes of magic followed by sixteen 4-byte fields =
+**80 bytes**, regardless of C++ struct padding. `ReadInt`/`ReadFloat` (`:274-289`) wrap
+`swabDWord`/`swabFloat`, which are no-ops on little-endian hosts — so **write little-endian**.
+
+**Header validation is enforced and fatal.** `CheckHeader` (`SMFMapFile.cpp:16-28`) is called from
+`Open` and a failure throws `content_error("... corrupt header for ...")`:
+
+```cpp
+if (h.version        != 1)  return false;
+if (h.tilesize       != 32) return false;
+if (h.texelPerSquare != 8)  return false;
+if (h.squareSize     != 8)  return false;
+return (std::strcmp(h.magic, "spring map file") == 0);
+```
+
+Note what is **not** checked: `mapx`/`mapy` divisibility by 128 (the SMFFormat.h comment says "must
+be", but nothing verifies it), `mapid`, and any of the pointers. `magic` is compared with `strcmp`,
+so it must be the 15-character string `"spring map file"` plus a NUL — the remaining bytes of the
+16-byte field are not inspected, but write them as zero.
 
 | Offset | Size | Type | Field | Note |
 | ---: | ---: | --- | --- | --- |
@@ -1129,7 +1393,7 @@ offset 0:
 | 68 | 4 | `int32` | `metalmapPtr` | → `uint8[(mapx/2)*(mapy/2)]` ← `metalmapTex` overrides |
 | 72 | 4 | `int32` | `featurePtr` | → `MapFeatureHeader` |
 | 76 | 4 | `int32` | `numExtraHeaders` | `ExtraHeader{int size; int type;}` records follow |
-| **80** | | | *end of SMFHeader* | |
+| **80** | | | *end of SMFHeader* (`sizeof(SMFHeader)`) | |
 
 `ExtraHeader.type == MEH_Vegetation (1)` points at `uint8[(mapx/4)*(mapy/4)]` grass coverage
 (0 = none, 1 = grass) ← `grassmapTex` overrides.
@@ -1229,18 +1493,22 @@ SMF header.
 5. **`gravity` in mapinfo is positive elmos/s²**; `mapInfo->map.gravity` is negative elmos/frame².
 6. **`water.damage` in mapinfo is HP/second**; the stored value is half that.
 7. **`smf.minHeight = 0` is a real override** — presence, not value, is tested.
-8. **Override info-maps must be exactly `(mapx/2) × (mapy/2)` 8-bit greyscale** or they are ignored
-   with a warning.
+8. **Override info-maps must match the engine's size for that map exactly, as 8-bit greyscale**, or
+   they are ignored with a warning: `metalmapTex` and `typemapTex` are `(mapx/2) × (mapy/2)`,
+   `grassmapTex` is `(mapx/4) × (mapy/4)`.
 9. **`smtFileName%i` counts must equal `tileHeader.numTileFiles`** or the whole override is dropped;
    values are resolved relative to the `.smf`'s directory, so use bare filenames.
 10. **`atmosphere.skyBox` is prefixed with `maps/` unconditionally** (no `FIND_MAP_TEXTURE`).
 11. **`atmosphere.skyDir` is deprecated and does nothing** (logs `L_DEPRECATED`). Use `skyAxisAngle`.
 12. **`lighting.sunStartAngle` / `sunOrbitTime` / `specularSunColor` do nothing.**
 13. **`specularTex` is the master switch** for SSMF/advanced ground shading.
-14. **DNTS splatting needs a non-empty `splatDetailTex` string too** on some paths — BAR maps set it
-    to a deliberately missing filename. BAR's own mapgenerator template comments this:
+14. **DNTS splatting does NOT require `splatDetailTex` on current Recoil master** (§5.5) — the guard
+    is `haveSplatDetailDistribTexture || haveSplatNormalDistribTexture` (`SMFReadMap.cpp:251-252`).
+    The folklore persists because BAR's own mapgenerator template still comments
     *"some engine paths still key splat activation on splatDetailTex being non-empty even when DNTS
-    normals are provided."*
+    normals are provided"* (`mapgenerator/mapinfo_template.lua:350-351`). Shipping the conventional
+    dummy `"iwantDNTS.tga"` is harmless and portable; it is not required. **What IS required is a
+    real `splatDistrTex`** — omit it and you silently get the 1×1 all-red fallback.
 15. **`splatDistrTex` is sampled with map-wide UVs** (`specularTexGen`), not tiled.
 16. **Only the first 4 `splatDetailNormalTex*` are used.**
 17. **`resources.splatDetailNormalTex` (nested) beats `splatDetailNormalDiffuseAlpha` (flat)** — if
@@ -1252,8 +1520,11 @@ SMF header.
 21. **`sound.reverb` is dead code, and `sound.passfilter.gainlf/gainhf` leak into reverb
     density/diffusion** (§10.4).
 22. **`teams` must be contiguous from `[0]`**; only `x` and `z` are read.
-23. **Engine grass defaults ≠ template grass values** (`bladeWidth` 0.7 vs 0.32, `bladeHeight` 4.5
-    vs 4.0, `bladeAngle` 1.0 vs 1.57).
+23. **Engine grass defaults ≠ template grass values** (engine `bladeWidth` 0.7 / `bladeHeight` 4.5 /
+    `bladeAngle` 1.0; `map_blueprint` writes 1 / 2.5 / 2.57). The `0.32 / 4.0 / 1.57` triple in
+    `maphelper/mapdefaults.lua` is for the legacy `.smd` path only and never applies to a
+    `mapinfo.lua` map. `maxStrawsPerTurf` is an upper clamp on the `GrassDetail`-derived density,
+    not the density itself.
 24. **Typos are silent.** `map_blueprint` ships `groudspecularcolor` and just gets the default.
     There is no unknown-key warning anywhere in `CMapInfo`.
 25. **`version` is appended to `name`** by the archive scanner, so `name = "Foo"` + `version = "1.2"`
@@ -1372,9 +1643,9 @@ local mapinfo = {
 	--== engine grass (BAR replaces this with map_grass_gl4) ===================
 	grass = {
 		bladeWaveScale = 1.0,
-		bladeWidth     = 0.32,  -- engine default 0.7
-		bladeHeight    = 4.0,   -- engine default 4.5
-		bladeAngle     = 1.57,  -- engine default 1.0
+		bladeWidth     = 1.0,   -- engine default 0.7   (map_blueprint ships 1)
+		bladeHeight    = 2.5,   -- engine default 4.5   (map_blueprint ships 2.5)
+		bladeAngle     = 2.57,  -- engine default 1.0   (map_blueprint ships 2.57)
 		bladeColor     = { 0.59, 0.81, 0.57 },  -- ignored if resources.grassBladeTex is set
 		-- maxStrawsPerTurf = 150,
 	},
@@ -1622,29 +1893,45 @@ Engine, `github.com/beyond-all-reason/RecoilEngine`, branch `master` (fetched 20
 
 * `rts/Map/MapInfo.h` — struct definitions: `map_t` 62-77, `gui_t` 80-82, `atmosphere_t` 85-98,
   `splats_t` 101-104, `grass_t` 107-115, `light_t` 118-129, `water_t` 133-174, `smf_t` 177-207,
-  `pfs_t` 209-225, `TerrainType` 229-239, `NUM_TERRAIN_TYPES` 25.
+  `pfs_t` 209-225, `TerrainType` 229-**237** (the `terrainTypes[]` array itself is 239),
+  `NUM_TERRAIN_TYPES` 25.
 * `rts/Map/MapInfo.cpp` — `FIND_MAP_TEXTURE` 35-44, ctor/order 48-78, `ReadGlobal` 90-117,
   `ReadGui` 120-125, `ReadAtmosphere` 128-173, `ReadSplats` 176-183, `ReadGrass` 185-200,
   `ReadLight` 202-226, `ReadWater` 229-337, `ParseSplatDetailNormalTexture` 340-351,
-  `ReadSMF` 354-429, `ReadTerrainTypes` 432-458, `ReadPFSConstants` 460-480, `ReadSound` 482-543.
+  `ReadSMF` 354-429 (resources half 354-400, `smf` half 402-429),
+  `ReadTerrainTypes` 432-458, `ReadPFSConstants` 460-480, `ReadSound` 482-543.
 * `rts/Map/MapParser.cpp` — file selection 19-37, injected globals 40-53, `GetStartPos` 62-85.
-* `rts/System/FileSystem/ArchiveScanner.cpp` — `knownTags` 74-87, `ArchiveData` ctor 129-201,
-  `IsReservedKey` 216-218, map-archive classification 742-800, `ScanArchiveLua` 923-941.
+* `rts/System/FileSystem/ArchiveScanner.cpp` — `INTERNAL_VER = 22` at 62, `knownTags` 74-87,
+  `ArchiveData` ctor 129-201 (`modtype` special case 144-147, `depend`/`replace` 169-175,
+  version-append 187-193, empty-name back-fill 199-200), `IsReservedKey` 215-218,
+  `IsValid` (required `name` + `modtype`) 221-246, `SearchMapFile` 601-615,
+  map-archive classification 740-800 (`hasMapInfo` 746, map branch 783, `name`/`name_pure` back-fill
+  787-790, `mapfile` 792-793, maphelper dependency 795, `modType = modtype::map` 796),
+  `ScanArchiveLua` 923-957.
 * `rts/Lua/LuaParser.cpp` — `lowerKeys`/`lowerCppKeys` 59-60, 83-84; `SetupEnv` 125-196;
   key lowering in `Execute` 283-284; `ParseFloat3/4` 1415-1449; `ParseBoolean` 1452-1475;
   getters 1480-1700.
-* `rts/Lua/LuaUtils.cpp` — `LowerKeysReal`/`LowerKeys` 367-441.
-* `rts/Map/SMF/SMFReadMap.cpp` — feature detection 68-79, height override 146-161,
-  `LoadMinimap` 163-175, `CreateSpecularTex` 195-247, `CreateSplatDetailTextures` 249-330,
-  `CreateGrassTex` 332-347, `CreateDetailTex` 349-359, texture reload 780-806,
-  `GetInfoMap` 923-970.
+* `rts/Lua/LuaUtils.cpp` — `LowerKeysReal` 367-424, `LuaUtils::LowerKeys` 427-440,
+  `CheckTableForNaNs` 485-.
+* `rts/Map/SMF/SMFReadMap.cpp` — feature detection 68-79, height override **145-146** + `ReadHeightmap`
+  161, `LoadMinimap` 163-190, `CreateSpecularTex` 192-, `CreateSplatDetailTextures` **249-326**
+  (entry guard 251-252, DNTS-only debug log 255-257, `splatDetailTex` fallback 259-278,
+  `splatDistrTex` fallback 280-296, DNTS loop 298-322), `CreateGrassTex` **328-343**,
+  `CreateDetailTex` 345-, texture reload 780-806, `GetInfoMap` **924-970**.
 * `rts/Map/SMF/SMFReadMap.h` — `NUM_SPLAT_DETAIL_NORMALS = 4` at 183.
-* `rts/Map/SMF/SMFRenderState.cpp` — shader flags 113-128, sampler/uniform bindings 149-190.
-* `rts/Map/SMF/SMFGroundTextures.cpp` — `smtFileNames` override 121-175.
-* `rts/Map/SMF/SMFFormat.h` — `SMFHeader` 48-70, `ExtraHeader` 82-86, `MEH_Vegetation` 100,
-  `SMALL_TILE_SIZE` 27, `MINIMAP_NUM_MIPMAP` 30, `MINIMAP_SIZE` 33.
+* `rts/Map/SMF/SMFRenderState.cpp` — shader flags **115-126** (`SMF_ADV_SHADING` unconditional at
+  115), sampler bindings **146-165**, `splatTexScales`/`splatTexMults` 182-183,
+  `specularTexGen` 193.
+* `rts/Map/SMF/SMFGroundTextures.cpp` — `smtFileNames` override **125-149**, tile-file read loop
+  147-176, `.smt` magic/version/tileSize/compressionType validation 165-172.
+* `rts/Map/SMF/SMFFormat.h` — `SMFHeader` **49-70**, `ExtraHeader` **83-86**,
+  `MEH_None` 91, `MEH_Vegetation` **103**, `MapTileHeader` 123-127, `MapFeatureHeader` 135-139,
+  `MapFeatureStruct` 148-157, `TileFileHeader` 175-183,
+  `SMALL_TILE_SIZE` **28**, `MINIMAP_NUM_MIPMAP` **31**, `MINIMAP_SIZE` **34**.
+* `rts/Map/SMF/SMFMapFile.cpp` — `GetInfoMapSize` 193-203 (per-info-map dimensions),
+  `ReadInfoMap` 206-.
 * `rts/Map/SMF/SMFGroundDrawer.cpp` — `voidAlphaMin` 242, 291; void passes 326-330.
-* `rts/Map/ReadMap.cpp` — `metalMap.Init` 167, `CalcTypemapChecksum` 478-489, info-map load 158-183.
+* `rts/Map/ReadMap.cpp` — `metalMap.Init` 167, `CalcTypemapChecksum` **478-489**, info-map load 158-183.
 * `rts/Map/BasicMapDamage.cpp` — `mapHardness` 24, per-type hardness 67-68.
 * `rts/Rendering/Env/SunLighting.{h,cpp}` — struct 9-49 / `Init` 56-75.
 * `rts/Rendering/Env/WaterRendering.{h,cpp}` — struct 12-60 / `Init` 19-65.
@@ -1654,19 +1941,45 @@ Engine, `github.com/beyond-all-reason/RecoilEngine`, branch `master` (fetched 20
 * `rts/Lua/LuaUnsyncedCtrl.cpp` — `SetAtmosphere` 4127-4190, `SetSunDirection` 4195-4214,
   `SetSunLighting` 4236-4290, `SetMapRenderingParams` 4293-4345, `SetWaterParams` 4648-4840.
 * `rts/Lua/LuaSyncedCtrl.cpp` — `SetTerrainTypeData` 7146-7190.
-* `rts/Lua/LuaSyncedRead.cpp` — `GetMapStartPositions` 1609-1630.
-* `rts/Lua/LuaConstGame.cpp` — map constants 147-177.
-* `rts/Game/GameSetup.cpp` — `LoadStartPositionsFromMap` 249-258, `LoadStartPositions` 260-300.
-* `rts/Game/GameSetup.h` — `StartPosType` 171-177.
+* `rts/Lua/LuaSyncedRead.cpp` — `GetMapStartPositions` **1612-1630** (pushes `pos.y`, which
+  `MapParser::GetStartPos` never writes, so it is always the `float3` default `0`).
+* `rts/Lua/LuaConstGame.cpp` — `windMin`/`windMax` 152-153, `mapDamage` 156, `mapX` 162,
+  `mapSizeX` 164, `mapName` 170, `mapDescription` 171, `mapHardness` 172, `extractorRadius` 173,
+  `tidal` 174, `waterDamage` 175, `gravity` 176 (`-map.gravity * GAME_SPEED * GAME_SPEED`).
+* `rts/Game/GameSetup.cpp` — `LoadStartPositionsFromMap` **250-260** (the
+  `for (a = 0; a < numTeams && startPosPred(mapParser, a); ++a)` loop that makes `teams` contiguous
+  from 0 mandatory), `LoadStartPositions` **262-301** (random shuffle 272-278, early return for
+  `ChooseInGame`/`ChooseBeforeGame` 282-283), `startPosType` clamp 645-649.
+* `rts/Game/GameSetup.h` — `StartPosType` **172-176** (`StartPos_Last = 3`).
 * `rts/Game/Game.cpp` — `LoadTidal` / `LoadWind` 725-726.
 * `rts/Sim/Units/Unit.cpp` — `SlowUpdate` 982-987, `DoWaterDamage` 1215-1229.
-* `rts/Sim/MoveTypes/MoveMath/MoveMath.cpp` — terrain speed mods 94-142.
+* `rts/Sim/MoveTypes/MoveMath/MoveMath.cpp` — terrain speed mods **97-100** (and the
+  direction-aware overload **134-137**).
 * `rts/Sim/Features/Feature.cpp` — `fluidDensity` drag 603-604.
+* `rts/Sim/Objects/SolidObject.cpp` — `GetDragAccelerationVec` 331-360 (the actual drag formula).
+* `rts/Rendering/Env/ModernSky.cpp` — `sunDir.w` → `sunColor.a` uniform 79-82.
+* `rts/Rendering/Env/GrassDrawer.cpp` — `GrassDetail` CONFIG 37, `bladeTexName` load 236,
+  `strawPerTurf` clamp 286, `bladeWaveScale` 354, `bladeHeight` 778, `bladeAngle` 779,
+  `bladeWidth` 786, `grass.color` 829, 898.
+* `rts/Rendering/WorldDrawer.cpp` — `new CGrassDrawer()` 123-124, `grassDrawer->Draw()` 354.
+* `rts/System/Sound/OpenAL/EFX.cpp` — `default_preset = "outdoors_valley"` 17,
+  `eaxPresets["default"]` alias 55-56, `SetPreset` 205-221, `CommitEffects` 238-258.
+* `rts/System/Sound/OpenAL/EFXPresets.h` — `EAXSfxProps()` empty default ctor 15,
+  `EFXParamTypes` enum 75-81.
+* `rts/Game/LoadScreen.cpp` — `efx.CommitEffects(mapInfo->efxprops)` 190-193.
 * `rts/Rendering/Env/Decals/GroundDecalHandler.cpp` — `receiveTracks` 1243-1248.
-* `rts/Sim/Misc/GlobalConstants.h` — `SQUARE_SIZE 8` (24), `GAME_SPEED 30` (52),
-  `UNIT_SLOWUPDATE_RATE 15` (60), `MAX_TEAMS 255` (77).
-* `rts/System/FileSystem/VFSModes.h` — 6-20.
-* `rts/System/Sound/OpenAL/EFXPresets.cpp` — presets 14-157, param tables 159-221.
+* `rts/Sim/Misc/GlobalConstants.h` — `SQUARE_SIZE 8` (24), `ELMOS_TO_METERS 1/8` (45),
+  `GAME_SPEED 30` (52), `INV_GAME_SPEED 1/30` (53), `UNIT_SLOWUPDATE_RATE 15` (60),
+  `MAX_TEAMS 255` (77).
+* `rts/System/float4.h` — `operator=(const float3&)` 47-52 **writes only x/y/z and leaves `w`
+  untouched**, which is why every `GetFloat3`-into-`float4` field (`atmosphere.fogColor`,
+  `water.planeColor`, `light.modelAmbientColor`, `light.modelDiffuseColor`) keeps `w = 0` from the
+  default constructor (13).
+* `rts/System/FileSystem/VFSModes.h` — 6-20: `SPRING_VFS_MAP_BASE` = `"mb"` (9+10+14),
+  `SPRING_VFS_MOD_BASE` = `"Mb"` (8+10+13), `SPRING_VFS_ZIP` = `"Mmeb"` (16).
+* `rts/System/Sound/OpenAL/EFXPresets.cpp` — `InitPresets` 14-158 (no `"default"` entry),
+  `InitConversionTables` 160-222: `alParamType` 162-186, `alParamToName` 189-211,
+  `alFilterParamToName` **213-214**, reverse maps 216-220.
 * `rts/System/float4.h` — 13-52.
 * `rts/Map/Generation/BlankMapGenerator.cpp` — template substitution 245-280.
 * `cont/base/springcontent/shaders/GLSL/SMFFragProg.glsl` — `SMF_DETAILTEX_RES` 25,
@@ -1702,3 +2015,144 @@ Game / ecosystem:
   extraction), `src/map-model.ts` (the `MapInfo` TypeScript model BAR tooling expects).
 * `github.com/spring/spring` — `rts/Map/MapInfo.cpp` (upstream, confirms `resources`-only texture
   parsing is not a Recoil divergence).
+
+---
+
+## 18. Verification log
+
+Adversarial re-check performed **2026-09-13** against primary sources only. Every source was fetched
+as a raw file (`raw.githubusercontent.com`) and read locally; nothing below was confirmed from
+memory. Repositories, all at `master` unless noted:
+
+* `beyond-all-reason/RecoilEngine`
+* `beyond-all-reason/map_blueprint`
+* `beyond-all-reason/Beyond-All-Reason`
+* `beyond-all-reason/map-parser`
+* `kcat/openal-soft` (for the `AL_*` enum values only)
+
+### 18.1 Corrected
+
+| # | Claim as originally written | Verified against | Verdict |
+| --- | --- | --- | --- |
+| C1 | `map_blueprint` grass template values are `bladeWidth 0.32 / bladeHeight 4.0 / bladeAngle 1.57`, copied from `maphelper/mapdefaults.lua` | `map_blueprint/mapinfo.lua:105-107`; `cont/base/maphelper/maphelper/mapdefaults.lua:85-89`; `parse_tdf_map.lua:126-139` | **CORRECTED.** `map_blueprint` ships `1 / 2.5 / 2.57`. The `0.32 / 4.0 / 1.57` triple exists only in `mapdefaults.lua` under the legacy `.smd` names `grassBladeWidth`/`grassBladeHeight`/`grassBladeAngle`, and applies only to the `.smd` conversion path. §10.1, gotcha 23 and the §16 template all fixed. |
+| C2 | There is no `"default"` sound preset; `preset = "default"` leaves the props zero-initialised | `rts/System/Sound/OpenAL/EFX.cpp:17, 55-56`; `EFXPresets.h:15`; `LoadScreen.cpp:190-193`; `EFX.cpp:238-258` | **CORRECTED.** `CEFX::Init` registers `eaxPresets["default"] = eaxPresets["outdoors_valley"]` at sound init, before map load. So `preset = "default"` selects the **outdoors_valley** reverb. Separately, `EAXSfxProps()` leaves four **empty** maps, not zeroed fields — a miss emits no `alEffect*` calls at all. Resolves open question 1. |
+| C3 | All three info-map overrides must be `(mapx/2) × (mapy/2)` | `rts/Map/SMF/SMFMapFile.cpp:193-203`; `SMFReadMap.cpp:924-970` | **CORRECTED.** `metalmapTex` and `typemapTex` are `mapx/2 × mapy/2`; **`grassmapTex` is `mapx/4 × mapy/4`**. §4 and gotcha 8 fixed. |
+| C4 | DNTS splatting requires a non-empty `splatDetailTex` (hence the `"iwantDNTS.tga"` idiom) | `SMFReadMap.cpp:68-79, 249-296`; `SMFRenderState.cpp:118-121` | **CORRECTED for current master.** The guard is `haveSplatDetailDistribTexture \|\| haveSplatNormalDistribTexture`, and both `splatDetailTex`/`splatDistrTex` get 1×1 fallbacks, so `SMF_DETAIL_NORMAL_TEXTURE_SPLATTING` is set without `splatDetailTex`. New §5.5 documents this; gotcha 14 rewritten. The BAR comment the folklore comes from is real and was confirmed verbatim at `mapgenerator/mapinfo_template.lua:350-351`. |
+| C5 | `water.numTiles` is simply "overwritten to 4 when `normalTexture` is empty" | `MapInfo.cpp:300-313`; `MapInfo.h:169` | **CORRECTED (incomplete).** It is forced to 4 **unless** the game's `gamedata/resources.lua` defines `graphics.maps.waternormaltex`, in which case it is re-read from `graphics.maps.numTiles` (clamped 1..16). Field type is `unsigned char`. |
+| C6 | "All [BAR consumers] via `pcall(VFS.Include, "mapinfo.lua")`" | `luaui/Widgets/gfx_volumetric_clouds.lua:42`; `luaui/Widgets/map_grass_gl4.lua:130` | **CORRECTED (minor).** `map_grass_gl4` uses `pcall`; `gfx_volumetric_clouds` uses a bare `VFS.Include`. |
+| C7 | `custom.grassConfig` defaults list, with `grassBladeColorTex` blank | `luaui/Widgets/map_grass_gl4.lua:84-115` | **CORRECTED (minor).** Default is `"LuaUI/Images/luagrass/grass_field_medit_flowering.dds.cached.dds"`; `grassWindPerturbTex` defaults to `"bitmaps/GPL/perlin_noise.jpg"`. Every other listed default matched exactly. |
+| C8 | `maxStrawsPerTurf` is the straw count | `rts/Rendering/Env/GrassDrawer.cpp:286, 37` | **CORRECTED (nuance).** `strawPerTurf = min(50 + int(sqrt(detail_lim) * 10), maxStrawsPerTurf)` — the mapinfo key only clamps a `GrassDetail`-derived density from above. |
+| C9 | Assorted citation line numbers | all of the above files | **CORRECTED.** Drift of 1–6 lines in ~12 citations (`SMFHeader` 49-70 not 48-70; height override 145-146 not 146-147; `CreateGrassTex` 328-343 not 332-347; `GetInfoMap` 924-970; `SMFRenderState` flags 115-126 with `SMF_ADV_SHADING` omitted; texture units 146-165; `smtFileNames` 125-149; `LowerKeys` 367-424/427-440; `TerrainType` 229-237; `GetMapStartPositions` 1612; `StartPosType` 172-176; `MoveMath` 97-100; `EFXPresets` filter names 213-214). §17 rewritten with finer-grained anchors. |
+
+### 18.2 Confirmed
+
+| Claim | Source checked | Verdict |
+| --- | --- | --- |
+| **SMF header: every byte offset in §13** — magic 0/16, version 16, mapid 20, mapx 24, mapy 28, squareSize 32, texelPerSquare 36, tilesize 40, minHeight 44, maxHeight 48, heightmapPtr 52, typeMapPtr 56, tilesPtr 60, minimapPtr 64, metalmapPtr 68, featurePtr 72, numExtraHeaders 76, total 80 | `rts/Map/SMF/SMFFormat.h:49-70` (declaration order) **cross-checked against** `rts/Map/SMF/SMFMapFile.cpp:293-313` (sequential field-by-field read) | **CONFIRMED** by two independent readings. The sequential reader makes the on-disk layout independent of struct padding. |
+| `MINIMAP_SIZE = 699048`, `MINIMAP_NUM_MIPMAP = 9`, `SMALL_TILE_SIZE = 512+128+32+8 = 680` | `SMFFormat.h:28, 31, 34` | **CONFIRMED**, including the doc's 9-term mip sum (524288+131072+32768+8192+2048+512+128+32+8 = 699048). |
+| Data-block sizes: heightmap `uint16[(mapx+1)*(mapy+1)]`, typemap/metalmap `uint8[mapx/2 * mapy/2]`, grass `uint8[mapx/4 * mapy/4]`, tile index map `int[mapx/4 * mapy/4]` | `SMFFormat.h:62-67, 96, 119-121` | **CONFIRMED.** §13.1's 16×16 worked example (2 101 250 / 262 144 / 65 536 / 262 144 B) recomputed and correct. |
+| `MEH_None = 0`, `MEH_Vegetation = 1`, `ExtraHeader{int size; int type;}` | `SMFFormat.h:83-86, 91, 103` | **CONFIRMED.** |
+| Header validation is fatal (`version==1`, `tilesize==32`, `texelPerSquare==8`, `squareSize==8`, `strcmp(magic,"spring map file")==0`) | `SMFMapFile.cpp:16-28, 48-54` | **CONFIRMED** — this was a gap, now documented in §13. |
+| `mapInfos[] = {"maphelper/mapinfo.lua", "mapinfo.lua"}`, `FileExists` used as index, `SPRING_VFS_MAP_BASE` | `MapParser.cpp:19-20, 37`; `VFSModes.h:9-14` | **CONFIRMED.** `SPRING_VFS_MAP_BASE == "mb"`, `SPRING_VFS_ZIP == "Mmeb"`. |
+| Injected globals `Map.{fileName,fullName,configFile}` + `Spring.GetMapOptions` guarded by `!UNITSYNC && !DEDICATED && !BUILDING_AI` | `MapParser.cpp:40-53`; `GetMapConfigName` 23-33 | **CONFIRMED.** |
+| Lua sandbox contents (nil'd `dofile`/`loadfile`/`loadlib`/`require`/`gcinfo`/`collectgarbage`/`newproxy`; `DummyRandom`; `Spring.Echo/Log/TimeCheck`; VFS set; `Engine`, `Script.IsEngineMinVersion`, `LOG`, `Encoding`, `DontMessWithMyCase`; **no `Game`** outside the defs parser) | `LuaParser.cpp:125-196` | **CONFIRMED**, item for item. |
+| `lowerKeys`/`lowerCppKeys` both default `true`; mixed-case key is always removed, lowercase inserted only if absent | `LuaParser.cpp:59-60, 83-84, 283-284, 872, 1001`; `LuaUtils.cpp:367-424, 427-440` | **CONFIRMED.** |
+| Type coercion table (`GetFloat3` accepts `"x y z"` via `sscanf` needing exactly 3; `GetFloat4` exactly 4; `ParseBoolean` accepts bool/number/`"1"`/`"true"`/`"0"`/`"false"` case-insensitively) | `LuaParser.cpp:1415-1474` | **CONFIRMED.** |
+| `knownTags` — all 12 entries, names, descriptions and `required` flags | `ArchiveScanner.cpp:74-87` | **CONFIRMED**, quoted text matches. |
+| `version` is appended to `name` when not already a substring | `ArchiveScanner.cpp:187-193` | **CONFIRMED.** |
+| `depend`/`replace` read 1-based and contiguous; both are reserved keys and not stored as info items | `ArchiveScanner.cpp:169-175, 215-218` | **CONFIRMED.** |
+| `modtype` is always stored as an integer; a map archive gets `modType` force-set to `modtype::map` and the maphelper dependency appended | `ArchiveScanner.cpp:144-147, 795-796` | **CONFIRMED.** |
+| Empty `name` is back-filled from the `.smf` basename (both `name` and `name_pure`) | `ArchiveScanner.cpp:786-790` | **CONFIRMED.** |
+| `ScanArchiveLua` skips `LuaConstGame::PushEntries` and uses `LuaParser(<bytes>, SPRING_VFS_ZIP)` | `ArchiveScanner.cpp:936-937` | **CONFIRMED**, comment quoted verbatim. |
+| Archive is a map iff `mapinfo.lua` exists or `SearchMapFile` finds a `.smf` | `ArchiveScanner.cpp:746, 783`; `SearchMapFile` 601-615 | **CONFIRMED.** |
+| Every `ReadGlobal` default and clamp (`maphardness` 100 with sign-preserving `max(0.001,abs)`; `gravity` 130 → `max(0.001,·)` → `-g/900`, overridden by `modInfo.forcedMapGravityStrength`; `tidalStrength` 0; `maxMetal` 0.02; `extractorRadius` 500; `voidAlphaMin` 0.9; `voidWater`/`voidGround`/`notDeformable` false; `autoShowMetal` true) | `MapInfo.cpp:90-125` | **CONFIRMED**, value for value. |
+| `GAME_SPEED 30`, `INV_GAME_SPEED 1/30`, `UNIT_SLOWUPDATE_RATE 15`, `SQUARE_SIZE 8`, `MAX_TEAMS 255` | `GlobalConstants.h:24, 52, 53, 60, 77` | **CONFIRMED.** |
+| `water.damage` is scaled by `15/30 = 0.5` at parse, applied once per `SlowUpdate` (every 15 frames, 2×/s) ⇒ **the mapinfo value is HP/second** | `MapInfo.cpp:237`; `Unit.cpp:987, 1215-1230` | **CONFIRMED.** The doc's semantic conclusion holds. |
+| `Game.gravity` re-multiplies by `GAME_SPEED²`; `Game.waterDamage` reports the halved value | `LuaConstGame.cpp:170-176` | **CONFIRMED.** |
+| `mapHardness` multiplies per-terrain-type hardness | `BasicMapDamage.cpp:24, 67` | **CONFIRMED.** |
+| `metalMap.Init(..., mapInfo->map.maxMetal)` | `ReadMap.cpp:167` | **CONFIRMED.** |
+| Every `ReadAtmosphere` default and clamp, including `fluidDensity = 1.2*0.25`, `skyAxisAngle` axis renormalisation + `ClampRad`, and the `skyDir` `L_DEPRECATED` log | `MapInfo.cpp:128-173` | **CONFIRMED**, including the deprecation message text. |
+| `fogColor` is a `float4` whose `.w` stays 0 because it is assigned from a `float3` | `MapInfo.h:91`; `float4.h:47-52` (`operator=(const float3&)` writes only x/y/z) | **CONFIRMED** — same mechanism for `water.planeColor`, `light.modelAmbientColor`, `light.modelDiffuseColor`. |
+| Fog start/end are fractions of the camera far plane | `ISky.cpp:56-63` | **CONFIRMED.** |
+| `skyBox` is hard-prefixed with `"maps/"`, bypassing `FIND_MAP_TEXTURE`; empty ⇒ `CModernSky` | `ISky.cpp:70-82` | **CONFIRMED.** |
+| Every `ReadLight` default, the `unitSpecularColor → modelDiffuseColor` cross-default, and both shadow-density clamps | `MapInfo.cpp:202-226` | **CONFIRMED.** |
+| Every `ReadWater` default (incl. `fresnelMax 0.8`, `specularPower 20`, `causticsResolution 75`, `fluidDensity 240`), `hasWaterPlane = KeyExists("planeColor")`, and `specularColor` defaulting to `light.groundDiffuseColor` | `MapInfo.cpp:229-337` | **CONFIRMED.** The doc's note that `maphelper/mapdefaults.lua` disagrees on `fresnelMax` is also confirmed — it says `0.3` at `mapdefaults.lua:61`. |
+| Caustics resolution order: `water.caustics` (prefix `maps/`) → `resources.lua graphics.caustics` (prefix `bitmaps/`) → 32 hardcoded `bitmaps/caustics/caustic%02i.jpg` | `MapInfo.cpp:315-336` | **CONFIRMED.** |
+| `FIND_MAP_TEXTURE` semantics: no-op on empty, `SPRING_VFS_ZIP` existence check, else prefix `defaultDir` (default `"maps/"`), RawFS deliberately excluded | `MapInfo.cpp:35-44` | **CONFIRMED**, comment quoted verbatim. |
+| The 9-entry `texNames` array and the `detailNormalTex → blendNormalsTexName` key/field mismatch | `MapInfo.cpp:361-376` | **CONFIRMED.** |
+| Nested `resources.splatDetailNormalTex` beats the flat form, and takes `alpha` from the sub-table | `MapInfo.cpp:384-400` | **CONFIRMED.** |
+| Only the first 4 DNTS entries load; a failed load becomes 1×1 `{127,127,255,127}`; `splatDetailTex` fallback `{127,127,127,127}`; `splatDistrTex` fallback `{255,0,0,0}` | `SMFReadMap.h:183`; `SMFReadMap.cpp:260-322` | **CONFIRMED**, all four fallback colours exact. |
+| `smf.*` height override: presence-tested via `KeyExists`, decode `height = minHgt + raw16 * (maxHgt-minHgt)/65536` | `MapInfo.cpp:406-409`; `SMFReadMap.cpp:145-146, 161` | **CONFIRMED.** §13.2's arithmetic recomputed and correct. |
+| `smtFileName%i` scanned from 0 upward, stops at first gap; override honoured only if count `== tileHeader.numTileFiles`; resolved against the `.smf`'s directory with an absolute-path fallback | `MapInfo.cpp:421-428`; `SMFGroundTextures.cpp:125-149` | **CONFIRMED**, including that `map_blueprint`'s `"maps/MAP_BLUEPRINT_V1.smt"` survives only via the fallback. |
+| `splats.texScales`/`texMults` defaults `{0.02×4}` / `{1×4}`; `SMF_DETAILTEX_RES = 0.02` | `MapInfo.cpp:181-182`; `SMFFragProg.glsl:25` | **CONFIRMED.** |
+| The R/G/B/A → `splatDetailNormalTex1..4` channel mapping and `splatDetailStrength.x = min(1, dot(splatCofac, 1))` | `SMFFragProg.glsl:174-198` | **CONFIRMED**, shader body matches the doc's quote line for line. The final blend at `:328` and the parallax/specular co-sizing comment at `:284-285` also confirmed. |
+| `splatDistrTex` is sampled at `specTexCoords = worldPos.xz * specularTexGen`, `specularTexGen = (1/(mapx*8), 1/(mapy*8))` — i.e. map-wide, not tiled | `SMFFragProg.glsl:262, 321`; `SMFRenderState.cpp:193` | **CONFIRMED.** §6.2's worked example recomputed and correct. |
+| All 11 `SetFlag` shader features and all 20 texture-unit bindings | `SMFRenderState.cpp:115-126, 146-165` | **CONFIRMED** (with the line-number and `SMF_ADV_SHADING` corrections in C9). |
+| `NUM_TERRAIN_TYPES = 256`, integer-keyed `[0..255]`, defaults `name "Default"` / `hardness 1` / `receiveTracks true` / all four `moveSpeeds` 1, clamps `max(0.001)` and `max(0)` | `MapInfo.h:25`; `MapInfo.cpp:432-458` | **CONFIRMED.** |
+| `moveSpeeds` keys are exactly `tank`/`kbot`/`hover`/`ship` and multiply the computed speed mod | `MapInfo.cpp:446-449`; `MoveMath.cpp:97-100, 134-137` | **CONFIRMED.** |
+| Terrain types are **synced** — hashed into `CalcTypemapChecksum` as `name` + the byte range `offsetof(hardness) .. offsetof(receiveTracks)` | `ReadMap.cpp:478-489`; `MapInfo.h:228` | **CONFIRMED**, including the "please fix CalcTypemapChecksum" warning comment. |
+| `ReadPFSConstants` defaults and clamps; `legacyConstants` is commented out | `MapInfo.cpp:460-480`; `MapInfo.h:209-225` | **CONFIRMED.** |
+| The `ReadSound` double-loop bug: `soundTable.SubTable("reverb")` return value discarded, second loop still iterates `nameToALFilterParam` over `filterTable` | `MapInfo.cpp:515-541` | **CONFIRMED** — the code is exactly as the doc quotes it. |
+| `AL_LOWPASS_GAIN == AL_EAXREVERB_DENSITY == 0x0001` and `AL_LOWPASS_GAINHF == AL_EAXREVERB_DIFFUSION == 0x0002`, so `passfilter.gainlf/gainhf` also write reverb density/diffusion | `kcat/openal-soft` → `include/AL/efx.h:80-81, 207-208` | **CONFIRMED.** The doc's most surprising claim is correct. |
+| `nameToALFilterParam` contains only `gainlf`/`gainhf`; the 23 reverb names are as listed | `EFXPresets.cpp:189-214` | **CONFIRMED**, all 23 names match. |
+| Reader execution order and the single cross-field dependency (`water.specularColor` ← `light.groundDiffuseColor`) | `MapInfo.cpp:65-75, 254` | **CONFIRMED.** |
+| `gamedata/resources.lua` is parsed first with `SPRING_VFS_MOD_BASE` (the **game's**, not the map's) | `MapInfo.cpp:56-63` | **CONFIRMED.** |
+| `MapParser::GetStartPos` reads only `teams[<int>].startPos.{x,z}`; no `y` | `MapParser.cpp:62-85` | **CONFIRMED.** |
+| `teams` must be contiguous from `[0]` — the load loop short-circuits on the first failure | `GameSetup.cpp:250-260` (`a < numTeams && startPosPred(...)`) | **CONFIRMED.** |
+| `Spring.GetMapStartPositions` returns `{x, 0, z}` because `float3` default-constructs to zero | `LuaSyncedRead.cpp:1612-1630` | **CONFIRMED.** |
+| `StartPosType` 0/1 load map positions, 2/3 do not; Random shuffles `teamStartNum` with a seed hashed from the setup text | `GameSetup.cpp:262-301`; `GameSetup.h:172-176` | **CONFIRMED.** |
+| BAR's `map-parser` does **not** execute the Lua — `parsedMapInfo.body[0] as LocalStatement`, first `TableConstructorExpression` in `init`, then only String/Numeric/Boolean literals, negated numeric literals and nested tables | `map-parser/src/map-parser.ts:427-431, 436-468` | **CONFIRMED.** This is the strongest constraint on file shape and it holds exactly as written. |
+| `map_blueprint` specifics: `mapfile`/`modtype 3`/`version "1"`, `maphardness 200`, `smf.minheight -340` / `maxheight 760`, `smtFileName0 = "maps/MAP_BLUEPRINT_V1.smt"`, `splatDetailTex = "iwantDNTS.tga"` with its comment, `texScales {0.010,0.005,0.0075,0.01}`, `texMults {1.2,0.4,0.9,0.25}` labelled "cliff, pebbles, longgrass, sand", the `groudspecularcolor` typo, `bladeColor {0.59,0.81,0.57}`, 360 lines total | `map_blueprint/mapinfo.lua:11-14, 21, 32-34, 52, 66-67, 108, 124` | **CONFIRMED** (except the grass blade numbers — see C1). |
+| `0_apply_options.lua` water-level pairs `(-505,495) (-300,700) (-610,390) (-750,250) (-900,100)`, `water.damage = 50` for the acid option, and the roads option resetting every `movespeeds` entry to 1 — all addressing **lowercased** keys | `map_blueprint/mapconfig/mapinfo/0_apply_options.lua` (whole file, 54 lines) | **CONFIRMED.** |
+| `custom.clouds` → `CloudDefs` defaults `speed 0.5`, `color {0.6,0.7,0.8}`, `height 4800`, `bottom 1200`, `fade_alt 2500`, `scale 700`, `opacity 0.65`, `clamp_to_map false`, `sun_penetration 50`; merged key-by-key; altitudes accept number / `"auto"` / `"NN%"` | `gfx_volumetric_clouds.lua:27-40, 42-46, 65-67` | **CONFIRMED.** |
+| `custom.grassConfig` merge is case-insensitive against the widget's CamelCase defaults, reads the **lowercased** `mapcfg.custom.grassconfig`, recurses into `grassShaderParams`; `grassDistTGA` must be 8-bit uncompressed TGA sized `mapSize/patchResolution` | `map_grass_gl4.lua:41-49, 84-115, 130-160` | **CONFIRMED**, including all 16 `grassShaderParams` defaults. |
+| `parse_tdf_map.lua` builds the nested `resources` table and rewrites `TerrainTypeN`, `TeamN.StartPosX/Z`, `*SunColor`, `SplatTexScales`, `GrassBlade*` | `parse_tdf_map.lua:65, 77-79, 102, 118, 126-139, 199-210` | **CONFIRMED.** |
+| The engine never reads `custom` | `MapInfo.cpp` (whole file read; no occurrence of `custom`) | **CONFIRMED.** |
+
+### 18.3 Gaps filled during this pass
+
+| Gap | Where it now lives |
+| --- | --- |
+| `name` and `modtype` are the only `required == true` tags and `ArchiveData::IsValid` rejects an archive without them | new **§2.1** |
+| `ArchiveCache` is versioned `INTERNAL_VER = 22` with 3-version backward tolerance | **§2.1** |
+| The actual drag formula behind `atmosphere.fluidDensity` / `water.fluidDensity` — linear in density, `assumedRadius = cbrt(3m / (4π·8000))`, hard stop below 0.5 elmos/s, air vs. water gating | new **§7.1** (resolves open question 3) |
+| `lighting.sunDir.w` has exactly one consumer: `CModernSky` passes it as `sunColor.a` | **§8** (resolves open question 5) |
+| `smf.minimapTex` has no dimension check, but the default `grassShadingTex` hardcodes a 1024×1024 raw size | **§4**, **§5.2** and the new caveat after §5.2 (resolves open question 7) |
+| What actually activates DNTS splatting on current master | new **§5.5** |
+| Per-info-map override dimensions as a table | **§4** |
+| SMF header validation (`CheckHeader`) is fatal, and what it does *not* check | **§13** |
+| The SMF header is read field-by-field, so on-disk layout is padding-independent | **§13** |
+| `maxStrawsPerTurf` is a clamp on a `GrassDetail`-derived density | **§10.1** |
+| `CGrassDrawer` is constructed and drawn unconditionally; `GrassDetail` defaults to 7 | **§10.1** (partly resolves open question 2) |
+| `pfs.qtpfs_constants` is referenced by four QTPFS translation units | **§10.3** (partly resolves open question 4) |
+
+### 18.4 Still unverified — do not rely on these
+
+Each of these is marked inline in the body with **UNVERIFIED — needs confirmation**.
+
+1. **Whether BAR forces `GrassDetail = 0`.** `GrassDetail` appears in
+   `Beyond-All-Reason/luaintro/springconfig.lua`, which I did not read. The engine grass path itself
+   is confirmed live (`WorldDrawer.cpp:123-124, 354`), so the `grass` sub-table is *not* dead code in
+   the engine; whether a stock BAR install ever renders it is open.
+2. **What `sunColor.a` does inside the procedural sky shader.** `ModernSky.cpp:82` is confirmed to
+   pass `sunDir.w` there, but `ModernSkyFragProg` was not read, so the visual meaning of the
+   conventional `1e9` is still unknown. It is inert on skybox maps.
+3. **Per-key behaviour of the `pfs.qtpfsConstants` values.** Confirmed to be *referenced* by
+   `QTPFS/{NodeLayer,Node,PathManager,PathSearch}.cpp`; not traced further. No shipped map sets them.
+4. **Whether any map ships its own LuaGaia consumer of `custom.fog` / `custom.precipitation`.** The
+   negative claim about BAR core rests on a single code search that could not be re-run during this
+   pass (GitHub code-search rate limit). Downgraded from an assertion to a hedge in §12.4.
+5. **Practical tuning ranges for `fluidDensity`.** The formula is now documented (§7.1) but no
+   template or shipped map sets either key, so there is no empirical range — only the defaults.
+6. **`sound.preset` behaviour without `ALC_EXT_EFX`.** `CommitEffects` early-returns when EFX is
+   unsupported (`EFX.cpp:239-240`), so none of §10.4 is audible on such a machine; I did not test
+   what a real driver does.
+
+### 18.5 Overall assessment
+
+The document is **substantially reliable** and its highest-stakes content — the §13 SMF binary header,
+the `mapinfo.lua` key/default/clamp tables, the splat channel mapping, and the `teams` contiguity
+rule — is confirmed correct against primary sources. The errors found were concentrated in
+*ecosystem* claims (what BAR's own template ships, what the sound preset resolves to) rather than in
+engine-parsing claims, and one engine claim (DNTS activation) had gone stale relative to `master`.
+A binary writer built from §13 as written will produce a loadable `.smf`.

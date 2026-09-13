@@ -2,9 +2,9 @@
 
 **Purpose.** Specification-grade reference for building a terrain tool that is "on par with World Machine, but easier for beginners," whose final deliverable is a Beyond All Reason (BAR / Recoil engine) map — a 16-bit heightmap plus a DXT1-tiled diffuse texture.
 
-**How to read this.** Sections 1 and 3 are node-catalog specs: implement from the tables. Section 2 is the UX model to copy (and Section 4/5 is where to deliberately *not* copy it). Sections 6–8 are implementation detail with exact formats and byte layouts.
+**How to read this.** Sections 1 and 3 are node-catalog specs: implement from the tables. Section 2 is the UX model to copy (and Section 4/5 is where to deliberately *not* copy it). Sections 6–8 are implementation detail with exact formats and byte layouts. **§7.2.1–7.2.5 and §8.5 are the binary-writer spec — read those against the source citations before writing a single byte.** §12 is the verification log: what was checked, against which primary source, and with what verdict. Anything not carrying a source citation or marked "UNVERIFIED — needs confirmation" should be treated as unchecked.
 
-**Date of research:** 2026-09-13. World Machine current release line is *Dragontail Peak* (build 4059+); the prior major line was *Hurricane Ridge* (4041–4051), before that *Artist Point* (4027–4031). Gaea current line is Gaea 2.x (2.2 as of the docs snapshot). Statements tagged "[WM2]" come from the 2010 World Machine 2 device reference, which is still the only exhaustive per-parameter listing published; everything else is from the live help center or the Gaea 2 docs source repo.
+**Date of research:** 2026-09-13. World Machine current release line is *Dragontail Peak* (**build 4059**, released 2026-08-29 — confirmed from the release-notes page); the prior major line was *Hurricane Ridge* (**build 4041** confirmed; the "4041–4051" range is **UNVERIFIED — needs confirmation**), before that *Artist Point* (build 4031 per the release-notes page title; the "4027–4031" range is **UNVERIFIED — needs confirmation**). Gaea current line is Gaea 2.x (**2.2, released 2025-07-14** per the QuadSpinner blog). Statements tagged "[WM2]" come from the 2010 World Machine 2 device reference, which is still the only exhaustive per-parameter listing published; everything else is from the live help center or the Gaea 2 docs source repo.
 
 ---
 
@@ -12,7 +12,7 @@
 
 | Capability | World Machine | Gaea 2 | Minimum for parity | Notes for Terrasmith |
 |---|---|---|---|---|
-| Node/device count | "over a hundred devices" ([features.php](https://www.world-machine.com/features.php)) | **192 documented nodes** across 9 families (counted from `source/reference/nodes/*` in [QuadSpinner/Gaea2-Docs](https://github.com/QuadSpinner/Gaea2-Docs)) | ~45–60 well-chosen nodes | The long tail is mostly stylisation. The load-bearing 40 are listed in §10.1. |
+| Node/device count | "Over a hundred tools is a lot" ([features.php](https://www.world-machine.com/features.php), verbatim) | **183 documented nodes** across 9 families (counted 2026-09-13 from `source/reference/nodes/*/*.md` minus `index.md`, branch `master`, in [QuadSpinner/Gaea2-Docs](https://github.com/QuadSpinner/Gaea2-Docs)) | ~45–60 well-chosen nodes | The long tail is mostly stylisation. The load-bearing 40 are listed in §10.1. |
 | Hydraulic erosion | `Erosion` (flow/wear/deposition masks) | `Erosion`, `Erosion2`, `EasyErosion`, `Wizard`/`Wizard2` | 1 good hydraulic + 1 thermal + 3 mask outputs | §6 |
 | Thermal / talus | `Thermal Erosion` (talus mask + talus depth) | `Thermal`, `Thermal2`, `Scree`, `Debris` | 1 | §6 |
 | Vector/shape authoring | Layout Generator → renamed **Shapes** | `Draw`, `Island`, `Shape` (much weaker) | **This is WM's real moat.** Ship it. | §2.2 |
@@ -233,7 +233,7 @@ This is the central mental model, and the central beginner trap.
 - **Preview**: WM continuously previews *every* device at a low resolution (the configurable *Preview Resolution*, "a value of 64 to 128 is appropriate for most computer systems"). The left-side panel shows the preview of the selected device, live, as you drag sliders.
 - **Build**: pressing the green Build button runs the graph at the **project resolution** set in Project Settings. Only then do File/Bitmap/Mesh outputs have real data. Device status lights go pale-green → green as this happens.
 - **Lock Preview on Device** (`f`): freeze the preview on device X, then go upstream and edit device Y — you watch X's *filtered* result update live. This is the single most useful navigation feature in the app and it is hidden behind a hotkey.
-- **Resolution strategy**: Project Settings → `Resolution` slider plus a **"Power of Two plus one"** dropdown (or Custom). The +1 exists because heightfield exports usually need *n+1* samples for *n* cells. Basic Edition is capped at 1025×1025.
+- **Resolution strategy**: Project Settings → `Resolution` slider plus a **"Power of Two plus one"** dropdown (or Custom). The +1 exists because heightfield exports usually need *n+1* samples for *n* cells. Basic Edition "is free, builds up to 1K, and is for personal and non-commercial work" (features.php, verbatim). Whether "1K" means 1024 or 1025 is **UNVERIFIED — needs confirmation**.
 - **Memory Conservation** strategies: `No Conservation` (keep every device's results — most memory) · `Discard unconnected ports` · **`Keep only outputs and checkpoints`** (Checkpoints act as a cache; only they and outputs retain data) · `Keep only outputs` (any change after a final build requires a full rebuild).
 - Hurricane Ridge added **per-device previews** (results appear as each device finishes rather than at the end), **async memory paging** (ahead-of-time result archiving), build throttling under low memory, and a Stop/Preview button in the status bar.
 
@@ -286,9 +286,9 @@ Parameters reach devices through **parameter input ports along the top edge of e
 
 Gaea (QuadSpinner) was built by an ex-World Machine developer and is the closest direct rival. Its docs are open source at [github.com/QuadSpinner/Gaea2-Docs](https://github.com/QuadSpinner/Gaea2-Docs); everything below is cited to a path inside `source/`.
 
-### 3.1 Full node catalog (192 nodes, 9 toolboxes)
+### 3.1 Full node catalog (183 nodes, 9 toolboxes)
 
-Counted from `source/reference/nodes/{primitive,terrain,simulate,surface,modify,derive,colorize,utility,output}/*.md`. Descriptions are the front-matter `description:` fields.
+Counted from `source/reference/nodes/{primitive,terrain,simulate,surface,modify,derive,colorize,utility,output}/*.md`, excluding each family's `index.md`, on branch `master` as of 2026-09-13. Per-family counts verified against the GitHub tree API: primitive 23, terrain 14, simulate 25, surface 21, modify 41, derive 14, colorize 13, utility 20, output 12 = **183**. (An earlier draft of this brief said 192; that figure was wrong and did not even match the sum of its own per-family counts.) Descriptions are the front-matter `description:` fields.
 
 **Primitive (23)** — `Cellular`, `Cellular3D`, `Cone`, `Constant`, `Cracks`, `DotNoise`, **`Draw`** (draw entire mountain ranges in the shape you choose), `DriftNoise` (overlapping "shelves"/cliffs), `File`, `Gabor`, `Hemisphere`, `LinearGradient`, `LineNoise` (sets of lines, distortable into layered ridges), `MultiFractal`, `Noise` (single-pixel noise), `Object` (load mesh data), `Pattern`, **`Perlin`** ("geo-variant" — the base Perlin shape modified for terrain), `RadialGradient`, `Shape`, `TileInput`, **`Voronoi`** (geo-variant), `WaveShine`.
 
@@ -296,7 +296,7 @@ Counted from `source/reference/nodes/{primitive,terrain,simulate,surface,modify,
 
 > **This is Gaea's beginner superpower.** World Machine makes you *assemble* a mountain from Perlin + Combiner + Erosion. Gaea gives you a node literally called `Mountain` that is already a mountain.
 
-**Simulate (26)** — `Anastomosis`, `Crumble`, `Debris`, `Dusting`, **`EasyErosion`**, **`Erosion`**, **`Erosion2`**, `Glacier`, `Hillify`, `HydroFix`, `IceFloe`, `Lake`, `Lichtenberg`, `Rivers`, `Scree`, `Sea` (water surface + coastal erosion), `Sediments`, `Shrubs`, `Snow`, `Snowfield`, `Thermal`, **`Thermal2`**, `Trees`, **`Wizard`**, **`Wizard2`**.
+**Simulate (25)** — `Anastomosis`, `Crumble`, `Debris`, `Dusting`, **`EasyErosion`**, **`Erosion`**, **`Erosion2`**, `Glacier`, `Hillify`, `HydroFix`, `IceFloe`, `Lake`, `Lichtenberg`, `Rivers`, `Scree`, `Sea` (water surface + coastal erosion), `Sediments`, `Shrubs`, `Snow`, `Snowfield`, `Thermal`, **`Thermal2`**, `Trees`, **`Wizard`**, **`Wizard2`**.
 
 **Surface / LookDev (21)** — `Bomber` (stamp a heightfield across the surface), `Bulbous`, `Contours`, `Craggy`, `Distress`, `FractalTerraces` (multi-octave terracing), `Grid`, `GroundTexture`, `Outcrops`, `Pockmarks`, `RockNoise`, `Rockscape`, `Roughen`, `Sand`, `Sandstone`, `Shatter`, `Shear`, `Steps`, `Stones`, **`Stratify`** (non-linear broken strata with sub-strata in confined local zones — WM's `Strata` equivalent), `Terraces`.
 
@@ -320,7 +320,7 @@ Two claims in the Gaea docs matter enormously and are worth copying:
 
 2. **Selective Processing ≠ masking.** A bias mask *modulates a parameter* across the terrain rather than compositing the effect: "With masking the effect is tightly contained within the provided mask… while with Selective Processing, the mask provided will apply a modifier to that area, however processing will still occur outside the bias mask." Bias types: built-in `Slope` and `Altitude` (normalised 0–100%, invertible with `Reverse`), or a custom `Area` input. The mask maps `0 → 0%` and `1 → the slider value` for `Rock Softness`, `Erosion Strength`, and `Precipitation Amount`. (World Machine's equivalent is the `Hardness Mask` input plus, since Hurricane Ridge, generalised **spatial parameters**.)
 
-`Erosion2` is described as deterministic and "**up to 10x faster**, even on the CPU". The classic `Erosion` node is non-deterministic under parallel processing unless you enable `Deterministic`, which forces single-core.
+`Erosion2` "remains user-friendly and delivers deterministic results with up to 10x faster performance, even on the CPU" (`reference/nodes/simulate/erosion2.md`, verbatim). The classic `Erosion` node becomes non-deterministic **when `Parallel Processing` is enabled**; the fix is to disable that toggle, which costs speed — there is no separate `Deterministic` parameter in the published docs.
 
 ### 3.3 The Graph vs. Build split
 
@@ -371,7 +371,7 @@ and
 | **`Mask` node** | Mask an effect *after* it was created | Removes the "you must plan your mask before you place the node" trap |
 | **Portals** | Wormhole connections; any output port becomes a portal; `P` opens the portal menu; `Shift` while converting inserts a Chokepoint first | Big graphs stay readable |
 | **Lock Preview (`F`)** and **Underlay (`G`)** | Lock the viewport to a node; separately mark which heightfield is the 3D "structure" under a colour map, with `Exclude from Underlay` for intermediate nodes | Removes "why is my colour map floating on the wrong terrain" |
-| **Toolbox with three density layouts + colour-coded families + per-family icons** | Expanded / Compact / Toolbar | Visual grouping instead of a flat menu of 192 names |
+| **Toolbox with three density layouts + colour-coded families + per-family icons** | Expanded / Compact / Toolbar | Visual grouping instead of a flat menu of 183 names |
 | **Real Scale / Terrain Definition readout** | metres-per-pixel shown live | Makes "feature size in metres" meaningful instead of a magic number |
 | `Autolevel`, `Heal`, `BlobRemover`, `Denoise` | One-click data repair | Fixes imported garbage without teaching signal processing |
 | **Mutations** | Rapid variation system | "Give me five more like this" |
@@ -461,7 +461,7 @@ Twenty features, ordered by (impact ÷ cost). Each maps to a specific failure in
 | 16 | **Named snapshots in a visible history rail** | "the version before I redid the canyon" is one click, not forty undos. Show it as a strip of thumbnails, not a menu. | — |
 | 17 | **Units in metres, shown live** | Persistent read-out of map width (m), metres-per-pixel at the current build resolution, and max elevation (m). Every "feature size" parameter is in metres. Never ask a beginner to reason in 0..1. | §4.9 |
 | 18 | **Vertical scale is changeable safely** | Do not make max-elevation a global one-way door. Store heights in metres in float32 internally and quantise only at export, so changing the ceiling rescales the *export mapping*, not the terrain. | §4.9 |
-| 19 | **Guided wizards for the export target** | "Export for Beyond All Reason" asks for map size in BAR tiles, then writes the 16-bit heightmap at (mapx+1)² and the diffuse at mapx·8 px, validates divisibility, and reports the byte sizes before writing. No naked format dropdown. | §4.7, §8 |
+| 19 | **Guided wizards for the export target** | "Export for Beyond All Reason" asks for map size in BAR tiles, then writes the 16-bit heightmap at (mapx+1)² and the diffuse at mapx·8 px (validating that it is a multiple of 1024), and reports the byte sizes before writing. No naked format dropdown. | §4.7, §8 |
 | 20 | **Slope/playability overlay in the viewport** | Copy WM's slope overlay but bind it to the *target engine's* walkable-slope and buildable-slope thresholds. For BAR this is directly actionable (unit pathing, build placement) and turns aesthetics into a checkable requirement. | — |
 
 **Two anti-features to avoid, learned from World Machine:**
@@ -533,7 +533,7 @@ WM2's older Thermal Erosion had a different, simpler parameterisation worth know
 
 ### 6.3 Gaea's erosion parameter vocabulary
 
-`Erosion`: **`Strength`**, **`Rock Softness`** (note: *softness*, the inverse of WM's hardness), **`Downcutting`**, **`Inhibition`**, **`Feature Scale`** (metres — "the width of largest valleys and ridges between them"; default 2000 m), **`Real Scale`** (derive physics from the Terrain Definition — recommended on), **`Sediment Removal`** (can itself be driven by a mask), `Seed`, `Deterministic`, `Parallel Processing`.
+`Erosion`: **`Strength`**, **`Rock Softness`** (note: *softness*, the inverse of WM's hardness), **`Downcutting`**, **`Inhibition`**, **`Feature Scale`** (metres — "the width of largest valleys and ridges between them"; default 2000 m), **`Real Scale`** (derive physics from the Terrain Definition — recommended on), **`Sediment Removal`** (can itself be driven by a mask), `Seed`, `Parallel Processing`. (An earlier draft listed a separate `Deterministic` toggle; `reference/nodes/simulate/erosion.md` describes only `Parallel Processing` — *"To ensure fully deterministic processing, disable Parallel Processing. This will sacrifice processing speed to ensure your results are consistent."*)
 
 The doc's own explanation of the Strength/Softness interaction is the clearest artist-facing statement of the hydraulic model anywhere and is worth paraphrasing in our UI:
 
@@ -608,9 +608,9 @@ Terrain ─┬─> Slope Selector    ─┐
 
 ### 7.2 What BAR/Recoil actually needs
 
-Recoil's SMF map format (`rts/Map/SMF/SMFFormat.h` in [beyond-all-reason/RecoilEngine](https://github.com/beyond-all-reason/RecoilEngine)) does **not** consume a PNG diffuse directly. The map compiler (e.g. [Beherith/Spring_SMF_compiler](https://github.com/Beherith/Spring_SMF_compiler) `pymapconv`) takes a single large RGB(A) diffuse image and cuts it into **32×32 DXT1 tiles with 4 mip levels**, deduplicating identical tiles into a `.smt` file and writing an index array into the `.smf`.
+Recoil's SMF map format (`rts/Map/SMF/SMFFormat.h` in [beyond-all-reason/RecoilEngine](https://github.com/beyond-all-reason/RecoilEngine)) does **not** consume a PNG diffuse directly. The map compiler (e.g. [Beherith/springrts_smf_compiler](https://github.com/Beherith/springrts_smf_compiler) `pymapconv`, CC0-1.0) takes a single large RGB(A) diffuse image and cuts it into **32×32 DXT1 tiles with 4 mip levels**, deduplicating identical tiles into a `.smt` file and writing an index array into the `.smf`.
 
-Header, verbatim from `rts/Map/SMF/SMFFormat.h` (lines 50–71):
+Header, verbatim from `rts/Map/SMF/SMFFormat.h` (**lines 49–70** on `master`, verified 2026-09-13 — an earlier draft said 50–71):
 
 ```c
 struct SMFHeader {
@@ -655,7 +655,7 @@ struct TileFileHeader {   // .smt
 };                        // followed by numTiles × SMALL_TILE_SIZE raw bytes
 ```
 
-`rts/Map/SMF/SMFReadMap.h:181-182` and `SMFReadMap.cpp:118-127` confirm the derived geometry:
+`rts/Map/SMF/SMFReadMap.h:181-182` and `SMFReadMap.cpp:120-129` (inside `CSMFReadMap::ParseHeader`) confirm the derived geometry. `SQUARE_SIZE = 8` is `static constexpr int` in `rts/Sim/Misc/GlobalConstants.h:24`:
 
 ```cpp
 static constexpr int tileScale     = 4;              // SMFReadMap.h:181
@@ -678,17 +678,145 @@ expectedheightmapsize = (mapx + 1) * (mapy + 1) * 2   # :530
 if pngheight[0] == mapx * 8 and pngheight[1] == mapy * 8: ...  # :553 (hi-res heightmap path)
 ```
 
+**Texture dimension constraint (corrected).** pymapconv does *not* accept any multiple of 512; `pymapconv.py:446` rejects the texture unless **both dimensions are multiples of 1024**:
+
+```python
+if (texh % 1024 != 0) or (texw % 1024 != 0):
+    print_flushed('Error: Texture Image dimensions are not multiples of 1024! ...')
+    return -1      # pymapconv.py:446-448
+```
+
+So `springmapx = texw // 512` must be **even**. A "15×15" BAR map is not compilable by this tool; sizes are effectively 2, 4, 6, … BAR tiles per side. BAR's own [map checklist](https://www.beyondallreason.info/guide/map-checklist) additionally states: *"Maps larger than 32x32 or 32 in any dimension will not be accepted."*
+
+#### 7.2.1 Exact on-disk layout of a pymapconv-written `.smf`
+
+This is the byte order a writer must reproduce. Verified against `pymapconv.py:1024-1077` (`master`, 2026-09-13). **Everything is little-endian**; the header struct is declared as
+`SMFHeader_struct = struct.Struct('< 16s i i i i i i i f f i i i i i i i')` (`pymapconv.py:38`) — 16 + 16×4 = **80 bytes**, no padding, matching the C struct exactly.
+
+| # | Chunk | Size (bytes) | Notes |
+|---|---|---|---|
+| 1 | `SMFHeader` | 80 | `numExtraHeaders = 1` |
+| 2 | `ExtraHeader` | **12** | `{ int size = 12; int type = 1 /* MEH_Vegetation */; int vegmapPtr; }` — the third int is **undocumented in `SMFFormat.h`**; pymapconv's own comment says *"MISSING FROM DOCS, only exists if type=1 (vegmap)"* (`pymapconv.py:60-63`). |
+| 3 | vegetation map | `mapx*mapy/16` = `(mapx/4)*(mapy/4)` | `unsigned char`, 0 = none, 1 = grass (`SMFFormat.h:96-103`) |
+| 4 | heightmap | `(mapx+1)*(mapy+1)*2` | `uint16` **little-endian**, row-major (`struct.pack('<H', h)`, `pymapconv.py:1054`) |
+| 5 | typemap | `(mapx/2)*(mapy/2)` | `unsigned char` |
+| 6 | minimap | `MINIMAP_SIZE` = 699048 | DXT1, 9 mip levels 1024²→4². pymapconv truncates: `minimapdata[:MINIMAP_SIZE]`, with the comment *"dont even write more than needed, or else produced map will crash!"* |
+| 7 | metalmap | `(mapx/2)*(mapy/2)` | `unsigned char` |
+| 8 | `MapTileHeader` | 8 | `{ int numTileFiles; int numTiles; }` |
+| 9 | per-tile-file record | `4 + len(smtFilename) + 1` | `int numTilesInThisFile`, then the NUL-terminated `.smt` **basename** (path stripped) |
+| 10 | tile index array | `4 * mapx*mapy/16` | `int32` LE, `(mapx/4)*(mapy/4)` entries |
+| 11 | `MapFeatureHeader` | 8 | `{ int numFeatureType; int numFeatures; }` |
+| 12 | feature type names | Σ `len(name)+1` | NUL-terminated strings |
+| 13 | `MapFeatureStruct[]` | `24` each | `'< i f f f f f'` |
+
+Note the ordering trap: the **heightmap comes after the vegetation map, not immediately after the headers**, and `heightmapPtr` is computed as `80 + 12 + mapx*mapy/16`. Nothing in the engine requires this order (every chunk is reached through its pointer), but every existing BAR `.smf` has it, and the vegetation ExtraHeader is written unconditionally.
+
+`.smt` payload: `TileFileHeader` (`'< 16s i i i i'` = **32 bytes**) followed by `numTiles × SMALL_TILE_SIZE` (680) raw bytes (`pymapconv.py:1013-1018`).
+
+#### 7.2.2 Height reconstruction — the `65536` gotcha
+
+The `SMFHeader` comment says `maxHeight` is *"Height value that 0xffff in the heightmap corresponds to"*. **That comment is wrong by one code value.** The engine actually computes (`SMFReadMap.cpp:144-155` → `SMFMapFile.cpp:113-135`):
+
+```cpp
+const float minHgt = mapInfo->smf.minHeightOverride ? mapInfo->smf.minHeight : header.minHeight;
+const float maxHgt = mapInfo->smf.maxHeightOverride ? mapInfo->smf.maxHeight : header.maxHeight;
+mapFile.ReadHeightmap(..., /*base=*/minHgt, /*mod=*/(maxHgt - minHgt) / 65536.0f);   // SMFReadMap.cpp:155
+...
+sHeightMap[i] = base + swabWord(word) * mod;                                          // SMFMapFile.cpp:132
+```
+
+i.e.
+
+```
+h(raw) = minHeight + raw * (maxHeight - minHeight) / 65536.0f     // raw in [0, 65535]
+```
+
+so raw `0xFFFF` reaches only `minHeight + 65535/65536 * (maxHeight - minHeight)` — it never reaches `maxHeight`. The correct **export** quantisation is therefore
+
+```
+raw = clamp( floor( (h - minHeight) * 65536.0 / (maxHeight - minHeight) ), 0, 65535 )
+```
+
+**not** `round(v * 65535)`. Using the 65535 form biases every height upward by up to one code value and puts the map's true ceiling one step below the declared `maxHeight`. (`swabWord` is a byte-swap that is a no-op on little-endian hosts, confirming the on-disk format is LE.)
+
+Two further consequences:
+
+- **`mapinfo.lua` can override the header.** `rts/Map/MapInfo.cpp:406-409` reads `smf.minHeight` / `smf.maxHeight`; if the key exists in `mapinfo.lua` it wins over the `.smf` header. A BAR export must write the same pair into both, or deliberately write it only into `mapinfo.lua`.
+- pymapconv's CLI defaults are `--minheight -50.0` and `--maxheight 100.0` (`pymapconv.py:1372-1377`; `-x/--maxheight` default `100.0`, `-n/--minheight` default `-50.0`); both are documented as *required* in the help text. There is **no** BAR-wide convention beyond that — see §10.3.
+
+#### 7.2.3 What the metalmap and typemap actually are
+
+- **Metalmap** (`-m/--metalmap`): *"Metal map to use, **red channel** is amount of metal. Resized to xsize / 2 by ysize / 2."* pymapconv takes `metalimage` at `(mapx/2, mapy/2)` and bilinearly resizes if the size is wrong (`pymapconv.py:689-698`). It is a **separately authored image**, not derived from the terrain.
+- **Typemap** (`-y/--typemap`): *"Type map to use, uses the **red channel** to define terrain type [0-255]. types are defined in the .smd, if this argument is skipped the entire map will TERRAINTYPE0."* Resized with **nearest neighbour** if mis-sized (`pymapconv.py:882-887`), which is correct for an index map. The engine consumes it in `CMoveMath::GetPosSpeedMod` (`rts/Sim/MoveTypes/MoveMath/MoveMath.cpp:89-101`) to look up per-terrain-type `tankSpeed` / `kbotSpeed` / `hoverSpeed` / `shipSpeed` multipliers — so the typemap is a **gameplay** surface, not decoration.
+- Both live at `(mapx/2) × (mapy/2)`, i.e. half the heightmap-square resolution, matching `mapDims.hmapx`.
+
+#### 7.2.4 The hi-res heightmap path (pymapconv line 553)
+
+pymapconv accepts **two** heightmap shapes, and they are not equivalent:
+
+1. **Canonical**: a 16-bit greyscale PNG (or `.raw`/`.r16`) of exactly `(mapx+1) × (mapy+1)` samples. The `.raw` path requires the file to be exactly `(mapx+1)*(mapy+1)*2` bytes and unpacks it as `'<H'` (`pymapconv.py:530-536`). Samples map 1:1 to heightmap corners. **This is the shape to emit.**
+2. **Hi-res**: a PNG of exactly `mapx*8 × mapy*8` (i.e. one sample per *diffuse texel* / per engine elmo). pymapconv pads it by 4 px on each side by edge replication, then downsamples to `(mapx+1)²` with a filter chosen by `--highresheightmapfilter`, whose options are `[lanczos, bilinear, nearest, median, histogram]` and whose **default is `nearest`** (`pymapconv.py:1436-1438`). `nearest` samples at `(col*8+4, row*8+4)` — the exact texel centres that line up with the corner grid; `median` uses a 4×4 window; `histogram` uses an 8×8 window and prefers the modal value (built for flat man-made surfaces); `lanczos`/`bilinear` go through `Image.resize`. `nearest`, `lanczos` and `bilinear` clamp output to `65534`, not `65535`.
+
+So the pipeline does **not** prefer the hi-res form; it is an opt-in path that mainly helps authored/architectural terrain where you want height discontinuities to land exactly on texel boundaries. For procedurally generated terrain the `(mapx+1)²` form is both smaller and lossless.
+
+#### 7.2.5 Slope thresholds, from BAR's own movedefs
+
+Calibrating a viewport slope overlay to BAR requires two facts that are easy to get wrong.
+
+**(a) The numbers in `movedefs.lua` are not terrain angles.** `gamedata/movedefs.lua:43-50` defines:
+
+```lua
+local SLOPE = {
+    NONE = 0, MINIMUM = 27, MODERATE = 33, -- just below angle of repose
+    DIFFICULT = 54, EXTREME = 75, MAXIMUM = 90,
+}
+```
+
+but the engine transforms them (`rts/Sim/MoveTypes/MoveDefHandler.cpp:84-96`):
+
+```cpp
+static float DegreesToMaxSlope(float degrees) {
+    const float deg = std::clamp(degrees, 0.0f, 60.0f) * 1.5f;
+    const float rad = deg * degToRad;
+    return (1.0f - math::cos(rad));
+}
+```
+
+So the **real** terrain angle is `clamp(v, 0, 60) * 1.5` degrees:
+
+| movedefs constant | value in lua | real terrain angle | stored `maxSlope` = `1 − cos θ` |
+|---|---|---|---|
+| `SLOPE.MINIMUM` | 27 | **40.5°** | 0.2396 |
+| `SLOPE.MODERATE` | 33 | **49.5°** | 0.3506 |
+| `SLOPE.DIFFICULT` | 54 | **81.0°** | 0.8436 |
+| `SLOPE.EXTREME` | 75 | clamped → **90.0°** | 1.0 |
+| `SLOPE.MAXIMUM` | 90 | clamped → **90.0°** | 1.0 |
+| engine default, Tank/KBot | 60 | clamped → **90.0°** | 1.0 |
+| engine default, Hover | 15 | **22.5°** | 0.0761 |
+
+**(b) The quantity compared against it is `1 − normal.y`, at half resolution.** `rts/Map/ReadMap.cpp:755-778` builds `slopeMap` at `hmapx × hmapy` (= `mapx/2 × mapy/2`) by taking, over the 8 face normals of a 2×2 block of heightmap squares, both the average and the minimum `normal.y`, blending them (`mix(maxslope, avgslope, maxslope/avgslope)` — a deliberate smoothing "so small holes don't block huge tanks"), and storing `1.0f - slope`. So a Terrasmith slope overlay should compute `1 − n_y` on the same half-resolution grid and threshold it against the table above — **not** compute a per-pixel slope in degrees and compare to the raw lua number.
+
+**(c) Buildability is a different test.** Buildings use `UnitDef::maxHeightDif`, derived in `rts/Sim/Units/UnitDef.cpp:422-426` as
+
+```cpp
+const float maxSlopeDeg = std::clamp(udTable.GetFloat("maxSlope", 0.0f), 0.0f, 89.0f);
+maxHeightDif = 40.0f * math::tanf(maxSlopeDeg * DEG_TO_RAD);   // "FIXME: kill the magic constant"
+```
+
+and `CGameHelper::TestBuildSquare` compares `abs(wantedHeight - groundHeight) <= maxHeightDif` over the footprint (`rts/Game/GameHelper.cpp:1211, 1634`). A buildability overlay therefore needs a **height-deviation-over-footprint** metric, not a slope metric.
+
 ### 7.3 Worked size calculation — a 16×16 BAR map
 
 Given: `springmapx = springmapy = 16` (BAR's conventional "16×16" map size).
 
 | Quantity | Formula | Value |
 |---|---|---|
-| Diffuse texture width | `springmapx * 512` | **8192 px** |
+| Diffuse texture width | `springmapx * 512` | **8192 px** (also ✓ a multiple of 1024, which pymapconv requires) |
 | `mapx`, `mapy` | `texw / 8` | **1024**, 1024 (✓ divisible by 128) |
 | World size | `mapx * SQUARE_SIZE` = `1024 * 8` | **8192 × 8192 engine units** (= 1 unit per diffuse texel) |
 | Heightmap grid | `(mapx+1) × (mapy+1)` | **1025 × 1025** samples |
 | Heightmap bytes | `1025 * 1025 * 2` | **2 101 250 B** (≈ 2.00 MiB) |
+| Vegetation (grass) map | `unsigned char[(mapx/4) * (mapy/4)]` = 256×256 | **65 536 B** (always written by pymapconv, via the `MEH_Vegetation` ExtraHeader) |
 | Typemap | `unsigned char[(mapx/2) * (mapy/2)]` = 512×512 | **262 144 B** |
 | Metalmap | `unsigned char[(mapx/2) * (mapy/2)]` = 512×512 | **262 144 B** |
 | Minimap | fixed `MINIMAP_SIZE` | **699 048 B** (1024² DXT1 = 524 288, then 512²…4² mips: 131 072 + 32 768 + 8 192 + 2 048 + 512 + 128 + 32 + 8) |
@@ -700,12 +828,14 @@ Given: `springmapx = springmapy = 16` (BAR's conventional "16×16" map size).
 
 Sanity checks: `bigTexSize = 8 * 128 = 1024`, so the engine streams the diffuse as `numBigTexX = 1024/128 = 8` × 8 = **64 "big textures" of 1024×1024** each. `tileCount = 1024*1024/16 = 65 536` ✓ matches the worst-case tile count.
 
+`.smf` total (worst case, no features): `80 + 12 + 65 536 + 2 101 250 + 262 144 + 699 048 + 262 144 + (8 + 4 + len(smtname)+1) + 262 144 + 8` ≈ **3.65 MiB**, plus the `.smt` at up to 42.5 MiB.
+
 ### 7.4 Consequences for our texturing pipeline
 
-1. **Author the diffuse at exactly `springmapx * 512` px square, 8 bits per channel, sRGB.** There is no point producing 16-bit colour: DXT1 will crush it to 5:6:5 anyway.
+1. **Author the diffuse at exactly `springmapx * 512` px square, a multiple of 1024, 8 bits per channel, sRGB.** (pymapconv hard-rejects non-multiples of 1024 — `pymapconv.py:446` — so `springmapx` must be even.) There is no point producing 16-bit colour: DXT1 will crush it to 5:6:5 anyway.
 2. **DXT1 is 4×4-block, 5:6:5 endpoints.** Smooth gradients band badly; high-frequency noise survives better than you'd expect. Practical implication: bias the texture generator toward **detail and grain** rather than large smooth colour ramps, and consider dithering the 5:6:5 quantisation.
 3. **Tile deduplication rewards flat/repeated regions.** Large uniform areas (deep water, blank plateaus) collapse to a handful of tiles. A texture generator that emits genuinely unique colour per texel produces the full 42.5 MiB. That's fine, but it's a knob worth exposing ("texture variety vs. file size").
-4. **The minimap is generated by downsampling the diffuse to 1024×1024** (pymapconv falls back to `intex.resize((1024,1024), LANCZOS)` when no explicit minimap is supplied) — so whatever we produce must read well at 1024² too.
+4. **The minimap is generated by downsampling the diffuse to 1024×1024** (`pymapconv.py:496-497`: `minimapimage = intex.resize((1024, 1024), Image.LANCZOS)` when no `-p/--minimap` is supplied; a supplied one is *also* resized to 1024²), then DXT1-compressed with 9 mip levels (`nvdxt.exe … -nmips 9`, or `CompressonatorCLI -fd DXT1 -miplevels 9` on Linux — `pymapconv.py:515-519`) — so whatever we produce must read well at 1024² too.
 5. **BAR needs more than a diffuse.** Practical BAR maps also want a metalmap (`mapx/2 × mapy/2`, 8-bit), a typemap (terrain-type indices, same size), a minimap, and usually a specular/splat-distribution set. Our "one-click texturing" node should be able to emit **all of them from the same mask set**:
    - diffuse ← CLUT(texture-base mask), layered
    - metalmap ← a paint/scatter layer, not derived from terrain
@@ -799,7 +929,7 @@ offset 16 : chunks...
 
 …in terrain units; multiply by `SCAL.z` for metres. Note `HeightScale` and `BaseHeight` are **signed** 16-bit.
 
-Terragen 4.8 itself exports heightfields to **TER (preserving all scaling information), EXR (32-bit float preserving absolute height in metres), TIFF (16-bit unsigned short), and RAW (16-bit unsigned short)**.
+Terragen 4.8 itself is stated to export heightfields to **TER (preserving all scaling information), EXR (32-bit float preserving absolute height in metres), TIFF (16-bit unsigned short), and RAW (16-bit unsigned short)** — **UNVERIFIED — needs confirmation** (sourced from the Planetside feature tour, not the TER format wiki page).
 
 ### 8.4 The other formats, precisely
 
@@ -827,13 +957,22 @@ export value:      v = (h − hmin) / (hmax − hmin)      // stretch to full 16
 reconstruct:       h = v * (hmax − hmin) + hmin        // engine-side vertical scale
 ```
 
-For BAR: write `minHeight` and `maxHeight` into the `SMFHeader` as exactly the `hmin`/`hmax` used for the normalisation, and the round trip is lossless to 1/65536 of the relief. **Also record the min/max as project metadata**: "keep track of (or export alongside) your terrain's original min/max elevation… Then your 'Height Scale' in the DCC becomes deterministic instead of eyeballed."
+**For BAR, use the engine's exact mapping, not the generic one above.** Recoil divides by **65536**, not 65535 (`SMFReadMap.cpp:155`, `SMFMapFile.cpp:132` — see §7.2.2), so the matched pair is:
+
+```
+write:        raw = clamp( floor( (h - minHeight) * 65536.0 / (maxHeight - minHeight) ), 0, 65535 )
+engine reads: h   = minHeight + raw * (maxHeight - minHeight) / 65536.0
+```
+
+Write `minHeight` and `maxHeight` into the `SMFHeader` as exactly the `hmin`/`hmax` used for that quantisation (and, if you also emit `mapinfo.lua`, into `smf.minHeight` / `smf.maxHeight`, which override the header — `MapInfo.cpp:406-409`). The round trip is then lossless to `(maxHeight − minHeight)/65536` of the relief. Note that the intermediate PNG-16 handed to pymapconv is **big-endian** (PNG is always network byte order) while the `.smf` heightmap chunk is **little-endian**; the conversion happens inside pymapconv. **Also record the min/max as project metadata**: "keep track of (or export alongside) your terrain's original min/max elevation… Then your 'Height Scale' in the DCC becomes deterministic instead of eyeballed."
 
 Tiling caveat, verbatim: *"if you normalize each tile independently, each tile gets its own min/max, which can cause seams… Normalize before tiling (one global min/max), or force a consistent min/max across all tiles."*
 
 ---
 
 ## 9. The rest of the field, briefly
+
+> **Provenance note.** Every cell in this table below the World Machine, Gaea and Terragen rows is sourced from vendor marketing pages, third-party comparison articles or add-on documentation, not from source code or a reference manual. Treat the numeric claims ("over 50 separate nodes", "8 flow properties") as **UNVERIFIED — needs confirmation**; they are directionally useful, not specification-grade.
 
 | Tool | Model | Relevant strengths | Relevant weaknesses |
 |---|---|---|---|
@@ -873,18 +1012,33 @@ Tiling caveat, verbatim: *"if you normalize each tile independently, each tile g
 7. **Copy World Machine's Shapes/Layout editor in full**, including custom falloff curves, vertex welding, and fractal breakup; default breakup **on**.
 8. **Copy Gaea's Modifier Stack** so a beginner graph stays under ten nodes, and because it is genuinely cheaper (post-process, no per-modifier memory).
 9. **Ship a large preset gradient library for the colour node** (Gaea's SatMap is 1400 entries and is a large part of why its output looks good immediately).
-10. **Build a `BARExport` wizard** that takes map size in BAR tiles and derives `texw = 512·N`, `mapx = texw/8`, heightmap `(mapx+1)²` 16-bit PNG, and writes `minHeight`/`maxHeight` from the actual normalisation used — reporting all byte sizes before writing (§7.3).
+10. **Build a `BARExport` wizard** that takes map size in BAR tiles (**N even**, ≤ 32) and derives `texw = 512·N` (a multiple of 1024), `mapx = texw/8`, heightmap `(mapx+1)²` 16-bit greyscale PNG, and writes `minHeight`/`maxHeight` from the actual normalisation used — quantising with `floor((h−min)·65536/(max−min))` clamped to `[0, 65535]`, **not** `·65535` (§7.2.2) — reporting all byte sizes before writing (§7.3).
 11. **Author the diffuse for DXT1**: 8-bit sRGB at `512·N` px, favour grain over smooth ramps, optionally dither the 5:6:5 quantisation, and expose a "texture variety vs. .smt size" control since tile dedup is what sets file size.
 12. **Import/export the interop set**: read PNG16, TIFF16/32, EXR32, R16/RAW, R32, TER, BT; write PNG16, TIFF16, EXR32, R16, R32, TER. All headerless RAW is **little-endian, row-major**, and needs a visible Y-flip toggle.
 13. **Add a slope overlay bound to BAR's walkable/buildable slope thresholds** — it converts a subjective aesthetic judgement into a checkable requirement, which is exactly the sort of thing beginners need.
 14. **Do not build tiled builds yet.** BAR maps top out around 8192² diffuse / 1025² heightmap, comfortably inside memory; tiled builds are where the majority of World Machine's documented correctness caveats live.
 
-### 10.3 Open questions
+### 10.3 Open questions — resolved
 
-- Does BAR/Recoil's pipeline have a preferred *source* image for the metalmap and typemap, or are those authored separately today? (Check `pymapconv` arg list and the maps-metadata repo.)
-- What is the actual walkable/buildable slope threshold in BAR movedefs, so the slope overlay can be calibrated? (`movedefs.lua` is already in the scratch corpus.)
-- Is there an existing BAR community heightmap convention for the min/max height mapping (e.g. fixed `minHeight`/`maxHeight` per map size) that we should default to rather than auto-normalising?
-- Does the BAR map pipeline accept a hi-res `mapx*8 × mapy*8` heightmap (pymapconv line 553 suggests a separate code path), and is that preferred over `(mapx+1)²`?
+**1. Preferred source image for metalmap and typemap? — RESOLVED: both are separately authored 8-bit images, read from the *red channel*.**
+`pymapconv.py:689-698` and `882-887`; help strings at `:1366` and `:1399`. Metalmap: *"red channel is amount of metal. Resized to xsize / 2 by ysize / 2"* (bilinear if mis-sized). Typemap: *"uses the red channel to define terrain type [0-255]. types are defined in the .smd, if this argument is skipped the entire map will TERRAINTYPE0"* (nearest-neighbour if mis-sized). Neither is derived from the heightmap or the diffuse by any part of the toolchain, and `maps-metadata` stores no source for them either — it only *parses* `metalMap`/`typeMap` back out of finished `.smf` files (`cloud/map-parser/src/parse-worker.ts:171`). So Terrasmith emitting both from its mask set (§7.4 item 5) is a genuine improvement, not a duplication. See §7.2.3.
+
+**2. Walkable / buildable slope thresholds? — RESOLVED, with a trap.**
+`gamedata/movedefs.lua:43-50` gives `MINIMUM = 27`, `MODERATE = 33`, `DIFFICULT = 54`, `EXTREME = 75`, `MAXIMUM = 90` — but these are **not degrees of terrain slope**. `MoveDefHandler.cpp:84-96` computes `1 − cos(clamp(v, 0, 60) × 1.5°)`, so the real angles are 40.5° / 49.5° / 81° / 90° / 90°. The quantity compared against it is `1 − normal.y`, smoothed over a 2×2 heightmap-square block at `mapx/2 × mapy/2` resolution (`ReadMap.cpp:755-778`). Buildability is a *separate* test: `maxHeightDif = 40 × tan(unitDef.maxSlope)` compared against height deviation over the footprint (`UnitDef.cpp:422-426`, `GameHelper.cpp:1211, 1634`). Full table and citations in §7.2.5.
+
+**3. A BAR convention for `minHeight`/`maxHeight`? — RESOLVED: there is none.**
+Nothing in `beyond-all-reason/maps-metadata` fixes or even records a canonical pair; its schemas (`schemas/{cdn,live,lobby,teiserver}_maps.yaml`) carry no height fields, and the map parser reads `minHeight`/`maxHeight` back out of each `.smf` individually (`cloud/map-parser/src/parse-worker.ts:179-180`), i.e. every map chooses its own. The BAR [map checklist](https://www.beyondallreason.info/guide/map-checklist) states no height convention either (it does cap map size at *"32x32 or 32 in any dimension"*). The only defaults anywhere in the pipeline are pymapconv's CLI defaults, `--minheight -50.0` / `--maxheight 100.0` (`pymapconv.py:1372-1377`), and mappers are instructed to change them per map. **Conclusion: auto-normalise per map, expose `minHeight`/`maxHeight` as explicit metres, default to a sensible pair (e.g. −50 / +100 to match pymapconv), and write the same values into both the `SMFHeader` and `mapinfo.lua`'s `smf` table.**
+
+**4. Hi-res `mapx*8 × mapy*8` heightmap vs `(mapx+1)²`? — RESOLVED: the canonical form is `(mapx+1)²`; hi-res is an opt-in downsampling convenience.**
+Both are accepted. The hi-res path pads by 4 px of edge replication and downsamples with `--highresheightmapfilter`, default **`nearest`** (sampling at `col*8+4, row*8+4`, the texel centres that align with the corner grid), with `median`, `histogram`, `lanczos` and `bilinear` as alternatives; three of the five clamp to 65534 rather than 65535. Full behaviour in §7.2.4. **For procedurally generated terrain, emit `(mapx+1)²` directly — it is smaller and involves no resampling.**
+
+### 10.4 Remaining open questions
+
+- **Erosion parameter semantics in Hurricane Ridge.** WM's `Erosion` was rewritten (feature-size control, soil control, spatial parameters on every parameter) but the KB page still documents the legacy device; the current parameter list is not published. §6.1's modern-parameter notes are inferred from release notes, not a reference page. **UNVERIFIED — needs confirmation.**
+- **Gaea per-node Properties tables.** Exact slider ranges and defaults for `Erosion2`, `SatMap`, `Texturizer` and `Export` are generated at build time and are absent from `Gaea2-Docs`; only the prose semantics were recoverable. `Erosion`'s `Feature Scale` default of **2000 m** *is* stated in prose and is confirmed. Everything else: **UNVERIFIED — needs confirmation.**
+- **Erosion algorithm choice.** Neither vendor publishes whether their hydraulic erosion is a grid/pipe model, a particle/droplet model, or stream-power. This research does not constrain our implementation; drive it from the papers in the scratch corpus (mei2007, olsen2004, cordonnier2016, guerin2016, jako2011).
+- **`.smd` vs `mapinfo.lua`.** pymapconv's typemap help text refers to terrain types "defined in the `.smd`", which is the legacy Spring map-definition file; BAR maps use `mapinfo.lua` instead (`beyond-all-reason/maps-metadata` has a `check_uses_mapinfo_lua.ts` script). The exact `mapinfo.lua` terrain-type table shape was **not** verified here and must be before writing an exporter.
+- **DXT1 compressor.** pymapconv shells out to `nvdxt.exe` (Windows) or `CompressonatorCLI` (Linux) rather than compressing in-process. If Terrasmith writes `.smf`/`.smt` directly it needs its own DXT1 encoder; the quality of that encoder, not the source texture, will set the visible result.
 
 ---
 
@@ -903,7 +1057,7 @@ Tiling caveat, verbatim: *"if you normalize each tile independently, each tile g
 - Forum — [Gaea 2 vs WorldMachine](https://forum.world-machine.com/t/gaea-2-vs-worldmachine/7183), [Quick Texture → splatmap](https://forum.world-machine.com/t/is-there-a-way-to-convert-the-quick-texture-macro-to-a-splat-map/6536)
 
 **Gaea** (all paths relative to `source/` in https://github.com/QuadSpinner/Gaea2-Docs)
-- `reference/nodes/{primitive,terrain,simulate,surface,modify,derive,colorize,utility,output}/*.md` — the 192-node catalog
+- `reference/nodes/{primitive,terrain,simulate,surface,modify,derive,colorize,utility,output}/*.md` — the 183-node catalog
 - `.meta/*.json` — per-node metadata (Name, Description, Family, Toolbox, Classification, ShortCode, RequiresBaking)
 - `reference/nodes/simulate/erosion.md`, `erosion2.md`, `wizard.md`, `wizard2.md`, `easyerosion.md`, `thermal2.md`
 - `using/using-gaea/understanding-erosion/index.md` — including the "Misconceptions" section
@@ -921,8 +1075,8 @@ Tiling caveat, verbatim: *"if you normalize each tile independently, each tile g
 
 **BAR / Recoil**
 - `rts/Map/SMF/SMFFormat.h` (SMFHeader, ExtraHeader, MapTileHeader, MapFeatureHeader, TileFileHeader, `SMALL_TILE_SIZE`=680, `MINIMAP_SIZE`=699048, `MINIMAP_NUM_MIPMAP`=9) — https://github.com/beyond-all-reason/RecoilEngine
-- `rts/Map/SMF/SMFReadMap.h:181-182` (`tileScale = 4`, `bigSquareSize = 32*tileScale`), `rts/Map/SMF/SMFReadMap.cpp:118-130` (`ParseHeader` derived sizes)
-- `pymapconv/src/pymapconv.py:442,444,530,553` — https://github.com/Beherith/Spring_SMF_compiler
+- `rts/Map/SMF/SMFReadMap.h:181-182` (`tileScale = 4`, `bigSquareSize = 32*tileScale`), `rts/Map/SMF/SMFReadMap.cpp:120-129` (`ParseHeader` derived sizes), `rts/Map/SMF/SMFReadMap.cpp:144-155` (`LoadHeightMap`, the `/65536` reconstruction), `rts/Map/SMF/SMFMapFile.cpp:97-135` (`ReadHeightmap`), `rts/Map/MapInfo.cpp:406-409` (`mapinfo.lua` `smf.minHeight`/`maxHeight` overrides), `rts/Sim/Misc/GlobalConstants.h:24` (`SQUARE_SIZE = 8`)
+- `src/pymapconv.py` — https://github.com/Beherith/springrts_smf_compiler (CC0-1.0). The repo is `springrts_smf_compiler`; `Beherith/Spring_SMF_compiler` (cited in an earlier draft) does not exist. Lines verified on `master` 2026-09-13: `38` (`SMFHeader_struct`), `442`/`444` (`mapx`/`springmapx`), `446` (texture must be a multiple of **1024**), `530` (`expectedheightmapsize`), `536` (`<H` little-endian unpack), `553` (hi-res heightmap path), `1024-1077` (SMF write order), `1013` (`.smt` header write)
 
 **Other tools**
 - Terragen TER format — https://docs.planetside.co.uk/wiki/Terragen_.TER_Format ; GDAL driver — https://gdal.org/en/stable/drivers/raster/terragen.html ; feature tour — https://planetside.co.uk/terragen-feature-tour/
@@ -930,3 +1084,46 @@ Tiling caveat, verbatim: *"if you normalize each tile independently, each tile g
 - Blender A.N.T. Landscape — https://docs.blender.org/manual/en/2.82/addons/add_mesh/ant_landscape.html , https://extensions.blender.org/add-ons/antlandscape/ ; ErosionR — https://github.com/nerk987/ErosionR ; Erosion add-on — https://blender-addons.org/erosion-add-on/
 - Instant Terra — https://www.wysilab.com/Features/Features-terrain-editor.html ; https://www.cgchannel.com/2022/03/wysilab-ships-instant-terra-2-0/ ; https://www.cgchannel.com/2020/12/wysilab-releases-instant-terra-1-1/
 - Comparisons — https://polycount.com/discussion/228295/gaea-vs-world-machine-vs-world-creator-vs-instant-terra ; https://vionixstudio.com/2021/05/01/world-creator-vs-world-machine-vs-gaea/ ; https://www.cgchannel.com/2026/05/world-machine-dragontail-peak-preview/
+
+---
+
+## 12. Verification log
+
+Every claim below was re-checked against a primary source on **2026-09-13** by fetching the raw file (`curl` on `raw.githubusercontent.com`, or the GitHub tree API via `gh`). Engine claims are against `beyond-all-reason/RecoilEngine@master`; compiler claims against `Beherith/springrts_smf_compiler@master`; Gaea claims against `QuadSpinner/Gaea2-Docs@master`.
+
+| # | Claim as written | Source checked | Verdict |
+|---|---|---|---|
+| 1 | `SMFHeader` field order, types and byte offsets (magic 0, version 16, mapid 20, mapx 24, mapy 28, squareSize 32, texelPerSquare 36, tilesize 40, minHeight 44, maxHeight 48, heightmapPtr 52, typeMapPtr 56, tilesPtr 60, minimapPtr 64, metalmapPtr 68, featurePtr 72, numExtraHeaders 76; `sizeof == 80`) | `rts/Map/SMF/SMFFormat.h:49-70`; independently cross-checked against `pymapconv.py:38` `struct.Struct('< 16s i i i i i i i f f i i i i i i i')` (16 + 16×4 = 80) | **confirmed** |
+| 2 | The header block is at "lines 50–71" | `SMFFormat.h` — the struct spans **49–70** | **corrected** |
+| 3 | `SMALL_TILE_SIZE == 680`, `MINIMAP_NUM_MIPMAP == 9`, `MINIMAP_SIZE == 699048`; minimap = 1024² DXT1 + 8 mip sublevels | `SMFFormat.h:28,31,34,65`; arithmetic re-derived: 524288+131072+32768+8192+2048+512+128+32+8 = 699048 | **confirmed** |
+| 4 | `TileFileHeader` = `char[16] + 4 ints` = 32 B, magic `"spring tilefile\0"`, `compressionType == 1` (DXT1); tiles are 32×32 DXT1 with **4** mip levels (512+128+32+8) | `SMFFormat.h:172-183`; `pymapconv.py:79, 1013` | **confirmed** |
+| 5 | `tileScale = 4`, `bigSquareSize = 32*tileScale` at `SMFReadMap.h:181-182`; `numBigTexX`/`bigTexSize`/`tileMapSizeX`/`tileCount`/`mapSizeX`/`heightMapSizeX` at cpp lines 120/122/123/125/126/129 | `SMFReadMap.h:181-182`, `SMFReadMap.cpp:120-129` | **confirmed** (prose range "118-127" **corrected** to 120-129) |
+| 6 | `SQUARE_SIZE = 8` | `rts/Sim/Misc/GlobalConstants.h:24` (`static constexpr int SQUARE_SIZE = 8;`) | **confirmed** |
+| 7 | Heightmap reconstruction is `h = min + v*(max−min)` with `v` the normalised 0..1 value (implying ÷65535) | `SMFReadMap.cpp:155` passes `mod = (maxHgt - minHgt) / 65536.0f`; `SMFMapFile.cpp:132` computes `base + word * mod`. Divisor is **65536**, and `maxHeight` is never actually reached | **corrected** — added §7.2.2 with the exact export quantisation |
+| 8 | `minHeight`/`maxHeight` come from the `.smf` header | `rts/Map/MapInfo.cpp:406-409` — `mapinfo.lua`'s `smf.minHeight`/`smf.maxHeight` **override** the header when the keys exist | **gap filled** |
+| 9 | On-disk `.smf` chunk order | `pymapconv.py:1024-1077`. The doc omitted the **12-byte `MEH_Vegetation` ExtraHeader** (with an undocumented third int) and the `mapx*mapy/16` vegetation map that precede the heightmap | **gap filled** (new §7.2.1, plus a row in the §7.3 size table) |
+| 10 | Heightmap is `uint16` little-endian | `pymapconv.py:536` (`struct.unpack('< ' + 'H'*n)`), `:1054` (`struct.pack('<H', h)`); engine side `swabWordInPlace` in `SMFMapFile.cpp:108` is a no-op on LE hosts | **confirmed** |
+| 11 | pymapconv derives `mapx = texw // 8` (`:442`), `springmapx = texw // 512` (`:444`), `expectedheightmapsize = (mapx+1)*(mapy+1)*2` (`:530`), hi-res path at `:553` | `pymapconv.py` at exactly those lines | **confirmed** |
+| 12 | "Author the diffuse at exactly `springmapx * 512` px" | `pymapconv.py:446` rejects the texture unless **both dimensions are multiples of 1024** — so `springmapx` must be **even** | **corrected** |
+| 13 | pymapconv repo is `github.com/Beherith/Spring_SMF_compiler` | That repo returns HTTP 404. The real one is **`github.com/Beherith/springrts_smf_compiler`** (CC0-1.0), path `src/pymapconv.py` | **corrected** |
+| 14 | Minimap falls back to `intex.resize((1024,1024), LANCZOS)` | `pymapconv.py:496-497` — confirmed; also learned a *supplied* `--minimap` is resized to 1024² too (`:491`), and compression is `nvdxt … -nmips 9` / `CompressonatorCLI -fd DXT1 -miplevels 9` (`:515-519`) | **confirmed + extended** |
+| 15 | Metalmap and typemap source images | `pymapconv.py:689-698`, `882-887`, help text `:1366`, `:1399` — both separately authored, both read from the **red channel**, metalmap bilinear-resized, typemap nearest-resized | **gap filled** (open question 1) |
+| 16 | Hi-res heightmap path behaviour | `pymapconv.py:553-641`, `1436-1438` — filters `[lanczos, bilinear, nearest, median, histogram]`, default `nearest` | **gap filled** (open question 4) |
+| 17 | BAR movedef slope thresholds | `Beyond-All-Reason/gamedata/movedefs.lua:43-50` (`MINIMUM 27 / MODERATE 33 / DIFFICULT 54 / EXTREME 75 / MAXIMUM 90`) **but** `MoveDefHandler.cpp:84-96` applies `clamp(v,0,60)*1.5` then `1−cos`. Comparison quantity is `1−normal.y` at half resolution (`ReadMap.cpp:755-778`). Buildability uses `maxHeightDif = 40*tan(maxSlope)` (`UnitDef.cpp:422-426`, `GameHelper.cpp:1211,1634`) | **gap filled** (open question 2) |
+| 18 | A BAR convention exists for `minHeight`/`maxHeight` | `maps-metadata` schemas carry no height fields; `cloud/map-parser/src/parse-worker.ts:179-180` reads them per map. pymapconv defaults `-50.0` / `+100.0` (`:1372-1377`). BAR map checklist caps size at "32x32 or 32 in any dimension" | **resolved: no convention** (open question 3) |
+| 19 | Gaea has "192 documented nodes" | GitHub tree API over `Gaea2-Docs@master`: primitive 23, terrain 14, simulate 25, surface 21, modify 41, derive 14, colorize 13, utility 20, output 12 = **183** (excluding `index.md`). The per-family *lists* in §3.1 match the filenames exactly | **corrected** (183; "Simulate (26)" → 25) |
+| 20 | Gaea "over 1400 color maps, derived from real satellite data" | `source/using/using-gaea/colorizing-and-textures/working-with-satmaps.md` front matter + body, verbatim | **confirmed** |
+| 21 | Gaea `Erosion` resolution-independence quote; `Feature Scale` default 2000 m; Strength/Rock Softness and Downcutting/Inhibition quotes | `source/reference/nodes/simulate/erosion.md`, verbatim | **confirmed** |
+| 22 | `Erosion2` "up to 10x faster … deterministic"; classic `Erosion` has a `Deterministic` toggle | `erosion2.md` confirms the speed/determinism claim. `erosion.md` documents only a **`Parallel Processing`** toggle — no `Deterministic` parameter | **corrected** |
+| 23 | Gaea headerless RAW contract (`.r32` float LE 0..1, `.raw` ushort LE 0..65535, no header, `n = sqrt(bytes/typesize)`) | `source/using/advanced-topics/technical-information/file-formats.md`, verbatim | **confirmed** |
+| 24 | Gaea 16-bit precision / "~12.7 bits" and the per-tile normalisation seam warning | `source/guides/scenarios/helpful-info/normalized-output.md:15,20,56`, verbatim | **confirmed** |
+| 25 | Terragen `.TER`: `"TERRAGEN"` @0, `"TERRAIN "` @8, chunk markers and payload types, `SIZE` = n−1, `ALTW` decoding `BaseHeight + Elevation*HeightScale/65536`, intel-ordered | docs.planetside.co.uk `Terragen_.TER_Format` wiki | **confirmed** |
+| 26 | WM "practical resolution limit … around 8192×8192"; tiled-build parameter list; `%x`/`%y`/`%res`, default `_x%x_y%y` | help.world-machine.com Pro Edition Addendum, verbatim | **confirmed** |
+| 27 | WM "over a hundred devices"; Basic Edition free up to 1K; 3D viewport display guides incl. slope overlay | world-machine.com/features.php — the wording is "**Over a hundred tools**", and "Basic is free, builds up to **1K**" | **corrected** (wording; "1025×1025" now flagged unverified) |
+| 28 | Dragontail Peak = build 4059; Hurricane Ridge = build 4041 with "up to 100 times faster" erosion, Feature Size and Soil controls | help.world-machine.com release-notes pages for both builds | **confirmed** (the *ranges* 4041–4051 / 4027–4031 remain **unverified**) |
+| 29 | WM2 device-reference claims (Gradient `0 = east, 90 = north, 180 = west, 270 = south`; Angle Selector `0=west, 90=south, 180=east`; Terrace `Sharp` is the default method; Voronoi styles `Fn / Fm−Fn / Fn Cells` and Euclidean/Manhattan/Alt#1/#2; Scalar Arithmetic Clip vs Rollover with the 0.9+0.2 examples; Combiner's "values in the second heightfield above 0.5 are added … below … subtracted"; File Output `RAW16` = "16bit RAW file, in standard PC byte-endian format"; Snow `Evaporative Balance`) | The archived WM2 devref page was downloaded in full (223 KB) and each string located verbatim | **confirmed** |
+| 30 | Gaea 2.2 is the current line | blog.quadspinner.com — Gaea 2.2 released **2025-07-14** | **confirmed** |
+
+**Not verifiable from a primary source and now marked in-text as "UNVERIFIED — needs confirmation":** the World Machine build-number *ranges* for Hurricane Ridge and Artist Point; whether Basic Edition's "1K" is 1024 or 1025; Terragen 4.8's exporter list; the modern (post-Hurricane-Ridge) `Erosion` parameter table; Gaea's per-node Properties tables (slider ranges/defaults); and all third-party tool claims in §9.
+
+**Claims re-derived arithmetically rather than cited** (all check out): every figure in the §7.3 worked size table, and the `MINIMAP_SIZE` mip breakdown.

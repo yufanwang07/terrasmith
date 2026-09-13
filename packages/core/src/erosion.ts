@@ -229,7 +229,18 @@ export function hydraulicErosionDroplet(
       posX += dirX;
       posY += dirY;
 
-      if (posX < 1 || posX >= width - 2 || posY < 1 || posY >= height - 2) break;
+      if (posX < 1 || posX >= width - 2 || posY < 1 || posY >= height - 2) {
+        // A droplet that leaves the map drops what it is carrying instead of
+        // taking it with it. Without this, mass is quietly destroyed wherever
+        // droplets exit, and the edges of the map — and any heavily trafficked
+        // outflow — scour out into pits that no amount of parameter tuning
+        // fixes.
+        if (sediment > 0) {
+          depositBilinear(h, deposition.data, width, nodeX, nodeY, offsetX, offsetY, sediment);
+          sediment = 0;
+        }
+        break;
+      }
 
       const newHeight = sampleBilinear(heightField, posX, posY);
       const deltaHeight = newHeight - oldHeight;
@@ -273,7 +284,25 @@ export function hydraulicErosionDroplet(
 
       speed = Math.sqrt(Math.max(0, speed * speed + deltaHeight * -p.gravity));
       waterVolume *= 1 - p.evaporation;
-      if (waterVolume < 1e-4) break;
+      if (waterVolume < 1e-4) {
+        // Same reasoning as the out-of-bounds case: a droplet that dries up
+        // leaves its load behind.
+        if (sediment > 0) {
+          const nx = Math.floor(posX);
+          const ny = Math.floor(posY);
+          depositBilinear(h, deposition.data, width, nx, ny, posX - nx, posY - ny, sediment);
+          sediment = 0;
+        }
+        break;
+      }
+    }
+
+    // A droplet that simply ran out of lifetime still has to put down whatever
+    // it was carrying.
+    if (sediment > 0 && posX >= 1 && posX < width - 2 && posY >= 1 && posY < height - 2) {
+      const nx = Math.floor(posX);
+      const ny = Math.floor(posY);
+      depositBilinear(h, deposition.data, width, nx, ny, posX - nx, posY - ny, sediment);
     }
   }
 

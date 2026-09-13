@@ -161,7 +161,6 @@ function GraphCanvas({ errors }: Props) {
         fitView
         minZoom={0.15}
         maxZoom={2.2}
-        proOptions={{ hideAttribution: true }}
         defaultEdgeOptions={{ type: 'default', animated: false }}
         deleteKeyCode={['Delete', 'Backspace']}
         multiSelectionKeyCode={['Meta', 'Shift']}

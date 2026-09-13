@@ -10,12 +10,20 @@
 [8 Layout generator](#8-constraint-driven-shaping-for-gameplay-layout-generator) ·
 [9 WebGPU practicalities](#9-gpu-practicalities-in-webgpu) ·
 [10 Precision & uint16](#10-precision-f32-in-the-pipeline-uint16-at-the-door) ·
-[11 Appendix](#11-appendix)
+[11 Appendix](#11-appendix) · [12 Verification log](#12-verification-log)
 
 > Target audience: an engineer writing these in **WGSL/GLSL compute shaders + TypeScript** (WebGPU first,
 > WebGL2 fallback). Everything here is meant to be implementable without re-reading the papers.
 > Formulas that are quoted verbatim from a source are marked **[quoted]** with a page/equation/line ref;
 > formulas I derived (stability bounds, closed forms) are marked **[derived]**.
+>
+> **Adversarial review pass, 2026-09-13.** 40 load-bearing claims were re-checked against primary
+> sources (engine source fetched with `curl`, paper PDFs, W3C specs, Crossref). 7 were corrected, 6
+> material gaps were filled, and everything that could not be confirmed from a primary source is now
+> marked **UNVERIFIED — needs confirmation** in place. See [§12 Verification log](#12-verification-log)
+> for the claim-by-claim record. The biggest corrections: the Beyer droplet sign convention (§2.2), the
+> Guérin PSNR figure (§4.3), the `T = 4/N` attribution (§3.1), the OpenSimplex2 domain-rotation matrix
+> and API name (§1.4), and two wrong WGSL spec section numbers.
 
 ---
 
@@ -52,7 +60,7 @@ to world metres only at export. Rationale in §10: f32 ULP at `h≈1` is `1.19e-
 
 WGSL storage-buffer layout rules: `f32/i32/u32` → align 4, size 4; `vec2<f32>` → align 8, size 8;
 `vec3<f32>` → align **16**, size **12** (the classic trap); `vec4<f32>` → align 16, size 16
-([WGSL §14.4.4 "Alignment and Size"](https://www.w3.org/TR/WGSL/#alignment-and-size)).
+([WGSL §14.4.1 "Alignment and Size"](https://www.w3.org/TR/WGSL/#alignment-and-size)).
 
 Prefer **struct-of-arrays** (one buffer per field). It is faster (coalesced reads, no padding) and it lets
 you ping-pong only the fields that change in a given pass.
@@ -242,13 +250,30 @@ if you need tiling, use Perlin or value noise, or tile a 4D torus embedding
 
 **Simplex noise** (Perlin 2001) replaces the hypercube lattice with a simplex (triangle in 2D) lattice:
 2D skew `F2 = (√3−1)/2 ≈ 0.3660254`, unskew `G2 = (3−√3)/6 ≈ 0.2113249`. Contributions use a radial
-falloff `max(0, r² − |d|²)⁴ · dot(g, d)` with `r² = 0.5`, scaled by ≈ **70.0** in 2D to land in `[-1,1]`.
+falloff `max(0, r² − |d|²)⁴ · dot(g, d)` with `r² = 0.5`.
 Cost: 3 gradient lookups in 2D vs 4 for Perlin; 4 vs 8 in 3D — the win grows with dimension.
-**Patent note:** Perlin's *3D+ simplex* patent (US 6,867,776) expired 2022-01-18, so simplex is now
-unencumbered; that patent is the historical reason OpenSimplex exists.
 
-**OpenSimplex2** ([github.com/KdotJPG/OpenSimplex2](https://github.com/KdotJPG/OpenSimplex2), CC0/Unlicense)
-is the modern recommendation. Two variants:
+> **The 2D output scale factor is gradient-table-dependent — do not copy a number blindly.**
+> Stefan Gustavson's Java reference (*Simplex noise demystified*, p. 10 of
+> <https://github.com/stegu/perlin-noise/blob/master/simplexnoise.pdf>) ends 2D with
+> `return 70.0 * (n0 + n1 + n2);` — but it reuses the 12-entry 3D `grad3` table
+> (`{1,1,0},{-1,1,0},…`, length √2) for 2D. His C implementation
+> [`src/simplexnoise1234.c`](https://github.com/stegu/perlin-noise/blob/master/src/simplexnoise1234.c)
+> L230 uses a *different* table and ends with `return 40.0f * (n0 + n1 + n2); // TODO: The scale factor
+> is preliminary!`. OpenSimplex2 uses yet another (see below). **Measure the empirical min/max of your
+> own implementation over ~10⁸ samples and normalize from that** — every published constant is tied to a
+> specific gradient set. `F2 = 0.366025403` and `G2 = 0.211324865` are the same in all of them
+> (`simplexnoise1234.c:169–170`).
+
+**Patent note:** Perlin's *3D+ simplex* patent (US 6,867,776, "Standard for perlin noise", inventor
+Kenneth Perlin; filed 2002-01-08, published 2005-03-15) has **anticipated expiration 2022-01-08** and
+Google Patents lists its status as *Expired — Lifetime*
+(<https://patents.google.com/patent/US6867776B2/en>). Simplex is unencumbered; that patent is the
+historical reason OpenSimplex exists.
+
+**OpenSimplex2** ([github.com/KdotJPG/OpenSimplex2](https://github.com/KdotJPG/OpenSimplex2)) is the
+modern recommendation. Licence: the repository `LICENSE` is **CC0 1.0 Universal**; the `hlsl/`
+subdirectory additionally carries its own `UNLICENSE` (public domain). Two variants:
 
 * **OpenSimplex2 (F, "Fast")** — resembles classic simplex; 3D uses "a rotated body-centered-cubic grid as
   the offset union of two rotated cubic grids"; 4D uses "5 offset copies of the dual (reverse-skewed) grid".
@@ -256,17 +281,75 @@ is the modern recommendation. Two variants:
   smoother, **recommended for ridged noise** because the F variant's sharper kernel creates visible
   creases when you take `1−|n|`.
 
-Both ship improved 24-direction 2D gradient tables for probability symmetry. Files are per-language
-(`java/`, `csharp/`, `rust/`, plus a C FFI header at `rust/OpenSimplex2.h`); porting `OpenSimplex2S.java`'s
-`noise2_ImproveX` to WGSL is mechanical (it is branch-light and table-driven; the 4D LUT is
-`4×4×4×4` so keep it in a uniform/storage array, not `const` — WGSL const arrays of 256 vec4 blow up
-shader compile times on some drivers).
+Both ship improved **24-direction** 2D gradient tables for probability symmetry (changelog, 2020-02-10:
+*"Replaced 12-direction 2D gradient set with a 24-direction set, to reduce visible feature repetition in
+thresholded single-octave 2D noise."*).
+
+**Do not start from the Java.** The repository ships official **`glsl/OpenSimplex2.glsl`,
+`glsl/OpenSimplex2S.glsl`, `hlsl/OpenSimplex2.hlsl`, `hlsl/OpenSimplex2S.hlsl`** in addition to
+`java/`, `csharp/`, `rust/` (+ a C FFI header `rust/OpenSimplex2.h`). The GLSL/HLSL files are **3D-only
+and return analytic derivatives** — their header reads
+`// Output: vec4(dF/dx, dF/dy, dF/dz, value)` — with entry points
+`openSimplex2SDerivatives_Conventional(vec3)` and `openSimplex2SDerivatives_ImproveXY(vec3)`. Translating
+GLSL→WGSL is syntax-only. That also means the "derivatives are fiddly" row in the table below applies
+only if you insist on porting the Java.
+
+**Exact 2D constants** (verified against
+[`java/OpenSimplex2.java`](https://github.com/KdotJPG/OpenSimplex2/blob/master/java/OpenSimplex2.java)
+L15–38 and
+[`java/OpenSimplex2S.java`](https://github.com/KdotJPG/OpenSimplex2/blob/master/java/OpenSimplex2S.java)
+L15–37) **[quoted]**:
+
+| Constant | OpenSimplex2 (F) | OpenSimplex2S |
+|---|---|---|
+| `SKEW_2D` | `0.366025403784439` | same |
+| `UNSKEW_2D` | `-0.21132486540518713` | same (note the **negative** sign convention) |
+| `RSQUARED_2D` | `0.5f` | `2.0f/3.0f` |
+| `NORMALIZER_2D` | `0.01001634121365712` | `0.05481866495625118` |
+| `N_GRADS_2D` | `1 << 7` = **128** | same |
+
+The 2D kernel in both is literally `(a*a)*(a*a) * dot(g, d)` with `a = RSQUARED_2D - |d|²`, skipped when
+`a < 0` (`OpenSimplex2.java:93–95`). The 24 unit gradients (directions 15° apart, e.g.
+`0.38268343236509, 0.923879532511287`) are each divided by `NORMALIZER_2D` at static-init
+(`OpenSimplex2.java:515–521`) and then tiled to fill the 128-entry table — so the output normalization
+is baked into the gradients, not applied at the end.
+
+> **WGSL porting gotcha the Java hides:** the hash is **64-bit**
+> (`PRIME_X = 0x5205402B9270C86FL`, `PRIME_Y = 0x598CD327003817B5L`,
+> `HASH_MULTIPLIER = 0x53A3F72DEEC546F5L`, `OpenSimplex2.java:7–11, 445–450`). WGSL has no 64-bit
+> integers. You must either emulate the 64×64→64 multiply with four 32-bit `u32` limbs (≈6 extra ops per
+> lookup) or substitute your own 32-bit mixer from §1.1 — which changes the output bit-for-bit, so pick
+> one and freeze it before you ship any seeds.
+
+OpenSimplex2S's 4D lookup table is `4×4×4×4`; keep it in a uniform/storage array, not `const` — WGSL
+const arrays of 256 vec4 blow up shader compile times on some drivers.
 
 **Domain rotation trick (important for terrain).** Sampling 3D noise on the plane `z=const` gives
-axis-aligned artifacts. OpenSimplex2 exposes `noise3_ImproveXY` / `noise3_XZBeforeY`, which rotate the
-lattice so the sampled plane is not lattice-aligned. If you animate/erode over a "time" axis, use these.
-Equivalent DIY: rotate by `R = [[2/3,-1/3,-1/3],[-1/3,2/3,-1/3],[-1/3,-1/3,2/3]] + 1/3` — i.e. make the
-sample plane orthogonal to `(1,1,1)`.
+axis-aligned artifacts. The current OpenSimplex2 API exposes **`noise3_ImproveXY`**, **`noise3_ImproveXZ`**
+and `noise3_Fallback` (`OpenSimplex2.java:136, 160, 181`), which rotate the lattice so the sampled plane is
+not lattice-aligned. If you animate/erode over a "time" axis, use these.
+
+> **Correction:** `noise3_XZBeforeY` was the pre-2022 name and no longer exists; the changelog entry
+> "Renamed PlaneFirst evaluators to XYBeforeZ, and added XZBeforeY" (2020-01-13) was superseded by the
+> 2022-01-16 rewrite. Use `noise3_ImproveXZ`.
+
+The transform is not a skew — quoting the source comment **[quoted]**: *"Re-orient the cubic lattices
+without skewing, so Z points up the main lattice diagonal, and the planes formed by XY are moved far out
+of alignment with the cube faces. Orthonormal rotation. Not a skew transform."* The exact code
+(`OpenSimplex2.java:141–146`) **[quoted]** is:
+
+```
+// ROTATE_3D_ORTHOGONALIZER = UNSKEW_2D = -0.21132486540518713
+// ROOT3OVER3               =  0.577350269189626
+xy = x + y;  s2 = xy * ROTATE_3D_ORTHOGONALIZER;  zz = z * ROOT3OVER3;
+xr = x + s2 + zz;
+yr = y + s2 + zz;
+zr = xy * -ROOT3OVER3 + zz;
+```
+
+(An earlier draft of this document gave the DIY rotation as
+`R = [[2/3,-1/3,-1/3],[-1/3,2/3,-1/3],[-1/3,-1/3,2/3]] + 1/3`. That is wrong: adding 1/3 to every entry
+of that matrix yields the identity. Use the code above.)
 
 **When to use what**
 
@@ -274,7 +357,7 @@ sample plane orthogonal to `(1,1,1)`.
 |---|---|---|---|---|---|
 | value | 1.0 | trivial, exact | yes | blocky, axis-aligned | detail, warp source |
 | Perlin | 1.6 | exact (above) | yes | mild axis bias, `0` at lattice pts | primary terrain, warps |
-| simplex/OS2 | 1.3 (2D), 0.6 (3D) | analytic possible but fiddly | no | triangular "pincushion" at high gain | primary terrain, 3D/4D |
+| simplex/OS2 | 1.3 (2D), 0.6 (3D) | **3D: shipped** in `glsl/OpenSimplex2S.glsl`; 2D: hand-derive | no | triangular "pincushion" at high gain | primary terrain, 3D/4D |
 | Worley F1 | 3–9 (3×3 or 5×5 loop) | finite-diff only | yes | grid-locked cells at low jitter | cracks, cells, plateaus |
 
 ### 1.5 Worley / cellular (F1, F2, F2−F1)
@@ -368,7 +451,13 @@ Puffy, cloud-like, rounded bottoms. Good for dunes and rolling hills; invert (`-
 
 #### (d) Ridged multifractal (Musgrave)
 The important one for mountains. Quoted from Musgrave's `RidgedMultifractal()` in
-*Texturing & Modeling: A Procedural Approach*, 3rd ed., ch. 16 **[quoted, structure]**:
+*Texturing & Modeling: A Procedural Approach*, 3rd ed., ch. 16 *"Procedural Fractal Terrains"*
+(pp. 488–506, DOI [10.1016/b978-155860848-1/50045-0](https://doi.org/10.1016/b978-155860848-1/50045-0))
+— **UNVERIFIED — needs confirmation.** The book is not open-access; I could not obtain the printed
+listing. The structure below and the defaults in the table that follows match the version reproduced in
+every public port I know of, but neither has been checked against the page. If you care about matching
+Musgrave exactly, buy the book and re-verify `RidgedMultifractal`, `HybridMultifractal` and their
+argument defaults before shipping presets named after him.
 
 ```wgsl
 fn ridgedMF(p0: vec2<f32>, seed: u32, octaves: i32,
@@ -490,6 +579,9 @@ vec4 fbm( in vec3 x, in int octaves ) {   // returns (value, dx, dy, dz)
 ```
 The `m`/`m3i` bookkeeping is the chain rule: since `x_{i+1} = f·M·x_i`, `∂/∂x_0 = f·Mᵀ·∂/∂x_i`.
 If you skip it your derivatives are wrong by a rotation and the warp goes sideways.
+(`m3` and `m3i` are left undefined in IQ's listing — they are a fixed 3×3 rotation and its inverse,
+supplied by the caller. Reproduced verbatim from the article, including the inconsistency that the loop
+initialises `mat3 m` to identity and then immediately uses `m3`/`m3i`.)
 
 #### (b) Swiss turbulence (Giliam de Carpentier)
 Source: [decarpentier.nl/scape-procedural-extensions](http://www.decarpentier.nl/scape-procedural-extensions)
@@ -511,7 +603,7 @@ fn swissTurbulence(p0: vec2<f32>, seed: u32, octaves: i32,
     // sample the octave at a point pushed toward the nearest ridge by the accumulated gradient
     let n = perlin2D((p0 + warp * dsum) * freq, seed + u32(i)*0x9E3779B1u);
     sum  = sum  + amp * (1.0 - abs(n.x));           // ridged
-    dsum = dsum + amp * n.yz * (-n.x);              // d/dp of (1-|n|) up to sign
+    dsum = dsum + amp * n.yz * (-n.x);              // NOT the true gradient - see note
     freq = freq * lacunarity;
     amp  = amp * gain * clamp(sum, 0.0, 1.0);       // <-- altitude feedback (like hybrid MF)
   }
@@ -521,9 +613,18 @@ fn swissTurbulence(p0: vec2<f32>, seed: u32, octaves: i32,
 
 What it buys you: the `p + warp*dsum` offset **elongates slopes toward the nearest ridge**, producing the
 characteristic parallel gully striping of water-carved mountainsides; the `amp *= gain*saturate(sum)`
-kills fine detail in valleys (where sum is small) and keeps it on peaks. Defaults `lacunarity 2.0`,
-`gain 0.5`, `warp 0.15` (raise `warp` to 0.3 for dramatic striping; above ~0.5 it self-intersects and
-looks smeared).
+kills fine detail in valleys (where sum is small) and keeps it on peaks.
+
+The `-n.x` factor in `dsum` is deliberate, not an approximation slip. de Carpentier **[quoted]**:
+*"Note that applying the chain rule reveals that the gradient for 1-abs(n.x) is actually n.xy*-sign(n.x)
+and not n.yz*-n.x. But to prevent artifacts caused by the discontinuity in the sign function in the
+former, I used the latter."* Keep his version.
+
+Signature defaults are `lacunarity 2.0`, `gain 0.5`, `warp 0.15` (raise `warp` to 0.3 for dramatic
+striping; above ~0.5 it self-intersects and looks smeared). **But the author explicitly overrides the
+signature default for `gain`** **[quoted]**: *"To compensate for the on-average decrease in amplitude,
+the gain parameter should be a bit larger than 'normal' (for example, 0.6 instead of 0.5)."* Start at
+`gain = 0.6`.
 
 #### (c) Jordan turbulence (Giliam de Carpentier)
 Same source **[quoted signature]**:
@@ -628,9 +729,23 @@ float pattern( in vec2 p ) {
 4. **Precompute to a texture.** Noise is pure; evaluate once into an `r32float` storage texture/buffer and
    never re-evaluate it inside erosion loops.
 
-### 1.10 Performance reference (measured order of magnitude, 2048² = 4.19 M cells, mid-range dGPU)
+### 1.10 Performance reference — **UNVERIFIED — needs confirmation**
 
-| Operation | ms |
+> ⚠️ **These are the author's order-of-magnitude guesses for a mid-range discrete GPU at 2048²
+> (4.19 M cells). They are not measurements, on this project's hardware or any other.** Treat every
+> number below, and every "expect N ms" elsewhere in this document, as a placeholder to be replaced once
+> the WebGPU timing harness (§9.7) exists.
+>
+> The only *measured* numbers in this document are the ones quoted from the papers, and they are old:
+> * Mei et al. Table 1 (GeForce 8800 GTX, 2007), **simulation time per cycle**: 1.29 ms @256²,
+>   2.38 ms @512², 6.65 ms @1024², 22.88 ms @2048², 91.22 ms @4096². **[quoted]**
+> * Jákó Table 1 (Radeon HD4870), **ms/iteration**: 0.295 @128², 1.01 @256², 3.835 @512²,
+>   15.47 @1024². **[quoted]**
+> * Beyer Table 6.1 (CPU, Core i5-3470 @3.2 GHz, single-threaded C#): 100 000 drops on 1024² = **40.65 s**;
+>   Table 6.2: 10 000 drops on 256² costs 0.48 s at `p_radius=1` and 9.69 s at `p_radius=8` — i.e. brush
+>   radius dominates. **[quoted]**
+
+| Operation | ms (estimate only) |
 |---|---|
 | Perlin fBm, 8 octaves, with derivatives | 3–6 |
 | Swiss/Jordan, 8 octaves | 4–8 |
@@ -668,6 +783,13 @@ d1(x,y) = dt(x,y) + Δt · rt(x,y)
 ```
 `rt` = water arriving per unit time (rain: uniform or a noise mask; sources: a few cells with large `r`).
 
+> Jákó's eq. (1) adds a global scale: `d1 = dt + Δt · rt(x,y) · Kr`, and he replaces Mei's *"large
+> randomly distributed raindrops"* with a **constant** per-cell rain rate **[quoted]**: *"Unlike the
+> original model, we use constant r(x,y) rain rate for each cell instead of large randomly distributed
+> raindrops falling down to surface… This gives us more balanced and finer grained results in the long
+> run."* Do this — random raindrops add noise you then have to erode away. `Kr` in the parameter table
+> below is that scale, not a rate in metres.
+
 #### Step 2a — outflow flux (Mei eq. 2–3) **[quoted]**
 ```
 fL_{t+Δt}(x,y) = max( 0 , fL_t(x,y) + Δt · A · g · ΔhL(x,y) / l )
@@ -687,6 +809,11 @@ cell holds.
 
 > **GOTCHA:** Jákó's CESCG paper reprints this as `K = max(1, …)` (his eq. 4). That is a **typo**; `max`
 > makes `K ≥ 1`, which *amplifies* the flux and blows up instantly. Use `min`, as in Mei eq. (4).
+
+> **Two more Jákó transcription slips to ignore** (Mei is correct in both cases): his eq. (7) prints
+> `d2 = d2(x,y) + ΔV/(lx·ly)` — the right-hand side must be `d1`, as in Mei eq. (7); and his talus-angle
+> definition on p. 4 prints `α = tan((b − b_i)/d)` where `α = atan((b − b_i)/d)` is meant (he then takes
+> `tan(α)` of it, which would otherwise be `tan(tan(·))`).
 
 #### Step 2c — water height update (Mei eq. 6–7) **[quoted]**
 ```
@@ -734,7 +861,7 @@ Use `minTilt ∈ [0.01, 0.1]`, default **0.05**.
 > **GOTCHA:** Jákó's eq. (9) prints `C = Kc · sin(α(x,y)|v(x,y)|)` — the parenthesis is misplaced.
 > It is `Kc · sin(α) · |v|`, as in Mei eq. (10).
 
-**Jákó's three improvements — take all of them, they each fix a real artifact:**
+**Jákó's four improvements — take the first three unconditionally; the fourth is optional:**
 
 1. **Depth-limited erosion** (Jákó eq. 10) **[quoted]**:
 ```
@@ -744,9 +871,12 @@ lmax(x) = 0                                  , x ≤ 0
         = 1 - (Kdmax - x)/Kdmax              , 0 < x < Kdmax
         = 1                                  , x ≥ Kdmax
 ```
-Wait — read the ramp direction carefully: as written it *increases* with depth. In Jákó's intent
-(stated in the text: *"the erosion will occur only in shallower areas, forcing the simulation to dispose
-sediment at deeper water areas"*) you want the **inverse ramp**. Implement the behaviour, not the typo:
+**Verified against the paper** (Jákó p. 3): the ramp is printed exactly as above, and as written it
+*increases* with depth — `lmax(0⁺) = 0`, `lmax(Kdmax) = 1`. That contradicts the surrounding prose
+**[quoted]**: *"This function **scales down** the fluid erosion effects by the water depth, so the erosion
+will occur only in shallower areas, forcing the simulation to dispose sediment at deeper water areas, just
+like in real world."* The two cannot both be true; the prose describes the effect shown in his Figure 9.
+Implement the behaviour, not the printed ramp:
 ```wgsl
 fn lmax(depth: f32, Kdmax: f32) -> f32 {   // 1 at the surface, 0 below Kdmax
   return clamp(1.0 - depth / Kdmax, 0.0, 1.0);
@@ -770,6 +900,26 @@ R_{t+Δt}(x,y) = max( Rmin , R_t(x,y) − Δt · Kh · Ks (st − C) )
 ```
 Deposited material becomes softer over time → re-eroded preferentially → braided channels and realistic
 floodplains. `Rmin ≈ 0.1`.
+
+> **Hardness sign convention.** Jákó §4 **[quoted]**: *"This is a value in range 0..1, that represents
+> the resistance of the soil against in a given cell. **Smaller values are representing harder material**
+> and vice versa."* This is the opposite of the intuitive reading and of the `R ∈ [0,1]` row in §0.1 of
+> this document. Eqs. (12a) and (17) multiply the erodible amount by `R`, so the convention is
+> self-consistent *there* — but the talus predicate `tan α > R·Ka + Ki` is **not** (see §3.3). Pick the
+> intuitive convention (`R = 1` is hard), then substitute `(1 − R)` wherever Jákó writes `R` in
+> eqs. (12a), (14) and (17), and use `tan α_min = Ki + R·Ka` directly in the talus test.
+
+4. **True 3D water/terrain collision** (Jákó eq. 11) **[quoted]** — *omitted from the previous revision
+   of this document*:
+```
+C(x,y) = Kc · ( −N(x,y) · V ) · |v(x,y)| · lmax(d1(x,y))
+```
+where `N` is the terrain surface normal and `V` the **3D** flow vector built from the surface tangent and
+the 2D velocity `v`. This replaces the `sin(α)` factor of eq. (10) entirely. Jákó **[quoted]**: *"This
+modification erodes more soil if the water collides with the surface in angles closer to perpendicular.
+With our model, we observed some ripples on sea floors similar to sand ripples on real-world seashores."*
+Note he reports the ripples as an *observation*, not unambiguously as an improvement — hence "optional".
+`−N·V` needs the same floor treatment as `sin α` (§ minTilt) or flat ground stops eroding.
 
 #### Step 4 — sediment transport (Mei eq. 13–14) **[quoted]**
 ```
@@ -848,8 +998,13 @@ change resolution. Then one parameter set works at every N.
 | iterations | — | 200–2000 | ~1000 (Jákó's figures use 1000) |
 
 #### Boundary conditions
-Mei §3.2.1 **[quoted]**: *"we assume no water can flow out of the grid ('no slip')… For cells on the left
-boundary, the outflow flux to the left neighbour fL should be set to zero."*
+Mei **§3.2.2** **[quoted]**: *"Since the flow is simulated on a 2D grid, we assume no water can flow out
+of the grid ('no slip' boundary condition). In the pipe model, we specify the outflow flux on boundary
+cells to satisfy the conditions. For cells (x, 0) on the left boundary, the outflow flux to the left
+neighbour f L(x, 0) should be set to zero. Similar rules apply for the other boundaries."*
+(The boundary text is in §3.2.2, not §3.2.1 as a previous revision of this document said. Note also that
+the paper's own index `(x, 0)` is inconsistent with "left boundary" under its `(x,y)` convention — the
+left column is `(0, y)`. Implement by column/row position, not by copying the index.)
 For terrain *generation* you usually want the opposite — **open boundaries** so water leaves the map and
 doesn't pond at the rim. Implement by allowing the boundary outflow but discarding it (never adding it as
 anyone's inflow). Add a flag: `closedBoundary: bool`.
@@ -908,7 +1063,10 @@ Remaining passes are mechanical from the equations above. Total per iteration: 7
 (or 5 if you fuse water-height+velocity and erosion+deposition).
 
 #### Pipe-model characteristics
-* **Cost:** O(N²) per iteration, ~7 dispatches. At 2048² expect 1.5–3 ms/iteration.
+* **Cost:** O(N²) per iteration, 7 dispatches (Mei §4 **[quoted]**; Jákó folded it into 3 MRT fragment
+  passes). "1.5–3 ms/iteration at 2048²" was an unsourced guess and has been removed — the only measured
+  figures are Mei's 22.88 ms @2048² on a 2007 GeForce 8800 GTX and Jákó's 15.47 ms @1024² on a Radeon
+  HD4870. **UNVERIFIED on modern hardware — needs confirmation** (see §1.10).
 * **Convergence:** visible channels after ~200 iterations; mature drainage networks at 1000–3000.
 * **Strength:** produces *water*, so you get lakes, deltas, braided channels, correct deposition
   basins for free; it is a real (if simplified) shallow-water solver.
@@ -982,6 +1140,26 @@ if (sediment > sedimentCapacity || deltaHeight > 0) {
 ```
 Note the asymmetry, which Lague comments on directly (`Erosion.cs:102`) **[quoted]**:
 *"Deposition is not distributed over a radius (like erosion) so that it can fill small pits."*
+The design is Beyer's, and his rationale is fuller **[quoted, Beyer §5.2]**: *"If sediment is deposited,
+it is distributed along the four grid points surrounding the current position… no radius is used, because
+a depositing drop wants to probably fill a small pit of the size of one cell. Distributing sediment to
+more surrounding grid points would result in lifting the pit up, but not filling it."*
+
+Beyer's brush weight is `w_i = max(0, p_radius − |P_i − pos|)` normalized by the sum (eq. 5.9) — distance
+from the **continuous droplet position**, not from the cell centre, and `radius − d` rather than Lague's
+`1 − d/radius`. The two weightings are identical after normalization (they differ by the constant factor
+`radius`); the sampling centre is not. Lague's integer-offset brush is the cheaper choice and is what the
+GPU path needs.
+
+**Beyer's blurred-change-map trick (§5.3) — worth stealing, and absent from Lague.** Rather than writing
+droplet deltas straight into the height map, Beyer accumulates them into a separate *change map*, blurs a
+copy of it, and blends (eq. 5.10) `map = b · map_blurred + (1 − b) · map_unblurred`. **[quoted]**:
+*"I started blurring the terrain after the erosion. With this approach details in the erosion effect as
+well as the terrain map itself were lost… In the final algorithm the changes on the terrain are tracked
+during the whole process of erosion. That way the change map can be blurred before it is applied to the
+terrain map."* This kills the 1-pixel needle artifact without smoothing the underlying terrain, and it
+composes perfectly with the "batch + reduce" GPU scheme below (you already have the delta buffer).
+Beyer notes it is most useful *"in combination with a low p_radius"*.
 
 **Speed & water** (`Erosion.cs:124–125`) **[quoted]**:
 ```csharp
@@ -989,14 +1167,39 @@ speed = Mathf.Sqrt (speed * speed + deltaHeight * gravity);
 water *= (1 - evaporateSpeed);
 ```
 
-> **TWO REAL BUGS TO FIX IN YOUR PORT.**
-> 1. **Sign.** With `deltaHeight = new − old`, going downhill gives `deltaHeight < 0`, so
->    `speed² + deltaHeight·g` *decreases* speed on descent. Beyer's formulation uses the drop
->    `Δh = h_old − h_new > 0`. Use `speed = sqrt(max(0, speed*speed - deltaHeight*gravity))`.
-> 2. **NaN.** Either sign, the radicand can go negative (steep uphill). The `max(0, …)` is mandatory;
+> **CORRECTED (this section previously mis-stated Beyer).** I pulled all three sources:
+>
+> * **ranmantaru 2011** (the predecessor Beyer cites as `[Vol]`) uses the *drop* convention:
+>   `float dh = h - nh;` (**positive downhill**) and `v = sqrtf(v*v + Kg*dh);` — so speed **increases**
+>   on descent. Physically right. **[quoted from the listing on
+>   <http://ranmantaru.com/blog/2011/10/08/water-erosion-on-heightmap-terrain/>]**
+> * **Beyer 2015** *reverses* the convention in eq. (5.3) — `h_dif = h_new − h_old` (**negative
+>   downhill**) — and compensates for it in the capacity, eq. (5.4): `c = max(−h_dif, p_minSlope) · vel ·
+>   water · p_capacity`. But he does **not** compensate in eq. (5.7), which he leaves as
+>   `vel_new = sqrt(vel_old² + h_dif · p_gravity)`. His own prose still describes the `[Vol]` behaviour
+>   **[quoted, §5.4 "Gravity"]**: *"Increased p_gravity leads to higher speed, which causes more carry
+>   capacity c."* With his sign, it does the opposite.
+> * **Lague** reproduces Beyer's eq. (5.7) faithfully (`Erosion.cs:124`). So this is **not** a Lague
+>   transcription error, and the earlier claim in this document that "Beyer's formulation uses
+>   `Δh = h_old − h_new`" was **wrong** — it is ranmantaru's formulation, not Beyer's.
+>
+> **What to do.** The fix is still the same, it is just a deliberate design change rather than a bug fix:
+> 1. **Sign.** With `deltaHeight = new − old`, use
+>    `speed = sqrt(max(0, speed*speed - deltaHeight*gravity))` if you want a physical speed. If you want
+>    bit-comparable output against Lague/Beyer, keep `+` and accept that `speed` is a decaying weight
+>    rather than a velocity. **Decide once and record it** — it changes every tuned parameter.
+> 2. **NaN.** Either sign, the radicand can go negative (steep terrain). The `max(0, …)` is mandatory;
 >    without it a single NaN droplet writes NaN into the map and the NaN spreads through every
->    subsequent droplet that touches those cells. **Always clamp.**
+>    subsequent droplet that touches those cells. **Always clamp.** This one *is* a genuine bug present
+>    in Beyer's eq. (5.7), in Lague's `Erosion.cs:124` and in `Erosion.compute`.
 > Also add a global `if (!isfinite(h)) h = 0;` scrub pass every few thousand droplets during development.
+>
+> **One more Beyer/Lague divergence.** Beyer eq. (5.4) and ranmantaru both apply the minimum to the
+> **slope term only** — `max(−h_dif, minSlope) · vel · water · capacity` — whereas Lague applies it to the
+> **whole product** — `Max(-deltaHeight * speed * water * factor, minCapacity)` (`Erosion.cs:93`). They
+> differ whenever `vel·water < 1`, i.e. for most of a droplet's life after evaporation kicks in. Beyer's
+> version keeps capacity proportional to water; Lague's puts a hard floor under it. Beyer's is the better
+> behaved of the two.
 
 #### The erosion brush (`Erosion.cs:155–201`)
 
@@ -1020,11 +1223,43 @@ step; radius 8 = 193 → ~8× the cost. Stay at 2–4.
 `1,048,576 × 25 × 8 B = 200 MiB` of jagged arrays. It works only because of the condition at
 `Erosion.cs:169` — offsets are recomputed *only* near borders, and interior cells reuse the last
 computed (translation-invariant) offset set. On GPU, store **one** offset array (25 `vec2<i32>` + 25 `f32`
-= 300 bytes, put it in a uniform buffer) and clamp/skip at the borders. The compute version does exactly
+= 300 bytes of payload) and clamp/skip at the borders.
+
+> **Do not naively put that in a `uniform` buffer.** In the `uniform` address space, and without the
+> `uniform_buffer_standard_layout` language extension, `RequiredAlignOf(array<T,N>, uniform) =
+> roundUp(16, AlignOf(array<T,N>))`
+> ([WGSL §14.4.5 Address Space Layout Constraints](https://www.w3.org/TR/WGSL/#address-space-layout-constraints)),
+> so a tight 4-byte-stride `array<f32, 25>` is not portable there. Either pack the brush as
+> `array<vec4<f32>, 25>` (xy = offset, z = weight, w = pad → 400 B, exact) or just use a
+> `var<storage, read>` buffer, where the tight layout is legal. The compute version does exactly
 this: `Erosion.compute:5–6` binds flat `brushIndices`/`brushWeights` plus a `borderSize` that keeps
 droplets away from the edge.
 
-#### Parameter list + defaults (`Erosion.cs:5–22` **[quoted]**)
+#### Parameter list + defaults
+
+> **There are three different published parameter sets, and they disagree.** Use the table below as the
+> *Erosion.cs* set, but know the alternatives:
+>
+> | Param | `Erosion.cs:5–22` (CPU) | `TerrainGenerator.cs:9–28` (GPU path) | Beyer Table 6.1/6.2 |
+> |---|---|---|---|
+> | inertia | **0.05** | **0.3** | **0.3** |
+> | capacity factor | **4** | **3** | **8** |
+> | deposit speed | 0.3 | 0.3 | **0.2** |
+> | erode speed | 0.3 | 0.3 | **0.7** |
+> | evaporate | 0.01 | 0.01 | **0.02** |
+> | gravity | 4 | 4 | **10** |
+> | min capacity / minSlope | 0.01 | 0.01 | 0.01 |
+> | brush radius | 3 | 3 | **4** |
+> | lifetime / maxPath | 30 | 30 | **64** |
+>
+> Note that Lague's own GPU path ships `inertia = 0.3`, which is exactly the value the "tuning" column
+> below warns against. Beyer agrees with 0.3. Treat the `inertia > 0.3 is bad` claim below as the
+> author's taste, not a sourced finding — Beyer's Fig. 5.1 shows 0.025 / 0.1 / 0.4 and describes the
+> trade-off as *"The closer p_inertia gets to 0, the more valley and ravine like structures are formed…
+> If the parameter exceeds a certain value, ravine like structures are only emerging on steep terrain
+> parts."* **[quoted]**
+
+(`Erosion.cs:5–22` **[quoted]**)
 
 | Field | Range | Default | Meaning / tuning |
 |---|---|---|---|
@@ -1042,8 +1277,13 @@ droplets away from the edge.
 | `initialSpeed` | — | **1** | |
 | `borderSize` (GPU) | ≥ erosionRadius+1 | 3–5 | droplets never spawn within this of the edge |
 
-**Iteration count.** Lague's README uses **70 000 droplets** for a 255² map, i.e. ≈ **1.08 droplets per
-cell**. Scale linearly with cell count:
+**Iteration count.** Careful with this number. Lague's README only *captions an image* — "After 70k
+iterations of erosion" — it is not a configured default. The actual defaults are in
+[`TerrainGenerator.cs`](https://github.com/SebLague/Hydraulic-Erosion/blob/master/Assets/Scripts/TerrainGenerator.cs)
+L9, L15: `mapSize = 255`, `numErosionIterations = 50000` → **0.77 droplets/cell** (the 70 k caption gives
+1.08/cell). Beyer's own figures use 300 000 drops on 512² = **1.14/cell** (Fig. 5.1) and 75 000 on 256² =
+**1.14/cell** (Fig. 5.8b/c). So ~1 droplet per cell is well supported by all three sources. Scale linearly
+with cell count:
 
 ```
 numDroplets ≈ k · N²,   k ∈ [0.5, 4],  k = 1 is a good default
@@ -1066,7 +1306,7 @@ statistically averaged. For a production tool you have three options:
    fn addHeight(i: u32, dh: f32) { atomicAdd(&mapQ[i], i32(round(dh * 1048576.0))); }
    ```
    WGSL has **no float atomics** — `atomic<T>` requires `T` = `u32`|`i32`
-   ([WGSL §6.4.5 Atomic Types](https://www.w3.org/TR/WGSL/#atomic-types)). Fixed point is the standard
+   ([WGSL §6.2.8 Atomic Types](https://www.w3.org/TR/WGSL/#atomic-types)). Fixed point is the standard
    workaround; the CAS-loop alternative (`atomicCompareExchangeWeak` on bitcast `u32`) is ~3× slower
    under contention.
    Atomic *adds* are commutative, so the result is order-independent → **fully deterministic**.
@@ -1075,10 +1315,15 @@ statistically averaged. For a production tool you have three options:
    see a consistent height field, which removes the "droplet follows a hole another droplet just dug"
    artifact.
 
-**Spawn distribution.** `Erosion.compute:53` indexes a precomputed `randomIndices` buffer. Generate it on
-CPU (a shuffled permutation → perfectly uniform coverage, no clumping) or on GPU from a
-low-discrepancy sequence (`R2`: `p_i = frac(i * vec2(0.7548776662, 0.5698402910))`), which gives better
-coverage than white noise for the same count.
+**Spawn distribution.** `Erosion.compute:53` indexes a precomputed `randomIndices` buffer. In the
+reference that buffer is **independent uniform white noise**, not a permutation
+(`TerrainGenerator.cs:76–81`: `Random.Range(erosionBrushRadius, mapSize + erosionBrushRadius)` per axis,
+and note it then does `randomIndices[i] = randomY * mapSize + randomX` using `mapSize`, not
+`mapSizeWithBorder` — a latent indexing bug; do not copy it). Prefer a CPU-generated shuffled permutation
+(perfectly uniform coverage, no clumping) or a GPU low-discrepancy sequence (`R2`:
+`p_i = frac(i * vec2(0.7548776662, 0.5698402910))`), which gives better coverage than white noise for the
+same count. `borderSize` in the reference equals `erosionBrushRadius`
+(`TerrainGenerator.cs:41`: `mapSizeWithBorder = mapSize + erosionBrushRadius * 2`).
 
 #### Droplet-model characteristics
 * **Cost:** O(droplets × lifetime × brushSize). 1 M droplets × 30 × 25 = 750 M scattered RMWs.
@@ -1131,20 +1376,31 @@ believable scree slopes, and it is the cheapest realism-per-flop operation avail
 Terrains"*, SIGGRAPH '89, pp. 41–50. Restated with exact formulas by Jacob Olsen, *"Realtime Procedural
 Terrain Generation"*, IMADA/SDU 2004, <http://web.mit.edu/cesium/Public/terrain.pdf> §"Thermal erosion".
 
-Definitions (Olsen p. 5) **[quoted]**: `d_i = h − h_i` for each neighbour (positive = neighbour is lower).
+> **Attribution warning — read before copying constants.** The SIGGRAPH '89 paper is paywalled and I
+> could not obtain it. Everything below is verified against **Olsen 2004**, who is restating Musgrave et
+> al. Where a constant is quoted, it is *Olsen's* choice, not demonstrably Musgrave's. The 1989 paper
+> itself remains **UNVERIFIED — needs confirmation**.
 
-Move material to every neighbour whose `d_i` exceeds the talus threshold `T`, proportionally
-(Olsen p. 5) **[quoted]**:
+Definitions (Olsen p. 5) **[quoted]**: `d_i = h − h_i`, *"meaning that lower neighbours produce positive
+height differences"*.
+
+Single-neighbour case, verbatim (Olsen p. 5) **[quoted]**:
+```
+h_i = { d_i >  T :  h_i + c(d_i − T)
+      { d_i <= T :  h_i
+```
+Multi-neighbour case, verbatim (Olsen p. 5) **[quoted]**:
 ```
 h_i = h_i + c · (d_max − T) · d_i / d_total
-h   = h   − c · (d_max − T)
 ```
-where `d_total = Σ d_i over all i with d_i > T`, and `d_max = max d_i`.
+*"where d_max is the greatest of the d_i and d_total is the sum of the d_i greater than T"* **[quoted]**.
+The matching subtraction on the giving cell, `h = h − c · (d_max − T)`, is required by mass conservation
+but is **not** written out in Olsen's text — it is **[derived]**.
 
 | Param | Range | Default | Notes |
 |---|---|---|---|
-| `T` (talus) | `tan(30°)·cellSize` … `tan(45°)·cellSize` | `4/N` in Musgrave's original normalization | in *height units per cell*; for a 0–1 height map on an N grid, `T = tan(θ)·(worldSize/N)/heightRange` |
-| `c` | 0.3–0.6 | **0.5** | fraction of the maximum legal transfer actually moved; **must be ≤ 0.5** |
+| `T` (talus) | `tan(30°)·cellSize` … `tan(45°)·cellSize` | **`4/N` — Olsen's choice, not Musgrave's** | Olsen p. 6 **[quoted]**: *"For the talus threshold, a value of T = 4/N was chosen."* In *height units per cell*; for a 0–1 height map on an N grid, `T = tan(θ)·(worldSize/N)/heightRange` |
+| `c` | 0.3–0.6 | **0.5** — Olsen's choice | Olsen p. 5 **[quoted]**: *"A reasonable value for c is 0.5; higher values may cause oscillation when the changes to the height map are applied only after completion of an entire iteration, and lower values will simply cause slopes steeper than T a slower asymptotical approach to the talus angle."* |
 | neighbourhood | Moore (8) or von Neumann (4) | Moore for quality | |
 | iterations | 10–200 | 50 | Olsen: "no more than 50 iterations … are needed to show the distinct effects" **[quoted]** |
 
@@ -1152,6 +1408,10 @@ where `d_total = Σ d_i over all i with d_i > T`, and `d_max = max d_i`.
 the giver, and next iteration the material bounces back → a 2-cycle oscillation that never settles.
 Jákó states the same limit explicitly (eq. 17 context) **[quoted]**: *"the volume to be moved is
 ΔS = a·H/2. This is the maximum, otherwise the algorithm will oscillate."*
+Olsen's qualifier matters: the oscillation is a consequence of **double-buffering** (*"when the changes to
+the height map are applied only after completion of an entire iteration"*). With the red-black in-place
+scheme of §3.4 the constraint is much weaker — which is exactly why Olsen's fast variant can get away with
+`Δh = d_max/2` and still converge.
 
 **Convergence.** It is a nonlinear diffusion; expect `O(L²)` iterations to relax a feature `L` cells
 wide. To flatten a 100-cell-wide massif to the talus angle you need thousands of passes. Fix: run a
@@ -1428,8 +1688,17 @@ operators. A terrain patch is reconstructed as a **sparse linear combination of 
 **That last bullet IS terrain amplification.** Decompose your coarse (procedural / hand-sketched) terrain
 over `L`, then rebuild with `H` using the *same* sparse coefficients → you get real-world high-frequency
 landform detail (from the exemplar DEMs the dictionary was learned from) grafted onto your coarse shape,
-while preserving the coarse layout. Reported PSNR is good *"even for very small sparsity values"*, and
-sparsity `s = 1` already gives ~20 dB **[quoted]**.
+while preserving the coarse layout. Reported PSNR is good *"even for very small sparsity values"*
+**[quoted]**.
+
+> **Corrected.** A previous revision of this document said *"sparsity `s = 1` already gives ~20 dB"*.
+> That misreads §5.1, which is comparing against a baseline **[quoted]**: *"The Italy terrain compressed
+> with **JPEG2000** using a compression ratio ρ similar to the one obtained with a sparsity of 1 gives a
+> PSNR of 20 dB. **Our approach compares favorably with a PSNR of 31.7 dB.**"* So 20 dB is JPEG2000's
+> number; the sparse construction tree achieves **31.7 dB at sparsity 1**. (The figure "20.0 dB" *does*
+> appear elsewhere — Figure 8 reports 20.0 dB for a Perlin-noise atom dictionary vs 24.9 dB for a
+> ridged-noise one, at sparsity 1, which is a different experiment and is the paper's argument for
+> building function-based atoms out of ridged noise.)
 
 **What it buys you:** exemplar-driven realism without a sim, plus compression (they report large storage
 reduction ratios) and inverse procedural modelling. **Cost:** OMP is the expensive part (per patch, per
@@ -1440,7 +1709,19 @@ iteration `s` dot-products against all `N` atoms) but it is embarrassingly paral
 | Work | What it buys you |
 |---|---|
 | Braun & Willett 2013, *"A very efficient O(n), implicit and parallel method to solve the stream power equation"*, Geomorphology 180–181:170–179 | The implicit SPL solver itself. If you implement §4.1, read this. |
-| Schott, Paris, Fournier, Guérin, Galin, *"Large-scale Terrain Authoring through Interactive Erosion Simulation"*, ACM TOG 42(5), 2023, <https://dl.acm.org/doi/10.1145/3592787> | Brings full hydraulic+thermal+debris erosion to **interactive** authoring at large scale; sparse/adaptive update so you only simulate where the user is painting. |
+| Schott, Paris, Fournier, Guérin, Galin, *"Large-scale Terrain Authoring through Interactive Erosion Simulation"*, ACM TOG 42(5), 2023, <https://dl.acm.org/doi/10.1145/3592787> (author list and venue confirmed via Crossref, DOI `10.1145/3592787`) | Brings full hydraulic+thermal+debris erosion to **interactive** authoring at large scale; sparse/adaptive update so you only simulate where the user is painting. |
+
+> **On the brief's phrase "Guérin et al. sparse erosion".** There is no paper by that name. Two distinct
+> works fit, and they solve different problems — pick deliberately:
+> * **Guérin, Digne, Galin, Peytavie 2016**, *"Sparse representation of terrains for procedural
+>   modeling"*, CGF 35(2):177–187, DOI `10.1111/cgf.12821` — §4.3 above. "Sparse" = sparse *dictionary
+>   coding* (OMP + K-SVD). **No erosion anywhere in it.** This is amplification/compression.
+> * **Schott, Paris, Fournier, Guérin, Galin 2023** — the row above. "Sparse" = *sparse spatial update*
+>   of a real erosion simulation. This is the one that is actually sparse **erosion**.
+>
+> If the brief meant "add real detail from exemplars", it is 2016. If it meant "erode interactively
+> without paying for the whole map", it is 2023. Both list Guérin as an author, which is where the
+> ambiguity comes from.
 | Cordonnier et al., *"Authoring landscapes by combining ecosystem and terrain erosion simulation"*, SIGGRAPH 2017 | Couples vegetation to erosion (roots resist erosion, erosion kills plants). Gives you the hardness field `R` for free, and much better-looking foothills. |
 | Guérin et al., *"Interactive Example-Based Terrain Authoring with Conditional GANs"*, ACM TOG 36(6), 2017 | Sketch-to-terrain: user draws ridge/river/altitude strokes, cGAN synthesizes the DEM. The fastest path to "authoring feels like drawing". |
 | Musgrave, Kolb, Mace 1989 (SIGGRAPH '89) | The original thermal + hydraulic formulation; still the base of §3. |
@@ -1591,7 +1872,7 @@ integer exactness above 16.7 M (`2^24`). Use `u32` for cell counts, convert to f
 Watershed-Labeling Algorithm for Digital Elevation Models"*, Computers & Geosciences 62:117–127, 2014.
 arXiv: <https://arxiv.org/abs/1511.04463>
 
-**Algorithm 1 (the generalization), verbatim [quoted, arXiv lines 265–278]:**
+**Algorithm 1 (the generalization), verbatim [quoted, Alg. 1, p. 5 of the arXiv PDF]:**
 ```
 Require: DEM
  1: Let Open be a priority queue
@@ -1609,7 +1890,7 @@ Require: DEM
 13:     Push n onto Open with priority DEM(n)
 ```
 
-**Algorithm 2 "Improved Priority-Flood", verbatim [quoted, arXiv lines 393–413]** — adds a plain FIFO to
+**Algorithm 2 "Improved Priority-Flood", verbatim [quoted, Alg. 2, p. 7]** — adds a plain FIFO to
 fill a depression once its outlet is known, which is the big constant-factor win:
 ```
  1: Let Open be a priority queue
@@ -1635,12 +1916,50 @@ integer data. By comparison, the Planchon–Darboux Algorithm has a time complex
 and the generalized Priority-Flood Algorithm has a time complexity of O(n log₂ n) for floating-point DEMs
 and O(n) for integer DEMs."*
 
-**Algorithm 3 "Priority-Flood+ε" [quoted, arXiv lines 597–627]** — fills so that every filled cell is
-strictly higher than its downstream neighbour, so flow directions are always defined (no flats):
-the key line is `DEM(n) <- NextAfter(DEM(c), ∞)` (C99 `nextafterf`). Barnes explicitly warns
-**[quoted]**: *"If too small an ε is used, then adding it to a cell may produce no change in its
-elevation; if too great an ε is used, then large depressions may be converted into mesas rising above the
-surrounding landscape."* Use `nextafterf`, not a hardcoded `1e-6`.
+**Algorithm 3 "Priority-Flood+ε", verbatim [quoted, Alg. 3, p. 11]** — fills so that every filled cell is
+strictly higher than its downstream neighbour, so flow directions are always defined (no flats).
+*A previous revision of this document reduced this to "the key line is `DEM(n) ← NextAfter(DEM(c), ∞)`",
+which is misleading — the algorithm carries a `PitTop` watermark and an alteration flag that the one-liner
+throws away. Here it is in full:*
+
+```
+Require: DEM
+ 1: Let Open be a priority queue WITH TOTAL ORDER
+ 2: Let Pit be a plain queue
+ 3: Let Closed have the same dimensions as DEM ; initialized to false
+ 5: for all c on the edges of DEM do
+ 6:   Push c onto Open with priority DEM(c) ; Closed(c) <- true
+ 8: while either Open or Pit is not empty do
+ 9:   if the top of Open = the top of Pit then
+10:     c <- pop(Open) ; PitTop <- None
+12:   else if Pit is not empty then
+13:     c <- pop(Pit)
+14:     if PitTop = None then PitTop <- DEM(c)
+16:   else
+17:     c <- pop(Open) ; PitTop <- None
+19:   for all neighbors n of c do
+20:     if Closed(n) then repeat loop
+21:     Closed(n) <- true
+22:     if DEM(n) = NoData then
+23:       Push n onto Pit
+24:     else if DEM(n) <= NextAfter(DEM(c), inf) then
+25:       if PitTop < DEM(n) and NextAfter(DEM(c), inf) >= DEM(n) then
+26:         A significant alteration of the DEM has occurred
+27:         (the inside of the pit is now higher than the terrain surrounding it)
+28:       DEM(n) <- NextAfter(DEM(c), inf)
+29:       Push n onto Pit
+30:     else
+31:       Push n onto Open with priority DEM(n)
+```
+
+`PitTop` records the elevation at which the current depression started filling; lines 25–27 raise a flag
+when ε-filling has pushed a pit's interior above its rim. **Surface that flag in your tooling** — on a
+1025² map with a 0–1000 m range, `nextafterf` steps are ~1e-4 m, so a depression more than a few thousand
+cells across genuinely can turn into a mesa.
+
+Barnes explicitly warns **[quoted]**: *"If too small an ε is used, then adding it to a cell may produce no
+change in its elevation; if too great an ε is used, then large depressions may be converted into mesas
+rising above the surrounding landscape."* Use `nextafterf`, not a hardcoded `1e-6`.
 WGSL has no `nextafter`; implement it by bit-manipulation:
 ```wgsl
 fn nextAfterUp(x: f32) -> f32 {
@@ -1654,14 +1973,14 @@ fn nextAfterUp(x: f32) -> f32 {
 watershed labeling or flow directions, you need a **total order** — pair each cell's elevation with a
 monotonically increasing insertion counter as a tiebreaker.
 
-**Algorithm 4 "Priority-Flood+FlowDirs" [quoted, lines 693–712]** — a depression-*carving* variant: it
+**Algorithm 4 "Priority-Flood+FlowDirs" [quoted, Alg. 4, p. 13]** — a depression-*carving* variant: it
 never modifies the DEM, it just assigns every cell a flow direction pointing toward the cell that popped
 before it. *"On 8-connected grids, non-diagonal neighbors should be processed first … as they have the
 greatest center-to-center slopes."* **[quoted]** Often better for terrain generation than filling,
 because filling creates dead-flat lake surfaces that look wrong; carving preserves the bathymetry and
 still gives you a valid drainage graph.
 
-**Algorithm 5 "Improved Priority-Flood + Watershed Labels" [quoted, lines 743–763]** — see §5.5.
+**Algorithm 5 "Improved Priority-Flood + Watershed Labels" [quoted, Alg. 5, p. 14]** — see §5.5.
 
 #### (b) Planchon & Darboux (2002)
 **Source:** O. Planchon, F. Darboux, *"A fast, simple and versatile algorithm to fill the depressions of
@@ -1720,7 +2039,7 @@ heap; ~250 ms at 2048², ~1.2 s at 4096²), run once per pipeline, not per erosi
 
 ### 5.5 Watershed extraction
 
-**Algorithm 5 of Barnes et al., verbatim [quoted, arXiv lines 743–763]:**
+**Algorithm 5 of Barnes et al., verbatim [quoted, Alg. 5, p. 14]:**
 ```
 Require: DEM, Labels
  1: Let Open be a priority queue
@@ -2366,7 +2685,7 @@ Reasons:
    and declare `requires readonly_and_readwrite_storage_textures;` at the top of the shader.
 2. **Atomics require a storage buffer.** `atomic<T>` may only be instantiated *"by variables in the
    workgroup address space or by storage buffer variables with a read_write access mode"*
-   ([WGSL §6.4.5](https://www.w3.org/TR/WGSL/#atomic-types)) — and `T` must be `u32` or `i32`. There are
+   ([WGSL §6.2.8](https://www.w3.org/TR/WGSL/#atomic-types)) — and `T` must be `u32` or `i32`. There are
    **no texture atomics and no float atomics** in WGSL. Droplet erosion (§2.2) and flow accumulation
    (§5.3c) both need atomics → buffer.
 3. `maxStorageTexturesPerShaderStage` default is **4**; `maxStorageBuffersPerShaderStage` default is
@@ -2575,6 +2894,16 @@ Also: handle `device.lost` and rebuild everything. It *will* happen on someone's
 
 ### 9.9 WebGL2 fallback
 
+> **OPEN PROJECT DECISION — not a research question.** Whether this fallback is required is a product
+> call, not something a source can settle. If it is dropped, the following constraints disappear
+> entirely: MRT emulation, additive-blend scatter for droplets, transform feedback for droplet state,
+> the mip-chain reduction, and the "no atomics" column below — and §2.1's pipe model can then assume
+> `read_write` storage buffers throughout. Resolve this before writing the pipeline, because the pipe
+> model's pass decomposition is the one piece of §2.1 that changes shape depending on the answer.
+> As a data point: Mei et al. §4 targeted Shader Model 3.0 with 7 fragment passes and Jákó §3 fit the
+> whole iteration into **three** MRT fragment passes over a fullscreen quad **[quoted]** — so a WebGL2
+> path is demonstrably feasible, it is just extra work.
+
 WebGL2 has **no compute shaders, no storage buffers, no atomics**. What survives:
 
 | Capability | WebGL2 | How |
@@ -2594,8 +2923,11 @@ WebGL2 has **no compute shaders, no storage buffers, no atomics**. What survives
 **Infeasible in WebGL2 (do on CPU or drop):** priority-flood depression filling, radix sort, topological
 flow accumulation, histogram percentiles, anything needing atomics. Everything else (noise, pipe model,
 thermal, derived maps, quantization) maps to fullscreen-quad fragment passes with MRT almost 1:1 —
-the pipe model in particular was *designed* for this (Mei et al. 2007 targeted Shader Model 3.0 with
-7 fragment passes, §2.1).
+the pipe model in particular was *designed* for this. Mei et al. §5 **[quoted]**: *"our algorithm can be
+implemented on any Shader Model 3.0 GPUs, since no DirectX10 features were used"*, and §4: *"In total
+seven passes are needed for the simulation."* Jákó §3 did better — *"The iteration process is implemented
+in a single fragment shader that runs in three passes on a full-size quad rendered over the entire
+framebuffer, writing the output textures using the multiple render target feature."* **[quoted]**
 
 **Practical fallback plan:** WebGL2 path = noise + pipe model + thermal + derived maps + quantization,
 all as fragment passes; flow accumulation via the iterative-relaxation scheme (§5.3d, it is a pure gather
@@ -2619,7 +2951,8 @@ IEEE-754 binary32 has a 24-bit significand. The gap between representable values
 
 Erosion accumulates **many tiny increments**. A pipe-model step with `Ks = 0.5`, `Δt = 0.02` and a small
 capacity deficit produces `Δb ≈ 1e-5` to `1e-7` per iteration. If you store heights in metres
-(`h ≈ 1000`), the ULP is `1.22e-4` — **larger than the per-step delta**, so the addition is a no-op and
+(`h ≈ 1000`), the ULP is `6.1e-5` (and `1.22e-4` once you cross 1024) — **larger than the per-step
+delta**, so the addition is a no-op and
 erosion silently stops on high ground while working fine in valleys. The bug looks like "my mountains
 won't erode".
 
@@ -2876,7 +3209,9 @@ QUANTIZE       uint16, TPDF blue-noise dither at +/-0.5 LSB, round() not floor()
   <https://iquilezles.org/articles/smoothvoronoi/>, <https://iquilezles.org/articles/voronoise/>.
 * Giliam de Carpentier, *Scape: Procedural Extensions* — <http://www.decarpentier.nl/scape-procedural-extensions>
   (**swissTurbulence** and **jordanTurbulence**, with full signatures and defaults).
-* KdotJPG, **OpenSimplex2** — <https://github.com/KdotJPG/OpenSimplex2> (CC0/Unlicense; 2S recommended
+* KdotJPG, **OpenSimplex2** — <https://github.com/KdotJPG/OpenSimplex2> (repo `LICENSE` = CC0 1.0;
+  `hlsl/` also carries its own `UNLICENSE`. **Official `glsl/` and `hlsl/` ports exist** — 3D, with
+  analytic derivatives; 2S recommended
   for ridged noise; `noise3_ImproveXY` for domain-rotated 3D).
 * Worley (1996), *A Cellular Texture Basis Function*, SIGGRAPH '96.
 * Ebert, Musgrave, Peachey, Perlin, Worley, *Texturing & Modeling: A Procedural Approach*, 3rd ed. —
@@ -2898,3 +3233,148 @@ QUANTIZE       uint16, TPDF blue-noise dither at +/-0.5 LSB, round() not floor()
   <https://www.w3.org/TR/WGSL/#atomic-types>; alignment/size <https://www.w3.org/TR/WGSL/#alignment-and-size>.
 * Recoil/Spring SMF format — <https://github.com/beyond-all-reason/RecoilEngine>,
   `rts/Map/SMF/SMFFormat.h` (header at L49–70, constants at L28/31/34, tile note at L173).
+
+---
+
+## 12. Verification log
+
+Adversarial fact-check, **2026-09-13**. Every claim below was checked against a **primary** source
+fetched during the review — engine/library source via `curl` from `raw.githubusercontent.com`, paper PDFs
+from the publisher or author's site, the live W3C specs, Crossref for bibliographic data. Nothing here was
+verified from memory. Verdicts: **confirmed** / **corrected** / **unverified**.
+
+### 12.1 Binary format (highest stakes — a wrong offset means the writer produces garbage)
+
+| # | Claim | Source checked | Verdict |
+|---|---|---|---|
+| 1 | `SMFHeader` field order and all 18 offsets (0…76), 80-byte total | `rts/Map/SMF/SMFFormat.h` L49–70, RecoilEngine `master`, fetched raw | **confirmed** — byte-for-byte. `char magic[16]`@0, `int version`@16, `mapid`@20, `mapx`@24, `mapy`@28, `squareSize`@32, `texelPerSquare`@36, `tilesize`@40, `float minHeight`@44, `float maxHeight`@48, `heightmapPtr`@52, `typeMapPtr`@56, `tilesPtr`@60, `minimapPtr`@64, `metalmapPtr`@68, `featurePtr`@72, `numExtraHeaders`@76 → 80. Quoted doc comments match verbatim. Cited line numbers correct. |
+| 2 | `SMALL_TILE_SIZE = 680` | `SMFFormat.h:28` + comment at `:173` | **confirmed** — `(512>>0)+(512>>2)+(512>>4)+(512>>6)` = 512+128+32+8 = 680 |
+| 3 | `MINIMAP_NUM_MIPMAP = 9`, `MINIMAP_SIZE = 699048` | `SMFFormat.h:31`, `:34` | **confirmed**; recomputed the DXT1 mip chain 1024²…4² = 699 048 exactly |
+| 4 | Heightmap is `(mapx+1)·(mapy+1)` uint16 (vertex-centred) | `SMFFormat.h:62` comment: *"short int[(mapy+1)*(mapx+1)]"* | **confirmed** |
+| 5 | 1024² map: heightmap 1 050 625 samples = 2 101 250 B = 2.004 MiB; typemap/metalmap 262 144 B each | recomputed | **confirmed** |
+| 6 | `ExtraHeader{int size; int type;}` follows the header | `SMFFormat.h:83–86` | **confirmed** |
+
+### 12.2 Erosion
+
+| # | Claim | Source checked | Verdict |
+|---|---|---|---|
+| 7 | Mei eqs. 1–15 as transcribed (incl. `K = min(1, …)` in eq. 4, `C = Kc·sin(α)·|v|` in eq. 10, no `Δt` in eqs. 11–12) | `FastErosion_PG07.pdf` §3, text extracted | **confirmed** — all 15 equations match, as does the §3.5 five-step summary and the §4 *"In total seven passes are needed"* |
+| 8 | Mei Table 1 `Δt` per grid size: 0.002 / 0.001 / 0.0005 / 0.00025 / 0.000125 | same PDF, Table 1 | **confirmed** |
+| 9 | Jákó eq. 4 prints `max` (a typo for Mei's `min`) | `TUBudapest-Jako-Balazs.pdf` p. 2 | **confirmed** — paper literally prints `K = max(1, …)` |
+| 10 | Jákó eq. 9 prints `Kc · sin(α(x,y)|v(x,y)|)` — misplaced parenthesis | same, p. 3 | **confirmed** |
+| 11 | Jákó's `lmax` ramp as printed increases with depth, contradicting his prose | same, p. 3 | **confirmed** — resolves open question 4. Prose quoted: *"scales down the fluid erosion effects by the water depth"*. Inverse ramp is correct. |
+| 12 | Jákó Table 2: all 13 parameter ranges and defaults | same, p. 5 | **confirmed** — every row (Δt .02, Kr .012, Ke .015, A 20, g 9.81, Kc 1, Ks .5, Kd 1, Kh 5, Kdmax 10, Ka .8, Ki .1, Kt .15) matches exactly |
+| 13 | Jákó had **three** improvements | same | **corrected** → four. Eq. (11), the 3D normal/flow collision term, was missing from the doc. Added as §2.1 improvement 4. |
+| 14 | Jákó's 7-step combined loop order | same, p. 4 | **confirmed** |
+| 15 | Jákó: smaller `R` = harder material | same, §4 | **confirmed** — and the talus predicate is inconsistent with it; now flagged in place |
+| 16 | Jákó eq. 7 prints `d2 = d2 + …` | same, p. 3 | **corrected/added** — was not flagged before; `d1` is meant |
+| 17 | **Beyer uses `Δh = h_old − h_new`** | `beyer.pdf` eq. 5.3, 5.7 (fetched over HTTP; HTTPS cert is broken) | **corrected — this was wrong.** Beyer eq. 5.3 is `h_dif = h_new − h_old`, same as Lague; eq. 5.7 is `sqrt(vel² + h_dif·p_gravity)`. The positive-drop convention belongs to the **ranmantaru 2011** predecessor (`dh = h - nh`, `v = sqrtf(v*v + Kg*dh)`), verified from its published listing. Resolves open question 2. |
+| 18 | Lague `Erosion.cs` line refs (72–79, 84–86, 93, 96–121, 102, 124–125, 130–153, 155–201, 5–22) | `Erosion.cs` @ master, 207 lines, fetched raw | **confirmed** — every cited line number and code excerpt is exact |
+| 19 | Lague defaults: radius 3, inertia .05, capacity 4, minCap .01, erode .3, deposit .3, evap .01, gravity 4, lifetime 30 | `Erosion.cs:5–22` | **confirmed** — but `TerrainGenerator.cs:9–28` ships a *different* set (inertia 0.3, capacity 3) for the GPU path, and Beyer's own is different again. All three now tabulated. |
+| 20 | Brush cell counts 9 / 25 / 45 / 69 / 193 for r = 2/3/4/5/8 | recomputed the strict `x²+y² < r²` test | **confirmed** |
+| 21 | `Erosion.compute` `[numthreads(1024,1,1)]` @L50, `brushIndices`/`brushWeights` @L5–6, `randomIndices` @L53 | `Erosion.compute` fetched raw | **confirmed** |
+| 22 | "Lague's README uses 70 000 droplets for a 255² map" | README + `TerrainGenerator.cs` | **corrected** — README only captions an image; the configured default is 50 000 (0.77/cell). Beyer's figures give 1.14/cell. The ~1/cell rule survives. |
+| 23 | Olsen thermal: `d_i = h − h_i`, the two transfer formulas, `c = 0.5`, 6× speedup, 500 it. in 10 s vs 60 s, 5 % worse at 500 / better in first 80, most change in first 50 vs 150, four optimizations, `Δh = d_max/2`, rotated von Neumann | `terrain.pdf` (Olsen 2004), text extracted | **confirmed** — every one, quoted verbatim |
+| 24 | `T = 4/N` is "Musgrave's original normalization" | Olsen p. 6 | **corrected** — it is Olsen's own choice: *"For the talus threshold, a value of T = 4/N was chosen."* Same for `c = 0.5`. Musgrave/Kolb/Mace 1989 itself is still **unverified** (paywalled). |
+| 25 | Olsen hydraulic constants `Kr=.01, Ks=.01, Ke=.5, Kc=.01` | Olsen p. 9 | **confirmed** |
+| 26 | `h = h − c(d_max − T)` (the giving side) | Olsen | **unverified in source** → now marked **[derived]**; required by mass conservation but not printed |
+
+### 12.3 Hydrology and landscape evolution
+
+| # | Claim | Source checked | Verdict |
+|---|---|---|---|
+| 27 | Tarboton Table 1 (e0/e1/e2/ac/af for all 8 facets) | `96wr03137.pdf`, Table 1 | **confirmed** — all 32 cells, `ac` = 0,1,1,2,2,3,3,4 and `af` = 1,−1,1,−1,1,−1,1,−1 |
+| 28 | Tarboton eqs. 1–6, the −1 unresolved flag, "ties pick the first", "never proportioned between more than two downslope pixels" | same | **confirmed** — all four quotes exact |
+| 29 | Barnes Algorithms 1, 2, 4, 5 verbatim; complexity paragraph | arXiv:1511.04463 PDF | **confirmed** — line for line |
+| 30 | Barnes Algorithm 3 reduced to "the key line is `NextAfter`" | same, Alg. 3 | **corrected/expanded** — the real algorithm carries a `PitTop` watermark and a "significant alteration" flag; both now reproduced |
+| 31 | "arXiv lines 265–278" etc. as citations | — | **corrected** — text-extraction line numbers are not a stable citation; replaced with Alg./page refs |
+| 32 | Cordonnier eq. 1, eq. 2, `n=1, m=0.5`, 50×50 km², U = 5.0×10⁻⁴ m/y, k = 5.61×10⁻⁷ /y, δt = 2.5×10⁵ y, 100–300 steps, 10⁵–10⁷ y, the 30° thermal clamp, the stream-graph-topology convergence test, the BFS/reverse-order drainage area, "random planar graph", "blending landform feature kernels" | Purdue-hosted PDF, text extracted | **confirmed** — all 13 sub-claims, quotes exact |
+| 33 | Guérin 2016: `s ≪ N ≪ n`, multi-resolution `(H,L)` dictionary, OMP, K-SVD, atoms on a disc of constant radius, function-based atoms are sums of ridged noise | `eg2016.pdf` | **confirmed** |
+| 34 | "sparsity `s = 1` already gives ~20 dB" | same, §5.1 | **corrected** — 20 dB is **JPEG2000's** PSNR at a comparable ratio; the sparse construction tree gets **31.7 dB** |
+| 35 | Bibliographic data: Barnes C&G 62:117–127 (2014); Cordonnier CGF 35(2):165–175; Guérin CGF 35(2):177–187; Schott TOG 42(5) 2023; Braun & Willett Geomorph. 180–181:170–179; Planchon & Darboux Catena 46(2–3):159–176; Tarboton WRR 33(2):309–319; Zevenbergen & Thorne ESPL 12(1):47–56; Horn Proc. IEEE 69(1):14–47; Beven & Kirkby HSB 24(1):43–69 | Crossref API, by DOI | **confirmed** — all ten |
+
+### 12.4 Noise
+
+| # | Claim | Source checked | Verdict |
+|---|---|---|---|
+| 36 | IQ `terrain()` and `vec4 fbm(vec3,int)` listings, quintic `u`/`du` pair, `m = mat2(0.8,-0.6,0.6,0.8)` | iquilezles.org/articles/morenoise, page fetched | **confirmed** — character-for-character |
+| 37 | `swissTurbulence` / `jordanTurbulence` signatures **and bodies** | decarpentier.nl/scape-procedural-extensions, page fetched | **confirmed** — both signatures and both loop bodies match. **Gap filled:** the author recommends `gain ≈ 0.6`, overriding his own signature default of 0.5, and explains the deliberate `-n.x` (not `-sign(n.x)`) in `dsum`. |
+| 38 | Simplex patent US 6,867,776 expired **2022-01-18** | patents.google.com/patent/US6867776B2 | **corrected** → anticipated expiration **2022-01-08**; status *Expired — Lifetime*; filed 2002-01-08 |
+| 39 | Simplex 2D scaled by ≈ 70.0, `r² = 0.5`, 4th-power kernel | Gustavson `simplexnoise.pdf` (70.0) and `src/simplexnoise1234.c:230` (40.0f, *"scale factor is preliminary!"*); OpenSimplex2 `RSQUARED_2D` | **corrected/qualified** — `r²=0.5` and the 4th power are confirmed in all three implementations; the **scale factor is gradient-table-dependent** (70.0 Java, 40.0 C, baked into `NORMALIZER_2D` in OpenSimplex2). `F2`/`G2` confirmed at `simplexnoise1234.c:169–170`. |
+| 40 | OpenSimplex2 API `noise3_XZBeforeY` | `java/OpenSimplex2.java` | **corrected** → `noise3_ImproveXZ` (the `XZBeforeY` name was removed in the 2022-01-16 rewrite) |
+| 41 | DIY domain-rotation matrix `[[2/3,…]] + 1/3` | same, L136–146 | **corrected** — the stated matrix sums to the identity. Replaced with the exact source transform (`ROTATE_3D_ORTHOGONALIZER`, `ROOT3OVER3`). |
+| 42 | OpenSimplex2 ships only `java/`, `csharp/`, `rust/` | repo tree via GitHub API | **corrected** — `glsl/` and `hlsl/` ports also ship, 3D with analytic derivatives. Resolves open question 6; exact 2D constants (`SKEW_2D`, `UNSKEW_2D`, `RSQUARED_2D` 0.5 vs 2/3, `NORMALIZER_2D`, 128-entry table, 64-bit hash) extracted and tabulated. |
+| 43 | OpenSimplex2 is "CC0/Unlicense" | repo `LICENSE`, `hlsl/UNLICENSE` | **corrected/qualified** — repo is CC0 1.0; `hlsl/` additionally carries an UNLICENSE |
+| 44 | 24-direction 2D gradient set, 2S recommended for ridged, 2S 3D uses 4 nearest points, 2S 4D uses a 4×4×4×4 LUT | repo README | **confirmed** — all four |
+| 45 | Musgrave `RidgedMultifractal` / `HybridMultifractal` structure and defaults (H 1.0 / lac 2.0 / offset 1.0 / gain 2.0; H .25 / offset .7) | T&M 3rd ed. ch. 16 | **unverified** — book is not open-access; marked in place |
+
+### 12.5 Platform (WebGPU / WGSL)
+
+| # | Claim | Source checked | Verdict |
+|---|---|---|---|
+| 46 | Default limits: `maxTextureDimension2D` 8192 (compat 4096), `maxStorageBufferBindingSize` 134 217 728, `maxBufferSize` 268 435 456, `maxStorageBuffersPerShaderStage` 8, `maxStorageTexturesPerShaderStage` 4, `maxComputeWorkgroupStorageSize` 16 384, `maxComputeInvocationsPerWorkgroup` 256 (compat 128), `maxComputeWorkgroupSizeX/Y` 256 (compat 128), `maxComputeWorkgroupSizeZ` 64, `maxComputeWorkgroupsPerDimension` 65 535 | w3.org/TR/webgpu, limits table parsed from the fetched HTML | **confirmed** — all ten |
+| 47 | `r32float`: `RENDER_ATTACHMENT` ✓, `STORAGE_BINDING` write-only/read-only/read-write all ✓, sample type `"unfilterable-float"` unless `float32-filterable` | same, §26.1.1 row parsed | **confirmed** |
+| 48 | `pass.writeTimestamp` is gone; use `GPUComputePassTimestampWrites{querySet, beginningOfPassWriteIndex, endOfPassWriteIndex}` | same | **confirmed** — `writeTimestamp` appears **0** times in the current spec |
+| 49 | WGSL alignment/size: f32 4/4, vec2 8/8, vec3 16/**12**, vec4 16/16; struct size = `roundUp(AlignOf, justPastLastMember)` → the `Cell` struct is 48 B | w3.org/TR/WGSL, table parsed | **confirmed**, and the 48-byte `Cell` layout recomputed and verified |
+| 50 | `atomic<T>`: T ∈ {u32, i32}, only workgroup or `read_write` storage | WGSL §6.2.8 | **confirmed** (quote exact) |
+| 51 | Cited as "WGSL §6.4.5" and "WGSL §14.4.4" | WGSL ToC | **corrected** → Atomic Types is **§6.2.8**; Alignment and Size is **§14.4.1** |
+| 52 | `readonly_and_readwrite_storage_textures` is a language extension listed in §4.1.2 | WGSL §4.1.2 | **confirmed** |
+| 53 | Brush "put it in a uniform buffer" (300 B) | WGSL §14.4.5 layout constraints | **corrected/qualified** — uniform-space arrays need `roundUp(16, AlignOf)` without `uniform_buffer_standard_layout`; use a storage buffer or pack to `vec4` |
+| 54 | Arithmetic: N = 5792 storage cap, the memory table, the f32 ULP table, the uint16 terrace table, `Δt ≤ 0.5·sqrt(l³/(A·g))` = 0.0714 at Jákó's defaults, `T = tan38°·8/1000 = 0.00625`, fixed-point ranges, `0.99³⁰ = 0.74` | recomputed in Python | **confirmed** — every figure. One inconsistency fixed: §10.1 said ULP at `h ≈ 1000` is 1.22e-4; that is the ULP at 1024, the value at 1000.0 is 6.1e-5 (§0.1 already had it right). |
+
+### 12.6 Researcher's open questions — status after this pass
+
+| Q | Status |
+|---|---|
+| 1. Musgrave 1989 constants `T = 4/N`, `c = 0.5` | **partially resolved.** Both are verifiably **Olsen's** choices, quoted from Olsen 2004 pp. 5–6, not attributable to the 1989 paper. The 1989 paper is still paywalled and remains **unverified**. Doc now says so. |
+| 2. Beyer's capacity formula and sign convention | **resolved, and the doc was wrong.** Thesis obtained (over HTTP — the site's HTTPS certificate fails). Eq. 5.3/5.4/5.6/5.7 transcribed; the drop convention is ranmantaru's, not Beyer's. Also recovered Beyer's own parameter set and his blurred-change-map technique. |
+| 3. "Guérin et al. sparse erosion" | **resolved.** No paper by that name exists. 2016 = sparse *dictionary* (no erosion); 2023 Schott et al. = sparse *erosion*. Both now disambiguated in §4.4 with confirmed Crossref metadata. |
+| 4. Jákó's `lmax` ramp direction | **resolved.** The printed ramp does contradict his prose; the prose and Figure 9 win. Confirmed against the PDF. |
+| 5. Performance numbers | **not resolvable by research.** All estimates now explicitly marked **UNVERIFIED**, with the three sets of *measured* published numbers (Mei, Jákó, Beyer) supplied as the only real data points. |
+| 6. OpenSimplex2 normalization constant and gradient table | **resolved.** Exact constants extracted from both Java files; official GLSL/HLSL ports found, which removes the need to port Java at all; the 64-bit-hash porting problem identified. |
+| 7. Whether the WebGL2 fallback is required | **out of scope for research — it is a product decision.** §9.9 now states exactly what is gained by dropping it, and notes that Mei (7 passes) and Jákó (3 MRT passes) both prove the path is feasible if kept. |
+
+### 12.7 Sources fetched during this review
+
+```
+https://raw.githubusercontent.com/beyond-all-reason/RecoilEngine/master/rts/Map/SMF/SMFFormat.h
+https://raw.githubusercontent.com/SebLague/Hydraulic-Erosion/master/Assets/Scripts/Erosion.cs
+https://raw.githubusercontent.com/SebLague/Hydraulic-Erosion/master/Assets/Scripts/TerrainGenerator.cs
+https://raw.githubusercontent.com/SebLague/Hydraulic-Erosion/master/Assets/Scripts/ComputeShaders/Erosion.compute
+https://raw.githubusercontent.com/KdotJPG/OpenSimplex2/master/java/OpenSimplex2.java
+https://raw.githubusercontent.com/KdotJPG/OpenSimplex2/master/java/OpenSimplex2S.java
+https://raw.githubusercontent.com/KdotJPG/OpenSimplex2/master/glsl/OpenSimplex2S.glsl
+https://raw.githubusercontent.com/KdotJPG/OpenSimplex2/master/{LICENSE,README.md,hlsl/UNLICENSE}
+https://raw.githubusercontent.com/stegu/perlin-noise/master/src/simplexnoise1234.c
+https://raw.githubusercontent.com/stegu/perlin-noise/master/simplexnoise.pdf
+http://evasion.inrialpes.fr/Publications/2007/MDH07/FastErosion_PG07.pdf        (Mei 2007)
+https://old.cescg.org/CESCG-2011/papers/TUBudapest-Jako-Balazs.pdf              (Jako 2011)
+http://www.firespark.de/resources/downloads/implementation%20of%20a%20methode%20for%20hydraulic%20erosion.pdf  (Beyer 2015; HTTPS cert fails, HTTP works)
+http://ranmantaru.com/blog/2011/10/08/water-erosion-on-heightmap-terrain/
+http://web.mit.edu/cesium/Public/terrain.pdf                                    (Olsen 2004)
+https://hydrology.usu.edu/dtarb/96wr03137.pdf                                   (Tarboton 1997)
+https://arxiv.org/pdf/1511.04463                                                (Barnes 2014)
+https://www.cs.purdue.edu/cgvlab/.../Cordonnier-...-2016-....pdf                (Cordonnier 2016)
+https://perso.liris.cnrs.fr/eguerin/download/eg2016.pdf                         (Guerin 2016)
+https://iquilezles.org/articles/morenoise/
+http://www.decarpentier.nl/scape-procedural-extensions
+https://patents.google.com/patent/US6867776B2/en
+https://www.w3.org/TR/webgpu/  and  https://www.w3.org/TR/WGSL/
+https://api.crossref.org/works/<doi>  (10 DOIs)
+```
+
+### 12.8 What this pass did **not** check
+
+Stated plainly so nobody mistakes silence for verification:
+
+* **Musgrave/Kolb/Mace 1989** and **Texturing & Modeling 3rd ed. ch. 16** — both paywalled. §3.1's
+  formulas rest on Olsen; §1.6(d)(e)'s code rests on public reproductions.
+* **O'Brien & Hodgins 1995**, **Worley 1996**, **Whipple & Tucker 1999**, **Rong & Tan 2006**,
+  **Bavoil et al. 2008**, **Felzenszwalb & Huttenlocher**, **O'Callaghan & Mark 1984** — cited only for
+  attribution, not for any formula reproduced here; not fetched.
+* **§6 (derived maps)** — the Horn, Zevenbergen & Thorne, Beven & Kirkby and Cooper formulas were checked
+  for *bibliographic* correctness only (all confirmed via Crossref). The coefficient expressions
+  themselves, the ArcGIS aspect convention, and the AO weight derivation were **not** re-derived and
+  remain the original author's **[derived]** work.
+* **§7 and §8** are original design, not literature; nothing in them is a citable claim.
+* **Every performance figure** that is not explicitly attributed to Mei, Jákó or Beyer.

@@ -9,8 +9,10 @@
 
 import {
   createField,
-  fractalNoise2D,
   filledField,
+  fractalNoise2D,
+  planWarp,
+  resolveNoiseParams,
   warpedNoise2D,
   type Field,
   type FractalType,
@@ -181,7 +183,10 @@ export const noiseNode: NodeDefinition<NoiseParams> = {
     const freq = frequencyFromFeatureSize(params.featureSize, ctx.worldWidth);
     const noiseSeed = (seed + params.seed) | 0;
 
-    const noiseParams = {
+    // Resolved once rather than per texel: this loop runs tens of millions of
+    // times on a full-resolution build, and merging defaults inside it was
+    // costing more than the noise itself.
+    const noiseParams = resolveNoiseParams({
       type: params.type,
       fractal: params.fractal,
       octaves: params.octaves,
@@ -190,7 +195,7 @@ export const noiseNode: NodeDefinition<NoiseParams> = {
       gain: params.gain,
       sharpness: params.sharpness,
       seed: noiseSeed,
-    };
+    });
 
     // Sample in normalised domain so the pattern scales with the map rather
     // than with the grid.
@@ -199,11 +204,11 @@ export const noiseNode: NodeDefinition<NoiseParams> = {
     const aspect = ctx.worldHeight / ctx.worldWidth;
     const warping = params.warpAmount > 0;
     const warp = warping
-      ? {
+      ? planWarp(noiseParams, {
           amount: params.warpAmount / ctx.worldWidth,
           frequency: frequencyFromFeatureSize(params.warpSize, ctx.worldWidth),
           iterations: params.warpIterations,
-        }
+        })
       : null;
 
     for (let y = 0; y < ctx.height; y++) {

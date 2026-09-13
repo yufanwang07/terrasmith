@@ -692,7 +692,11 @@ input[type='checkbox'] {
   background: var(--bg-0);
 }
 .react-flow__attribution {
-  display: none;
+  background: transparent;
+  font-size: 10px;
+}
+.react-flow__attribution a {
+  color: var(--text-3);
 }
 
 /* --- Dialogs ------------------------------------------------------------ */

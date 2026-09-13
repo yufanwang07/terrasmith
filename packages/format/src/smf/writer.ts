@@ -96,9 +96,10 @@ export function collectSmfProblems(data: SmfData): string[] {
     p.push(`at most ${MAX_FEATURE_TYPES} feature types, got ${data.featureTypes.length}`);
   }
   for (const name of data.featureTypes) {
-    if (new TextEncoder().encode(name).length >= MAX_FEATURE_TYPE_NAME_BYTES) {
+    if (new TextEncoder().encode(name).length > MAX_FEATURE_TYPE_NAME_BYTES) {
       p.push(
-        `feature type name ${JSON.stringify(name)} exceeds ${MAX_FEATURE_TYPE_NAME_BYTES - 1} bytes`,
+        `feature type name ${JSON.stringify(name)} is longer than ${MAX_FEATURE_TYPE_NAME_BYTES} ` +
+          'bytes; the engine reads at most that many and would then misread every following name',
       );
     }
   }

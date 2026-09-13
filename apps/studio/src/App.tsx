@@ -38,6 +38,9 @@ export function App() {
     'templates',
   );
   const [graphHeight, setGraphHeight] = useState(340);
+  // True scale by default: the slope overlay and the "can a tank drive here"
+  // answer are only honest if the terrain is drawn the shape it really is.
+  const [exaggeration, setExaggeration] = useState(1);
 
   // Preview the node the user asked for, or the height output by default.
   const targetNodeId = useMemo(() => {
@@ -62,8 +65,9 @@ export function App() {
 
   const onSplitterDrag = useSplitter(setGraphHeight);
 
-  const showsGraph = centerView !== 'terrain';
-  const showsTerrain = centerView !== 'graph';
+  // Guided mode is a form over the terrain; the graph is what the other mode is
+  // for, and showing both at once makes neither big enough to work in.
+  const effectiveView = guided ? 'terrain' : centerView;
 
   return (
     <div className="app">
@@ -77,17 +81,29 @@ export function App() {
         {!guided && <NodePalette />}
 
         <div className="center">
-          {centerView === 'split' ? (
+          {effectiveView === 'split' ? (
             <div
               className="center-split"
               style={{ ['--graph-height' as string]: `${graphHeight}px` }}
             >
-              <TerrainPane preview={preview} overlay={overlay} dims={dims} />
+              <TerrainPane
+                preview={preview}
+                overlay={overlay}
+                dims={dims}
+                exaggeration={exaggeration}
+                onExaggeration={setExaggeration}
+              />
               <div className="splitter" onPointerDown={onSplitterDrag} />
               <GraphEditor errors={nodeErrors} />
             </div>
-          ) : showsTerrain ? (
-            <TerrainPane preview={preview} overlay={overlay} dims={dims} />
+          ) : effectiveView === 'terrain' ? (
+            <TerrainPane
+              preview={preview}
+              overlay={overlay}
+              dims={dims}
+              exaggeration={exaggeration}
+              onExaggeration={setExaggeration}
+            />
           ) : (
             <GraphEditor errors={nodeErrors} />
           )}
@@ -122,10 +138,14 @@ function TerrainPane({
   preview,
   overlay,
   dims,
+  exaggeration,
+  onExaggeration,
 }: {
   preview: ReturnType<typeof usePreview>;
   overlay: ReturnType<typeof useEditor.getState>['overlay'];
   dims: ReturnType<typeof mapDimensionsOf>;
+  exaggeration: number;
+  onExaggeration(v: number): void;
 }) {
   const setOverlay = useEditor((s) => s.setOverlay);
   const project = useEditor((s) => s.project);
@@ -138,14 +158,17 @@ function TerrainPane({
         worldWidth={dims.worldWidth}
         worldHeight={dims.worldHeight}
         showWater={!project.settings.voidWater}
+        exaggeration={exaggeration}
       />
       <div className="viewport-overlay">
         <div className="viewport-controls">
           <OverlayPicker value={overlay} onChange={setOverlay} />
+          <ExaggerationPicker value={exaggeration} onChange={onExaggeration} />
         </div>
         <div className="viewport-readout">
           {preview.result?.kind === 'field'
-            ? `${Math.round(preview.result.min)} to ${Math.round(preview.result.max)} elmos`
+            ? `${Math.round(preview.result.min)} to ${Math.round(preview.result.max)} elmos` +
+              (exaggeration !== 1 ? `  ·  shown ${exaggeration}\u00d7 taller` : '')
             : ''}
         </div>
       </div>
@@ -177,6 +200,32 @@ function OverlayPicker({
           onClick={() => onChange(choice.value as never)}
         >
           {choice.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+/**
+ * Vertical exaggeration.
+ *
+ * A 16x16 map is 8192 elmos across with maybe 700 of relief, so at true scale
+ * it reads as almost flat from an overview camera — which is honest, and also
+ * makes the terrain hard to judge. The exaggeration is a viewing aid only: the
+ * slope overlay and every number in the interface come from the real heights.
+ */
+function ExaggerationPicker({
+  value,
+  onChange,
+}: {
+  value: number;
+  onChange(v: number): void;
+}) {
+  return (
+    <div className="segmented" title="Vertical exaggeration — affects the picture only">
+      {[1, 2, 3].map((factor) => (
+        <button key={factor} aria-pressed={value === factor} onClick={() => onChange(factor)}>
+          {factor}&times;
         </button>
       ))}
     </div>
