@@ -99,10 +99,21 @@ export const DEFAULT_FOG_COLOR: readonly [number, number, number] = [0.7, 0.7, 0
 
 /**
  * `atmosphere.fogStart` / `fogEnd`, as fractions of the camera's far plane —
- * not as distances. The engine's ground fog is linear between the two.
+ * not as distances, which is the first thing everyone gets wrong about them.
+ * The engine's ground fog is linear between the two.
+ *
+ * Both at 2.0, which puts the start of the fog beyond the far plane and so
+ * switches it off. The engine's own defaults are 0.1 and 1.0, and they are a
+ * lot of fog: haze begins a tenth of the way out and is total at the far plane,
+ * which on a normal camera means roughly half the far corner of the map
+ * replaced by pale blue-grey. BAR's own map generator disables it the same way,
+ * and no BAR map ships looking like that.
+ *
+ * Turn it back on per map if the map wants it — a swamp, a dust bowl — but a
+ * generated map should not arrive hazier than every map it will sit beside.
  */
-export const DEFAULT_FOG_START = 0.1;
-export const DEFAULT_FOG_END = 1.0;
+export const DEFAULT_FOG_START = 2.0;
+export const DEFAULT_FOG_END = 2.0;
 
 /**
  * The `water` block a generated map declares.

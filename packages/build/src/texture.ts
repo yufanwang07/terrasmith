@@ -41,6 +41,8 @@ export interface TextureAnalysis {
   occlusion: Field;
   curvature: Field;
   wetness: Field;
+  macro: Field;
+  aspect: Field;
   /** An explicit colour map from the graph, if the author connected one. */
   color?: ColorField;
 }
@@ -68,6 +70,8 @@ export interface BlockInputs {
     occlusion: Float32Array;
     curvature: Float32Array;
     wetness: Float32Array;
+    macro: Float32Array;
+    aspect: Float32Array;
     /** Interleaved RGBA when the graph supplied an explicit colour map. */
     color?: Float32Array;
   };
@@ -132,6 +136,8 @@ export function bakeTexture(
     occlusion: new Float32Array(maxTexels),
     curvature: new Float32Array(maxTexels),
     wetness: new Float32Array(maxTexels),
+    macro: new Float32Array(maxTexels),
+    aspect: new Float32Array(maxTexels),
   };
   if (analysis.color) scratch.color = new Float32Array(maxTexels * 4);
 
@@ -256,6 +262,8 @@ function upsampleStrip(
   sampleInto(analysis.occlusion, into.occlusion, columns, rows, textureWidth, h);
   sampleInto(analysis.curvature, into.curvature, columns, rows, textureWidth, h);
   sampleInto(analysis.wetness, into.wetness, columns, rows, textureWidth, h);
+  sampleInto(analysis.macro, into.macro, columns, rows, textureWidth, h);
+  sampleInto(analysis.aspect, into.aspect, columns, rows, textureWidth, h);
   if (analysis.color && into.color) {
     sampleColorInto(analysis.color, into.color, y0, h, textureWidth, textureHeight);
   }

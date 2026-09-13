@@ -164,7 +164,7 @@ export async function buildMapFiles(
   });
 
   report('Analysing terrain', 0.36);
-  const analysis = buildAnalysis(outputs, plan);
+  const analysis = buildAnalysis(outputs, plan, project.settings.seed);
   throwIfAborted(options.signal);
 
   report('Painting texture', 0.4);
@@ -312,11 +312,12 @@ export async function buildMapFiles(
  * thousand texels and the finished map would carry a grid of seams wherever the
  * blocks met.
  */
-function buildAnalysis(outputs: GraphOutputs, plan: BuildPlan): TextureAnalysis {
+function buildAnalysis(outputs: GraphOutputs, plan: BuildPlan, seed: number): TextureAnalysis {
   const height = outputs.height;
   // The graph grid spans the world, so its cell size is the world width over
-  // its sample count — not 8 elmos, which is the *heightfield's* spacing.
-  const cellSize = plan.worldWidth / height.width;
+  // the number of intervals between its samples — not 8 elmos, which is the
+  // *heightfield's* spacing, and not the sample count, which is one too many.
+  const cellSize = plan.worldWidth / Math.max(1, height.width - 1);
 
   const slopeDegrees = slopeDegreesField(height, { cellSize });
   const curvature = normalizeCurvature(curvatureField(height, 'profile', { cellSize }));
@@ -331,7 +332,7 @@ function buildAnalysis(outputs: GraphOutputs, plan: BuildPlan): TextureAnalysis 
 
   const resolved = resolveTextureInputs(
     { height, slopeDegrees, curvature, occlusion },
-    { cellSize, waterLevel: 0 },
+    { cellSize, waterLevel: 0, seed },
   );
 
   return {
@@ -343,6 +344,8 @@ function buildAnalysis(outputs: GraphOutputs, plan: BuildPlan): TextureAnalysis 
     deposition: resolved.deposition,
     wear: resolved.wear,
     wetness: resolved.wetness,
+    macro: resolved.macro,
+    aspect: resolved.aspect,
   };
 }
 
@@ -550,6 +553,7 @@ function buildStripTasks(
       occlusionStrength: project.texture.bakedOcclusion,
       shadingStrength: project.texture.bakedShading,
       grain: project.texture.grain,
+      macroVariation: project.texture.macroVariation,
       grainScale: 12,
       seed: project.settings.seed,
       minimapSize: MINIMAP_SIZE_PX,
@@ -583,6 +587,8 @@ function sliceAnalysis(
     occlusion: take(analysis.occlusion),
     curvature: take(analysis.curvature),
     wetness: take(analysis.wetness),
+    macro: take(analysis.macro),
+    aspect: take(analysis.aspect),
     color: explicitColor
       ? explicitColor.data.slice(firstRow * width * 4, (firstRow + rows) * width * 4)
       : undefined,

@@ -541,7 +541,10 @@ function createViewport(mount: HTMLElement, handlers: ViewportHandlers): Viewpor
     setWaterFog(waterMaterial, DEFAULT_FOG_COLOR, fogNear, fogFar);
     const fog = scene.fog as THREE.Fog;
     fog.near = fogNear;
-    fog.far = fogFar;
+    // A zero-width band is a division by zero in three's fog chunk, and the
+    // shipped atmosphere is exactly that: fogStart and fogEnd are both 2.0,
+    // which is how the engine is told to switch fog off.
+    fog.far = Math.max(fogFar, fogNear + 1);
     (terrainMaterial.uniforms.cameraPos.value as THREE.Vector3).copy(camera.position);
     (waterMaterial.uniforms.cameraPos.value as THREE.Vector3).copy(camera.position);
     // The sea is the one thing in this scene that moves on its own. Seconds

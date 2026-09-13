@@ -50,7 +50,7 @@ import {
   type MaterialPalette,
   type Rgb,
 } from './materials.js';
-import { fractalNoise2D, type NoiseParams } from './noise.js';
+import { fractalNoise2D, resolveNoiseParams, type NoiseParams } from './noise.js';
 import { gaussianBlur } from './ops.js';
 import { Rng } from './random.js';
 
@@ -138,6 +138,10 @@ export interface TextureInputs {
   readonly occlusion?: Field;
   /** Ground wetness, 0..1. */
   readonly wetness?: Field;
+  /** Large-scale variation, 0..1, unrelated to the landform. */
+  readonly macro?: Field;
+  /** Which way a slope faces: 0 south, 1 north, 0.5 flat or east-west. */
+  readonly aspect?: Field;
 }
 
 /** The same set with nothing missing. */
@@ -150,6 +154,8 @@ export interface ResolvedTextureInputs {
   readonly curvature: Field;
   readonly occlusion: Field;
   readonly wetness: Field;
+  readonly macro: Field;
+  readonly aspect: Field;
 }
 
 /** The derived maps a rule can name. */
@@ -186,6 +192,14 @@ export interface TexturingOptions {
    * @default 0.0015
    */
   readonly channelArea?: number;
+  /**
+   * How wide a patch of the macro variation channel is, in elmos.
+   * See {@link DEFAULT_MACRO_SIZE}.
+   * @default 1400
+   */
+  readonly macroSize?: number;
+  /** Seed for the macro variation, so a reroll changes where the patches are. */
+  readonly seed?: number;
 }
 
 /**
@@ -237,6 +251,8 @@ export function channelsUsedBy(palette: MaterialPalette): Set<TextureChannel> {
     if (rule.curvature !== undefined) used.add('curvature');
     if (rule.occlusion !== undefined) used.add('occlusion');
     if (rule.wetness !== undefined) used.add('wetness');
+    if (rule.macro !== undefined) used.add('macro');
+    if (rule.aspect !== undefined) used.add('aspect');
   }
   return used;
 }
@@ -249,6 +265,8 @@ const CHANNEL_NAMES: readonly TextureChannel[] = [
   'curvature',
   'occlusion',
   'wetness',
+  'macro',
+  'aspect',
 ];
 
 /**
@@ -338,7 +356,28 @@ export function resolveTextureInputs(
 
   const wear = inputs.wear ?? (wants('wear') ? deriveWear(slopeDegrees, curvature) : neutral());
 
-  return { height, slopeDegrees, flow, deposition, wear, curvature, occlusion, wetness };
+  const macro =
+    inputs.macro ??
+    (wants('macro')
+      ? deriveMacro(height, cellSize, options.macroSize ?? DEFAULT_MACRO_SIZE, options.seed ?? 0)
+      : neutral());
+
+  const aspect =
+    inputs.aspect ??
+    (wants('aspect') ? deriveAspect(height, cellSize, mode) : neutral());
+
+  return {
+    height,
+    slopeDegrees,
+    flow,
+    deposition,
+    wear,
+    curvature,
+    occlusion,
+    wetness,
+    macro,
+    aspect,
+  };
 }
 
 /**
@@ -586,6 +625,126 @@ function deriveWear(slope: Field, convexity: Field): Field {
   return out;
 }
 
+/**
+ * How wide a patch of macro variation is, in elmos.
+ *
+ * 1400 is between a base and a lane: big enough that a player crossing the map
+ * passes through two or three of them, small enough that a single screen holds
+ * more than one. Much smaller and it reads as mottling rather than as a change
+ * of ground; much bigger and half the map is one patch, which is the same as
+ * having none.
+ */
+export const DEFAULT_MACRO_SIZE = 1400;
+
+/**
+ * How far the ground's colour drifts between one patch and the next.
+ *
+ * The thing that gives a generated map away is that all its grass is exactly
+ * one green. No arrangement of the landform channels fixes that, because the
+ * variation in real ground has nothing to do with the landform: it is where the
+ * soil changed, where the last fire went through, where the drainage is a
+ * little different. Every hand-painted map texture has it.
+ *
+ * 0.18 is a plus or minus 9% drift, which reads as "the ground is not uniform"
+ * and not as "somebody painted patches". It is applied unevenly across the
+ * channels — red hardest, blue least — because ground that differs differs
+ * warm-to-cool as well as light-to-dark, and a pure luminance drift reads as
+ * bad lighting rather than as different ground.
+ */
+export const DEFAULT_MACRO_VARIATION = 0.18;
+
+/**
+ * Per-channel weighting of the macro drift. Warmer where the noise is high.
+ *
+ * The spread matters more than the numbers: equal weights give a luminance
+ * ramp, which the eye reads as a shading error on flat ground.
+ */
+const MACRO_CHANNEL_TILT: readonly [number, number, number] = [1.15, 1.0, 0.78];
+
+/**
+ * Large-scale variation with no relation to the landform.
+ *
+ * Two octaves, normalised to 0..1 across the map. Two rather than one because a
+ * single octave of Perlin is a field of smooth blobs and the second gives the
+ * patches an edge to be recognised by; more than two and it starts competing
+ * with the terrain's own detail, which is the opposite of the point.
+ *
+ * It is sampled in world coordinates, so the same map textures the same way at
+ * preview and at build resolution — and it takes the project seed, so rerolling
+ * moves the patches instead of leaving the one arrangement everybody's map has.
+ */
+function deriveMacro(height: Field, cellSize: number, size: number, seed: number): Field {
+  const out = createField(height.width, height.height);
+  const params = resolveNoiseParams({
+    type: 'perlin',
+    fractal: 'fbm',
+    octaves: 2,
+    frequency: 1,
+    gain: 0.5,
+    seed: seed | 0,
+  });
+  const scale = cellSize / Math.max(1, size);
+  let min = Infinity;
+  let max = -Infinity;
+  for (let y = 0; y < height.height; y++) {
+    for (let x = 0; x < height.width; x++) {
+      const v = fractalNoise2D(x * scale, y * scale, params);
+      out.data[y * height.width + x] = v;
+      if (v < min) min = v;
+      if (v > max) max = v;
+    }
+  }
+  // Normalised against the map's own range rather than the noise's nominal one:
+  // a field that only ever reaches 0.3 would leave every rule keyed above that
+  // dead, and which rules those are would change with the seed.
+  const span = max - min;
+  if (span > 1e-6) {
+    for (let i = 0; i < out.data.length; i++) out.data[i] = (out.data[i] - min) / span;
+  } else {
+    out.data.fill(0.5);
+  }
+  return out;
+}
+
+/**
+ * Which way a slope faces: 0 due south, 1 due north, 0.5 flat or east-west.
+ *
+ * Weighted by steepness, so flat ground sits at exactly 0.5 whatever direction
+ * its numerical gradient happens to point. Without that weighting a plain with
+ * a hundredth of a degree of tilt reads as fully north-facing and a rule keyed
+ * to aspect stains half the map — which is the trap that makes aspect masks
+ * unusable in tools that expose the raw bearing.
+ *
+ * The weighting saturates at 25 degrees: past that a face is as committed to
+ * its direction as it is going to get, and the useful range is the shoulder
+ * below it where the ground is turning from flat to sloped.
+ */
+function deriveAspect(height: Field, cellSize: number, mode: WrapMode): Field {
+  const out = createField(height.width, height.height);
+  const inv = 1 / (2 * cellSize);
+  const w = height.width;
+  const h = height.height;
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const xm = wrapCoord(x - 1, w, mode);
+      const xp = wrapCoord(x + 1, w, mode);
+      const ym = wrapCoord(y - 1, h, mode);
+      const yp = wrapCoord(y + 1, h, mode);
+      const dx = (height.data[y * w + xp] - height.data[y * w + xm]) * inv;
+      const dz = (height.data[yp * w + x] - height.data[ym * w + x]) * inv;
+      // The surface normal's south component. +z is south, and the ground
+      // falls the way the gradient rises, so a face whose height increases
+      // southward is facing north.
+      const steepness = Math.hypot(dx, dz);
+      const northness = steepness > 1e-9 ? dz / steepness : 0;
+      // tan(25 degrees) = 0.466.
+      const commitment = Math.min(1, steepness / 0.466);
+      out.data[y * w + x] = 0.5 + 0.5 * northness * commitment;
+    }
+  }
+  return out;
+}
+
 // --- Rule evaluation -------------------------------------------------------
 
 export interface WeightOptions {
@@ -672,6 +831,8 @@ function weightsOf(
   const curvatureData = resolved.curvature.data;
   const wetnessData = resolved.wetness.data;
   const occlusionData = resolved.occlusion.data;
+  const macroData = resolved.macro.data;
+  const aspectData = resolved.aspect.data;
 
   for (let layer = 0; layer < palette.length; layer++) {
     const data = out[layer].data;
@@ -679,6 +840,7 @@ function weightsOf(
     const rule = compileRule(palette[layer].rule);
     const { height: rHeight, slope: rSlope, flow: rFlow, deposition: rDeposition } = rule;
     const { wear: rWear, curvature: rCurvature, wetness: rWetness, occlusion: rOcclusion } = rule;
+    const { macro: rMacro, aspect: rAspect } = rule;
     const plain = exclusion === 1;
 
     for (let i = 0; i < n; i++) {
@@ -693,6 +855,8 @@ function weightsOf(
       if (c > 0 && rCurvature !== null) c *= influenceWeight(curvatureData[i], rCurvature);
       if (c > 0 && rWetness !== null) c *= influenceWeight(wetnessData[i], rWetness);
       if (c > 0 && rOcclusion !== null) c *= influenceWeight(occlusionData[i], rOcclusion);
+      if (c > 0 && rMacro !== null) c *= influenceWeight(macroData[i], rMacro);
+      if (c > 0 && rAspect !== null) c *= influenceWeight(aspectData[i], rAspect);
       // The explicit zero short-circuit matters: `Math.pow(0, 0)` is 1, so an
       // exclusion of 0 would otherwise turn every excluded material back on.
       // Written as `c > 0` rather than `c <= 0` so a NaN texel — one NaN in the
@@ -853,6 +1017,12 @@ export interface SatmapOptions extends TexturingOptions, WeightOptions {
   /** Baked lighting; pass `false` for a pure albedo map. */
   readonly lighting?: LightingOptions | false;
   /**
+   * How much the ground's colour drifts across the map, 0..1.
+   * See {@link DEFAULT_MACRO_VARIATION}.
+   * @default 0.18
+   */
+  readonly macroVariation?: number;
+  /**
    * Colour for texels no material claims. Defaults to the first palette entry,
    * which is why palettes lead with their least conditional material.
    */
@@ -894,6 +1064,8 @@ export function generateSatmap(
   if (lighting !== undefined && (lighting.occlusionStrength ?? DEFAULT_OCCLUSION_STRENGTH) > 0) {
     need.add('occlusion');
   }
+  const macroAmount = clamp01(options.macroVariation ?? DEFAULT_MACRO_VARIATION);
+  if (macroAmount > 0) need.add('macro');
   const resolved = resolveTextureInputs(inputs, { ...options, need });
   const weights = weightsOf(resolved, palette, options);
 
@@ -916,6 +1088,7 @@ export function generateSatmap(
   if (lighting !== undefined) {
     shade = bakeShading(inputs.height, resolved.occlusion, lighting, options);
   }
+  const macro = macroAmount > 0 ? resolved.macro.data : undefined;
 
   // Hoisted for the same reason the noise parameters are: this loop runs once
   // per texel, 67 million times on an 8192² diffuse, and reaching through
@@ -949,6 +1122,19 @@ export function generateSatmap(
       r = fallbackLinear[0];
       g = fallbackLinear[1];
       b = fallbackLinear[2];
+    }
+
+    // Before the shading, because it is a property of the ground rather than
+    // of the light on it — and in linear light, where a multiply is a change of
+    // reflectance rather than a change of exposure.
+    if (macro !== undefined) {
+      const d = (macro[i] - 0.5) * macroAmount;
+      r *= 1 + d * MACRO_CHANNEL_TILT[0];
+      g *= 1 + d * MACRO_CHANNEL_TILT[1];
+      b *= 1 + d * MACRO_CHANNEL_TILT[2];
+      if (r < 0) r = 0;
+      if (g < 0) g = 0;
+      if (b < 0) b = 0;
     }
 
     if (shade !== undefined) {

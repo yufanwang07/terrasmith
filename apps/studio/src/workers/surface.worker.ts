@@ -66,6 +66,8 @@ export interface SurfaceRequest {
   waterLevel: number;
   /** Per-texel colour noise, 0..1. */
   grain: number;
+  /** How far the ground's colour drifts across the map, 0..1. */
+  macroVariation: number;
   /** Baked ambient occlusion, 0..1. */
   occlusion: number;
   /** Baked directional shading, 0..1. */
@@ -153,7 +155,14 @@ function paint(
   // across. Saying so is what keeps every distance in the palette's rules — a
   // shoreline's width, a channel's — the same distance it will be in the build.
   const cellSize = request.worldWidth / Math.max(1, field.width - 1);
-  const common = { cellSize, waterLevel: request.waterLevel, mode: 'clamp' as const };
+  const common = {
+    cellSize,
+    waterLevel: request.waterLevel,
+    mode: 'clamp' as const,
+    // The macro drift is a function of world position and of the project seed,
+    // so the preview's patches are in the same places the build's will be.
+    seed: request.seed,
+  };
 
   // Resolve every channel any of the three consumers needs, once. The palette
   // says what its own rules read; the specular recipe adds slope and occlusion,
@@ -161,10 +170,12 @@ function paint(
   const need = new Set<TextureChannel>(channelsUsedBy(palette));
   need.add('slopeDegrees');
   need.add('occlusion');
+  if (request.macroVariation > 0) need.add('macro');
   const resolved = resolveTextureInputs({ height: field }, { ...common, need });
 
   const color = generateSatmap({ ...resolved }, palette, {
     ...common,
+    macroVariation: request.macroVariation,
     lighting: {
       occlusionStrength: clamp01(request.occlusion, DEFAULT_OCCLUSION_STRENGTH),
       hillshadeStrength: clamp01(request.shading, DEFAULT_HILLSHADE_STRENGTH),

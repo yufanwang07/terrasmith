@@ -37,6 +37,8 @@ export interface PaletteShaderOptions {
   waterLevel?: number;
   /** Per-texel colour grain, 0..1. Breaks up flat colour at ground level. */
   grain?: number;
+  /** How far the ground's colour drifts across the map, 0..1. */
+  macroVariation?: number;
   /** Grain feature size in elmos. */
   grainScale?: number;
   /**
@@ -62,6 +64,7 @@ export function createPaletteShader(options: PaletteShaderOptions): BlockShader 
     // which is what makes every distance in the palette rules a real distance.
     cellSize: 1,
     waterLevel: options.waterLevel ?? 0,
+    macroVariation: options.macroVariation,
     lighting: {
       occlusionStrength: options.occlusionStrength ?? DEFAULT_OCCLUSION_STRENGTH,
       hillshadeStrength: options.shadingStrength ?? DEFAULT_HILLSHADE_STRENGTH,
@@ -87,6 +90,8 @@ export function createPaletteShader(options: PaletteShaderOptions): BlockShader 
       curvature: asField(fields.curvature, width, height),
       occlusion: asField(fields.occlusion, width, height),
       wetness: asField(fields.wetness, width, height),
+      macro: asField(fields.macro, width, height),
+      aspect: asField(fields.aspect, width, height),
     };
 
     let color: ColorField;

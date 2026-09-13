@@ -144,6 +144,37 @@ export interface MaterialRule {
   /** Ambient occlusion, 0..1, where 1 is open sky and 0 is a deep crevice. */
   readonly occlusion?: Influence;
   /**
+   * Large-scale variation, 0..1, with no relation to the landform at all.
+   *
+   * A generated map gives itself away by having exactly one green. Real ground
+   * is patchy at a scale of several hundred to a couple of thousand elmos —
+   * drier here, mossier there, a different soil over that ridge — and none of
+   * that follows the slope or the height, which is why no combination of the
+   * other channels can produce it. Every hand-painted map texture has it, under
+   * one name or another.
+   *
+   * Use it to split a material into two variants that differ by a little in
+   * hue: one keyed `{ from: 0.35, to: 0.75 }` and its partner the other way
+   * round. Use it hard and the map looks like camouflage.
+   */
+  readonly macro?: Influence;
+  /**
+   * Which way a slope faces, 0 for due south and 1 for due north, 0.5 on flat
+   * ground and on anything facing east or west.
+   *
+   * The channel mappers reach for by hand and the one this palette system had
+   * no way to express. A north face in the northern hemisphere holds snow
+   * later, keeps moss and stays green; the south face opposite it is dry,
+   * pale and bare. It is the difference that makes a range read as a range
+   * rather than as a texture wrapped round one — and unlike the other
+   * channels, two slopes with identical steepness and height get different
+   * ground, which is exactly what stops a palette looking like a lookup table.
+   *
+   * Weighted by steepness, so flat ground is always 0.5 and a rule keyed to it
+   * cannot stain a plain.
+   */
+  readonly aspect?: Influence;
+  /**
    * The most of a texel this material may claim, 0..1, measured against the
    * materials that carry no cap.
    *
@@ -323,6 +354,8 @@ export interface CompiledRule {
   readonly curvature: CompiledInfluence | null;
   readonly wetness: CompiledInfluence | null;
   readonly occlusion: CompiledInfluence | null;
+  readonly macro: CompiledInfluence | null;
+  readonly aspect: CompiledInfluence | null;
 }
 
 /** Compile a whole rule, once, before the texel loop. */
@@ -336,6 +369,8 @@ export function compileRule(rule: MaterialRule): CompiledRule {
     curvature: compileInfluence(rule.curvature),
     wetness: compileInfluence(rule.wetness),
     occlusion: compileInfluence(rule.occlusion),
+    macro: compileInfluence(rule.macro),
+    aspect: compileInfluence(rule.aspect),
   };
 }
 
@@ -568,6 +603,11 @@ export const TEMPERATE: MaterialPalette = [
       height: { min: 12, max: UPLAND_CROSSOVER, blend: 26, blendMax: UPLAND_FEATHER },
       slope: { max: 30, blend: 14 },
       wetness: { from: 0.15, to: 0.55, amount: 0.3 },
+      // Grass holds better on the shaded side, which is why a hillside in
+      // temperate country is green on one flank and straw on the other. Mild,
+      // because the wetness term above is already saying something similar for
+      // the hollows and the two should not compound into a stencil.
+      aspect: { from: 0.35, to: 0.75, amount: 0.22 },
     },
   },
   {
@@ -583,6 +623,9 @@ export const TEMPERATE: MaterialPalette = [
       weight: 1.15,
       height: { min: UPLAND_CROSSOVER, blend: UPLAND_FEATHER },
       slope: { max: 34, blend: 16 },
+      // The opposite lean to the meadow's, so the two trade places across a
+      // ridge instead of both fading out together.
+      aspect: { from: 0.7, to: 0.3, amount: 0.25 },
     },
   },
   {
@@ -884,6 +927,37 @@ export const ALPINE_SNOW: MaterialPalette = [
       height: { min: 300, blend: 200 },
       slope: { max: 46, blend: 18 },
       occlusion: { from: 0.4, to: 0.85, amount: 0.45 },
+      // Snow lies later on the shaded side, so a snow line is not a contour —
+      // it dips a couple of hundred elmos on north faces and rides up on south
+      // ones. It is the most recognisable thing a real range does that a
+      // height-banded palette cannot, and it is what makes a ridge read as
+      // having two sides rather than as a white cap on a grey cone.
+      //
+      // Gently, at 0.35: a full-strength aspect mask paints one flank white and
+      // the other bare, which is a rendering of a hemisphere and not of a
+      // mountain.
+      aspect: { from: 0.3, to: 0.8, amount: 0.35 },
+    },
+  },
+  {
+    material: {
+      id: 'alpine-sunface',
+      label: 'Sun-facing scree',
+      color: [0.478, 0.451, 0.408],
+      roughness: 0.85,
+      splatChannel: SPLAT_CHANNELS.rock,
+      detailScale: 58,
+    },
+    // The other half of the same story, and the reason the snow rule alone is
+    // not enough: taking snow off the south flank leaves whatever was under it,
+    // which at this height is fell field, and fell field is not what a
+    // sun-baked flank at 2 000 elmos looks like. Warm dry scree is.
+    rule: {
+      weight: 1.15,
+      cap: 0.65,
+      height: { min: 340, blend: 220 },
+      slope: { min: 16, max: 46, blend: 14 },
+      aspect: { from: 0.62, to: 0.22, amount: 0.6 },
     },
   },
   {

@@ -42,6 +42,8 @@ export interface StripAnalysisSlice {
   occlusion: Float32Array;
   curvature: Float32Array;
   wetness: Float32Array;
+  macro: Float32Array;
+  aspect: Float32Array;
   /** Interleaved RGBA, when the graph supplied an explicit colour map. */
   color?: Float32Array;
 }
@@ -67,6 +69,8 @@ export interface StripTask {
   shadingStrength: number;
   grain: number;
   grainScale: number;
+  /** How far the ground's colour drifts across the map, 0..1. */
+  macroVariation: number;
   seed: number;
   /** Edge of the minimap this strip contributes to. */
   minimapSize: number;
@@ -120,6 +124,8 @@ export function stripTaskTransfers(task: StripTask): ArrayBuffer[] {
     a.occlusion.buffer as ArrayBuffer,
     a.curvature.buffer as ArrayBuffer,
     a.wetness.buffer as ArrayBuffer,
+    a.macro.buffer as ArrayBuffer,
+    a.aspect.buffer as ArrayBuffer,
   ];
   if (a.color) buffers.push(a.color.buffer as ArrayBuffer);
   return buffers;
@@ -164,6 +170,8 @@ export function runStripTask(task: StripTask): StripResult {
     occlusion: upsample(slice.occlusion, slice.width, slice.height, columns, rows, shadeWidth, shadeRows),
     curvature: upsample(slice.curvature, slice.width, slice.height, columns, rows, shadeWidth, shadeRows),
     wetness: upsample(slice.wetness, slice.width, slice.height, columns, rows, shadeWidth, shadeRows),
+    macro: upsample(slice.macro, slice.width, slice.height, columns, rows, shadeWidth, shadeRows),
+    aspect: upsample(slice.aspect, slice.width, slice.height, columns, rows, shadeWidth, shadeRows),
   };
 
   const asField = (data: Float32Array): Field => ({
@@ -205,6 +213,8 @@ export function runStripTask(task: StripTask): StripResult {
         curvature: asField(fields.curvature),
         occlusion: asField(fields.occlusion),
         wetness: asField(fields.wetness),
+        macro: asField(fields.macro),
+        aspect: asField(fields.aspect),
       },
       task.palette,
       {
@@ -215,6 +225,7 @@ export function runStripTask(task: StripTask): StripResult {
         // the release's.
         cellSize: scale,
         waterLevel: 0,
+        macroVariation: task.macroVariation,
         lighting: {
           occlusionStrength: task.occlusionStrength,
           hillshadeStrength: task.shadingStrength,

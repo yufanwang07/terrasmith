@@ -309,6 +309,29 @@ export function MapSettingsPanel() {
 
         <div className="field">
           <div className="field-label">
+            <span>Ground variation</span>
+            <span className="field-value">
+              {Math.round(project.texture.macroVariation * 100)}%
+            </span>
+          </div>
+          <input
+            type="range"
+            min={0}
+            max={0.5}
+            step={0.01}
+            value={project.texture.macroVariation}
+            onChange={(e) => updateTexture({ macroVariation: Number(e.target.value) })}
+          />
+          <div className="field-help">
+            How much the ground&rsquo;s colour drifts across the map, over patches about 1&nbsp;400
+            elmos wide. A generated map gives itself away by having exactly one green; real ground
+            changes where the soil does, which follows nothing about the shape of the land. Turn it
+            past about a third and it starts reading as camouflage.
+          </div>
+        </div>
+
+        <div className="field">
+          <div className="field-label">
             <span>Grain</span>
             <span className="field-value">{Math.round(project.texture.grain * 100)}%</span>
           </div>

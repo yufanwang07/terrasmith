@@ -732,6 +732,8 @@ describe("the standalone texture baker's halo", () => {
         occlusion: flat,
         curvature: flat,
         wetness: flat,
+        macro: flat,
+        aspect: flat,
       },
       {
         textureWidth: SIZE,

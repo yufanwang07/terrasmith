@@ -129,6 +129,16 @@ export interface TextureSettings {
   /** Per-texel colour noise, 0..1. Breaks up flat colour. */
   grain: number;
   /**
+   * How far the ground's colour drifts across the map, 0..1.
+   *
+   * A different thing from `grain`, and the one that matters more. Grain is
+   * per-texel and stops a flat colour looking like plastic; this is per
+   * thousand-odd elmos and stops every patch of grass on the map being exactly
+   * the same green, which is what gives a generated texture away from a map
+   * camera.
+   */
+  macroVariation: number;
+  /**
    * Force the three BAR slope bands (vehicle, bot, all-terrain) to be visually
    * distinct. The BAR map checklist asks for this explicitly.
    */
@@ -215,6 +225,7 @@ export function createProject(overrides: Partial<Project> = {}): Project {
       bakedOcclusion: DEFAULT_OCCLUSION_STRENGTH,
       bakedShading: DEFAULT_HILLSHADE_STRENGTH,
       grain: 0.15,
+      macroVariation: 0.18,
       markSlopeBands: true,
       ...overrides.texture,
     },

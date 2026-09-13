@@ -198,6 +198,9 @@ describe('generateSatmap', () => {
     const map = generateSatmap({ height }, fiftyFifty, {
       lighting: false,
       layerPriority: 0,
+      // The macro drift is on by default and is the whole point of it, but it
+      // is a different question from whether two materials mix in linear light.
+      macroVariation: 0,
     });
     const expected = linearToSrgb((srgbToLinear(0.8) + srgbToLinear(0.1)) / 2);
     const [r, g, b] = texelRgb(map, 4, 4);
@@ -224,6 +227,7 @@ describe('generateSatmap', () => {
     const map = generateSatmap({ height }, impossible, {
       lighting: false,
       fallbackColor: [0.25, 0.5, 0.75],
+      macroVariation: 0,
     });
     // Not exact equality: the sRGB transfer curve is tabulated rather than
     // evaluated, so a colour that goes out to linear light and back comes home
@@ -283,8 +287,13 @@ describe('generateSatmap', () => {
     const lit = generateSatmap({ height: terrain }, flat, {
       cellSize: 8,
       lighting: { occlusionStrength: 0.7, hillshadeStrength: 0 },
+      macroVariation: 0,
     });
-    const unlit = generateSatmap({ height: terrain }, flat, { lighting: false, cellSize: 8 });
+    const unlit = generateSatmap({ height: terrain }, flat, {
+      lighting: false,
+      cellSize: 8,
+      macroVariation: 0,
+    });
     expect(texelRgb(unlit, 16, 16)[0]).toBeCloseTo(0.5, 5);
     expect(texelRgb(lit, 16, 16)[0]).toBeLessThan(texelRgb(lit, 2, 16)[0]);
   });
@@ -1174,8 +1183,79 @@ describe('baked lighting', () => {
     const map = generateSatmap({ height: terrain, occlusion: overshoot }, flatGrey, {
       cellSize: 8,
       lighting: { occlusionStrength: 0.55, hillshadeStrength: 0 },
+      macroVariation: 0,
     });
     expect(texelRgb(map, 4, 4)[0]).toBeCloseTo(0.5, 5);
+  });
+});
+
+describe('macro variation', () => {
+  const terrain = filledField(256, 256, 100);
+  const flatGrey: MaterialPalette = [
+    { material: { id: 'g', label: 'G', color: [0.5, 0.5, 0.5] }, rule: {} },
+  ];
+
+  /** Spread of one channel across the map, as a fraction of its mean. */
+  function spread(map: ReturnType<typeof generateSatmap>, channel: number): number {
+    let min = Infinity;
+    let max = -Infinity;
+    let sum = 0;
+    const n = map.width * map.height;
+    for (let i = 0; i < n; i++) {
+      const v = map.data[i * 4 + channel];
+      if (v < min) min = v;
+      if (v > max) max = v;
+      sum += v;
+    }
+    return (max - min) / (sum / n);
+  }
+
+  it('leaves flat ground exactly flat when it is off', () => {
+    const map = generateSatmap({ height: terrain }, flatGrey, {
+      lighting: false,
+      cellSize: 8,
+      macroVariation: 0,
+    });
+    expect(spread(map, 0)).toBeCloseTo(0, 6);
+  });
+
+  it('drifts the colour across the map when it is on', () => {
+    const map = generateSatmap({ height: terrain }, flatGrey, {
+      lighting: false,
+      cellSize: 8,
+      macroVariation: 0.18,
+    });
+    // The whole point: one flat grey palette on dead flat ground still comes
+    // out with ground that is not all the same colour.
+    expect(spread(map, 0)).toBeGreaterThan(0.05);
+  });
+
+  it('drifts warm to cool rather than only light to dark', () => {
+    // Equal drift on every channel is a luminance ramp, and on flat ground the
+    // eye reads that as a shading error rather than as different ground.
+    const map = generateSatmap({ height: terrain }, flatGrey, {
+      lighting: false,
+      cellSize: 8,
+      macroVariation: 0.18,
+    });
+    expect(spread(map, 0)).toBeGreaterThan(spread(map, 2) * 1.2);
+  });
+
+  it('moves the patches when the seed changes', () => {
+    const at = (seed: number) =>
+      generateSatmap({ height: terrain }, flatGrey, {
+        lighting: false,
+        cellSize: 8,
+        macroVariation: 0.18,
+        seed,
+      });
+    const a = at(1);
+    const b = at(2);
+    let worst = 0;
+    for (let i = 0; i < a.width * a.height; i++) {
+      worst = Math.max(worst, Math.abs(a.data[i * 4] - b.data[i * 4]));
+    }
+    expect(worst).toBeGreaterThan(0.01);
   });
 });
 
