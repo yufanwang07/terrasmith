@@ -7,3 +7,4 @@
 
 export { buildMap, type BuildMapOptions, type BuildMapResult } from '@terrasmith/build';
 export { createDefaultRegistry, parseProject, serializeProject } from '@terrasmith/graph';
+export { createWorkerStripRunner, type WorkerPoolOptions } from './workerPool.js';

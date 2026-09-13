@@ -24,6 +24,20 @@ export {
   type ExtraTextureOptions,
   type ExtraTextures,
 } from './textures.js';
+export {
+  runStripTask,
+  stripResultTransfers,
+  stripTaskTransfers,
+  type StripTask,
+  type StripResult,
+  type StripAnalysisSlice,
+} from './stripTask.js';
+export {
+  inlineStripRunner,
+  runStrips,
+  type StripRunner,
+  type RunStripsOptions,
+} from './stripRunner.js';
 export { bakeTexture, type BlockInputs, type BlockShader, type TextureAnalysis } from './texture.js';
 export { createPaletteShader, createFlatShader, type PaletteShaderOptions } from './shader.js';
 export {

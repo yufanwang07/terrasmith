@@ -12,6 +12,7 @@ import { basename, dirname, join, resolve } from 'node:path';
 import { buildMap } from '@terrasmith/build';
 import { CODER_LZMA, createLzmaCoder } from '@terrasmith/format';
 import { createDefaultRegistry, parseProject, type Project } from '@terrasmith/graph';
+import { createWorkerStripRunner } from './workerPool.js';
 
 const USAGE = `terrasmith — build Beyond All Reason maps from a Terrasmith project
 
@@ -28,6 +29,8 @@ Build options:
       --quality <q>       draft | standard | final  (default: standard)
       --resolution <n>    Override the graph evaluation resolution.
       --no-compress       Store the archive uncompressed. Much faster, much bigger.
+      --threads <n>       Threads for the texture bake. Defaults to one per
+                          core minus one; 1 disables the worker pool.
       --json              Print the build report as JSON.
   -q, --quiet             Only print errors.
 
@@ -117,11 +120,21 @@ async function build(args: Args): Promise<number> {
   }
 
   const compress = !args.flags.get('no-compress') && format === 'sd7';
+  const threadsFlag = args.flags.get('threads');
+  const threads = typeof threadsFlag === 'string' ? Number(threadsFlag) : undefined;
+  if (threads !== undefined && (!Number.isInteger(threads) || threads < 1)) {
+    process.stderr.write('--threads needs a whole number of 1 or more\n');
+    return 1;
+  }
+  // One thread means the caller wants no pool at all, not a pool of one: a pool
+  // of one pays the message cost for no parallelism.
+  const stripRunner = threads === 1 ? undefined : createWorkerStripRunner({ threads });
   let lastStage = '';
   const progress = quiet || asJson ? undefined : renderProgress(() => lastStage);
 
   const result = await buildMap(project, {
     registry: createDefaultRegistry(),
+    stripRunner,
     quality: quality as 'draft' | 'standard' | 'final',
     graphResolution,
     format,
@@ -133,6 +146,7 @@ async function build(args: Args): Promise<number> {
     },
   });
   progress?.(1, true);
+  await stripRunner?.dispose?.();
 
   const outPath = resolveOutPath(args, projectPath, result.archive.fileName);
   await writeFile(outPath, result.archive.data);

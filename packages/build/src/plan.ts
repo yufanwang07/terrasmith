@@ -56,11 +56,16 @@ export interface BuildPlan {
  * Texels a bake strip should hold.
  *
  * A strip carries eight float analysis channels, a float RGBA shading buffer
- * and a byte output — about 52 bytes per texel — so a million texels is around
- * 55 MB. That is comfortable in a phone browser, and larger strips buy nothing:
- * the per-strip setup is a few allocations against a million texels of work.
+ * and a byte output — about 52 bytes per texel — so 262144 texels is around
+ * 14 MB, and eight of those in flight is comfortable even in a phone browser.
+ *
+ * Smaller than memory alone would demand, on purpose: strips are the unit of
+ * parallelism, and a map that produces only four of them cannot use more than
+ * four threads however many the machine has. The per-strip overhead is a few
+ * allocations against a quarter of a million texels of work, so more of them
+ * costs essentially nothing.
  */
-const TARGET_STRIP_TEXELS = 1 << 20;
+const TARGET_STRIP_TEXELS = 1 << 18;
 
 /**
  * Rows per strip for a texture of the given width, rounded to whole tiles.
@@ -70,7 +75,10 @@ const TARGET_STRIP_TEXELS = 1 << 20;
  */
 function stripRowsFor(textureWidth: number): number {
   const rows = Math.round(TARGET_STRIP_TEXELS / Math.max(1, textureWidth) / 32) * 32;
-  return Math.max(32, Math.min(512, rows));
+  // Never thinner than two tile rows: below that the per-strip setup — an axis
+  // table as wide as the texture, eight upsample buffers — starts to matter
+  // against the work, and the halo is a larger fraction of what gets computed.
+  return Math.max(64, Math.min(512, rows));
 }
 
 /** The largest graph resolution each quality level will evaluate at. */

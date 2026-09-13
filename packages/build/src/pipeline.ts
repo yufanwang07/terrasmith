@@ -27,12 +27,14 @@ import {
   rescalePaletteHeights,
   slopeDegreesField,
   TEMPERATE,
+  type ColorField,
   type Field,
   type MaterialPalette,
   type PaintedSpot,
 } from '@terrasmith/core';
 import {
   MINIMAP_SIZE_PX,
+  SMALL_TILE_SIZE,
   SmtBuilder,
   buildMinimap,
   createImage,
@@ -49,8 +51,9 @@ import { Evaluator, type NodeRegistry, type Project } from '@terrasmith/graph';
 import { evaluateOutputs, type GraphOutputs } from './evaluate.js';
 import { prepareHeightfield } from './heightfield.js';
 import { planBuild, type BuildPlan, type BuildQuality, type PlanOptions } from './plan.js';
-import { createPaletteShader } from './shader.js';
-import { bakeTexture, type TextureAnalysis } from './texture.js';
+import type { TextureAnalysis } from './texture.js';
+import { runStripTask, type StripAnalysisSlice, type StripTask } from './stripTask.js';
+import { inlineStripRunner, runStrips, type StripRunner } from './stripRunner.js';
 import { buildExtraTextures, type ExtraTextureOptions } from './textures.js';
 import {
   deriveGrassMap,
@@ -85,6 +88,12 @@ export interface BuildOptions extends PlanOptions {
    * @default true
    */
   extraTextures?: boolean | ExtraTextureOptions;
+  /**
+   * Where to run the texture bake. Baking is the slowest stage by a wide
+   * margin and strips share nothing, so a runner backed by worker threads is
+   * close to a linear speed-up. Without one the work runs inline.
+   */
+  stripRunner?: StripRunner;
 }
 
 export interface BuildStats {
@@ -161,39 +170,33 @@ export async function buildMapFiles(
   report('Painting texture', 0.4);
   const smtBuilder = new SmtBuilder();
   const tilesX = plan.textureWidth / 32;
-  const tilesY = plan.textureHeight / 32;
-  const tileIndices = new Int32Array(tilesX * tilesY);
+  const tileIndices = new Int32Array(tilesX * (plan.textureHeight / 32));
 
-  // The minimap is a fixed 1024x1024 regardless of map size, so accumulate it
-  // as the blocks stream past rather than downscaling the finished texture —
-  // which would mean holding the finished texture.
+  // The minimap is a fixed 1024x1024 regardless of map size, so it is
+  // assembled from the strips as they arrive rather than by downscaling the
+  // finished texture — which would mean holding the finished texture.
   const minimapSource = createImage(MINIMAP_SIZE_PX, MINIMAP_SIZE_PX);
 
   const palette = resolvePalette(project, options, height.minHeight, height.maxHeight);
-  const shader = createPaletteShader({
-    palette,
-    occlusionStrength: project.texture.bakedOcclusion,
-    shadingStrength: project.texture.bakedShading,
-    grain: project.texture.grain,
-    waterLevel: 0,
-    seed: project.settings.seed,
-  });
+  const tasks = buildStripTasks(project, plan, analysis, outputs.texture, palette);
 
-  bakeTexture(
-    { ...analysis, color: outputs.texture },
+  let tilesWritten = 0;
+  await runStrips(
+    tasks,
     {
-      textureWidth: plan.textureWidth,
-      textureHeight: plan.textureHeight,
-      worldWidth: plan.worldWidth,
-      worldHeight: plan.worldHeight,
-      blockSize: plan.blockSize,
-      shader,
+      runner: options.stripRunner ?? inlineStripRunner(),
       signal: options.signal,
-      onProgress: (done, total) => report('Painting texture', 0.4 + (done / total) * 0.35),
+      onProgress: (done, total) => report('Painting texture', 0.4 + (done / total) * 0.34),
     },
-    (block, x, y) => {
-      cutBlockIntoTiles(block, x, y, tilesX, smtBuilder, tileIndices);
-      accumulateMinimap(block, x, y, plan, minimapSource);
+    (result) => {
+      for (let i = 0; i < result.tileCount; i++) {
+        const payload = result.tiles.subarray(i * SMALL_TILE_SIZE, (i + 1) * SMALL_TILE_SIZE);
+        tileIndices[tilesWritten++] = smtBuilder.addCompressed(payload);
+      }
+      minimapSource.data.set(
+        result.minimap.subarray(0, result.minimapRows * MINIMAP_SIZE_PX * 4),
+        result.minimapY * MINIMAP_SIZE_PX * 4,
+      );
     },
   );
   throwIfAborted(options.signal);
@@ -459,95 +462,13 @@ function sampleHeightAt(field: Field, x: number, z: number, plan: BuildPlan): nu
   return field.data[cy * field.width + cx];
 }
 
-/** Cut a baked block into 32x32 tiles and record their indices. */
-function cutBlockIntoTiles(
-  block: Rgba8Image,
-  blockX: number,
-  blockY: number,
-  tilesAcross: number,
-  builder: SmtBuilder,
-  indices: Int32Array,
-): void {
-  const scratch = new Uint8Array(32 * 32 * 4);
-  const stride = block.width * 4;
-  const tileX0 = blockX / 32;
-  const tileY0 = blockY / 32;
-  const tilesInBlockX = block.width / 32;
-  const tilesInBlockY = block.height / 32;
-
-  for (let ty = 0; ty < tilesInBlockY; ty++) {
-    for (let tx = 0; tx < tilesInBlockX; tx++) {
-      for (let row = 0; row < 32; row++) {
-        const src = (ty * 32 + row) * stride + tx * 32 * 4;
-        scratch.set(block.data.subarray(src, src + 32 * 4), row * 32 * 4);
-      }
-      const index = builder.addTile(scratch);
-      indices[(tileY0 + ty) * tilesAcross + (tileX0 + tx)] = index;
-    }
-  }
-}
-
 /**
- * Downscale a baked block into the right corner of the 1024x1024 minimap.
+ * Slice the analysis into one task per strip.
  *
- * Area-averaged, because the minimap is a big reduction — up to 16:1 on a
- * 32x32 map — and point sampling at that ratio produces an aliased mess that
- * looks nothing like the map.
- */
-function accumulateMinimap(
-  block: Rgba8Image,
-  blockX: number,
-  blockY: number,
-  plan: BuildPlan,
-  target: Rgba8Image,
-): void {
-  const scaleX = MINIMAP_SIZE_PX / plan.textureWidth;
-  const scaleY = MINIMAP_SIZE_PX / plan.textureHeight;
-
-  const dx0 = Math.floor(blockX * scaleX);
-  const dy0 = Math.floor(blockY * scaleY);
-  const dx1 = Math.min(MINIMAP_SIZE_PX, Math.ceil((blockX + block.width) * scaleX));
-  const dy1 = Math.min(MINIMAP_SIZE_PX, Math.ceil((blockY + block.height) * scaleY));
-
-  for (let dy = dy0; dy < dy1; dy++) {
-    // Source rows in full-texture space, clipped to this block.
-    const sy0 = Math.max(blockY, Math.floor(dy / scaleY));
-    const sy1 = Math.min(blockY + block.height, Math.max(sy0 + 1, Math.ceil((dy + 1) / scaleY)));
-    for (let dx = dx0; dx < dx1; dx++) {
-      const sx0 = Math.max(blockX, Math.floor(dx / scaleX));
-      const sx1 = Math.min(blockX + block.width, Math.max(sx0 + 1, Math.ceil((dx + 1) / scaleX)));
-      let r = 0;
-      let g = 0;
-      let b = 0;
-      let n = 0;
-      for (let sy = sy0; sy < sy1; sy++) {
-        const row = (sy - blockY) * block.width * 4;
-        for (let sx = sx0; sx < sx1; sx++) {
-          const o = row + (sx - blockX) * 4;
-          r += block.data[o];
-          g += block.data[o + 1];
-          b += block.data[o + 2];
-          n++;
-        }
-      }
-      if (n === 0) continue;
-      const o = (dy * MINIMAP_SIZE_PX + dx) * 4;
-      target.data[o] = Math.round(r / n);
-      target.data[o + 1] = Math.round(g / n);
-      target.data[o + 2] = Math.round(b / n);
-      target.data[o + 3] = 255;
-    }
-  }
-}
-
-/**
- * Pick the palette and fit it to this map.
- *
- * Palettes are authored against a reference elevation range, so a map that runs
- * -40 to 180 elmos would otherwise get an alpine palette whose snow line sits
- * fifty elmos above its highest peak — and paint nothing at all. Rescaling
- * moves the height bands onto the terrain that actually exists. Slope bands are
- * deliberately left alone: 27 degrees is 27 degrees on every map.
+ * Each task carries only the analysis rows its strip actually reads, which is a
+ * megabyte or so rather than the thirty-odd a whole map's channels come to.
+ * That is what makes sending strips to other threads cheap enough to be worth
+ * doing.
  */
 /**
  * Convert a float colour field to bytes.
@@ -562,6 +483,86 @@ function colorFieldToImage(field: { width: number; height: number; data: Float32
     out.data[i] = v < 0 ? 0 : v > 255 ? 255 : v;
   }
   return out;
+}
+
+function buildStripTasks(
+  project: Project,
+  plan: BuildPlan,
+  analysis: TextureAnalysis,
+  explicitColor: ColorField | undefined,
+  palette: MaterialPalette,
+): StripTask[] {
+  const halo = 2;
+  const stripRows = Math.max(32, Math.floor(plan.blockSize / 32) * 32);
+  const stripCount = Math.ceil(plan.textureHeight / stripRows);
+  const analysisHeight = analysis.height.height;
+  const scaleY = analysisHeight / plan.textureHeight;
+
+  const tasks: StripTask[] = [];
+  for (let index = 0; index < stripCount; index++) {
+    const y = index * stripRows;
+    const rows = Math.min(stripRows, plan.textureHeight - y);
+
+    // Analysis rows this strip's bilinear taps can reach, plus one either side
+    // for the interpolation partner.
+    const firstRow = Math.max(0, Math.floor((y - halo + 0.5) * scaleY - 0.5) - 1);
+    const lastRow = Math.min(
+      analysisHeight - 1,
+      Math.ceil((y + rows + halo + 0.5) * scaleY - 0.5) + 1,
+    );
+    const sliceRows = lastRow - firstRow + 1;
+
+    tasks.push({
+      index,
+      y,
+      rows,
+      halo,
+      textureWidth: plan.textureWidth,
+      textureHeight: plan.textureHeight,
+      worldWidth: plan.worldWidth,
+      worldHeight: plan.worldHeight,
+      analysisHeight,
+      analysis: sliceAnalysis(analysis, explicitColor, firstRow, sliceRows),
+      palette,
+      occlusionStrength: project.texture.bakedOcclusion,
+      shadingStrength: project.texture.bakedShading,
+      grain: project.texture.grain,
+      grainScale: 12,
+      seed: project.settings.seed,
+      minimapSize: MINIMAP_SIZE_PX,
+    });
+  }
+  return tasks;
+}
+
+function sliceAnalysis(
+  analysis: TextureAnalysis,
+  explicitColor: ColorField | undefined,
+  firstRow: number,
+  rows: number,
+): StripAnalysisSlice {
+  const width = analysis.height.width;
+  const take = (field: Field): Float32Array =>
+    // A copy, not a view: a view would keep the whole field's buffer alive and
+    // could not be transferred to a worker without detaching the original.
+    field.data.slice(firstRow * width, (firstRow + rows) * width);
+
+  return {
+    width,
+    height: rows,
+    rowOffset: firstRow,
+    height_: take(analysis.height),
+    slopeDegrees: take(analysis.slopeDegrees),
+    flow: take(analysis.flow),
+    deposition: take(analysis.deposition),
+    wear: take(analysis.wear),
+    occlusion: take(analysis.occlusion),
+    curvature: take(analysis.curvature),
+    wetness: take(analysis.wetness),
+    color: explicitColor
+      ? explicitColor.data.slice(firstRow * width * 4, (firstRow + rows) * width * 4)
+      : undefined,
+  };
 }
 
 function resolvePalette(
