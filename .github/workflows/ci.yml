@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Cancel a running build when the same branch is pushed again: the older
+# result is never the one anyone wants.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Typecheck, test and build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      # Build the packages first: the tests import them through the workspace
+      # links, and a type error is a faster, clearer failure than whatever it
+      # turns into at runtime.
+      - name: Typecheck
+        run: npx tsc -b packages/core packages/format packages/graph packages/build packages/cli
+
+      - name: Test
+        run: npx vitest run --reporter=dot
+
+      - name: Build the editor
+        run: npm run build --workspace apps/studio
+
+      # A map that does not build is the failure that matters most, and it is
+      # not covered by any unit test. Build one from a template for real.
+      - name: Build a map end to end
+        run: |
+          node tools/build-sample.mjs
+          ls -la samples/out
