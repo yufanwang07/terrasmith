@@ -3,11 +3,11 @@
  *
  * The failure this suite exists to catch is "the map does not load in the
  * game", which is the only bug in this project that cannot be worked around by
- * the person hitting it. So every assertion here is written against what the
- * engine actually reads back out of the file rather than against what the
- * builder believes it wrote: the `.smf` is re-parsed, the `.smt` is re-parsed,
- * the tiles are decoded, and the metal map is measured with the same income
- * formula the engine uses.
+ * the person who hits it. So every assertion is written against what the engine
+ * would actually read back out of the file rather than against what the builder
+ * believes it wrote: the `.smf` is re-parsed, the `.smt` is re-parsed, the tiles
+ * are decoded, and the metal map is measured with the same income formula the
+ * engine uses.
  *
  * The map under test is the smallest legal one — 2x2 size units, `mapx = mapy
  * = 128` squares, a 1024x1024 diffuse texture. Small enough to build three
@@ -18,6 +18,7 @@
 import { beforeAll, describe, expect, it } from 'vitest';
 import {
   METAL_MAP_SQUARE_SIZE,
+  createField,
   extractorIncome,
   resampleField,
   slopeDegreesField,
@@ -32,6 +33,7 @@ import {
   decodeTile,
   readSmf,
   readSmt,
+  type Rgba8Image,
   type SmfFile,
 } from '@terrasmith/format';
 import {
@@ -45,7 +47,9 @@ import {
   TYPE_GROUND,
   TYPE_ROCK,
   TYPE_WATER,
+  bakeTexture,
   buildMapFiles,
+  type BlockShader,
   type BuildArtifacts,
 } from '../src/index.js';
 
@@ -56,16 +60,18 @@ const MAPY = 128;
 const TEXTURE_SIZE = MAPX * 8;
 const TILES_ACROSS = TEXTURE_SIZE / 32;
 
-/** The declared height range. Pinned rather than automatic so the quantisation
- *  assertions have a number to check against. */
+/**
+ * The declared height range, pinned rather than automatic so the quantisation
+ * assertions have a fixed number to check against.
+ */
 const MIN_HEIGHT = -120;
 const MAX_HEIGHT = 320;
 
 /**
  * Terrain with both cliffs and flats, so the derived type map has something to
  * say. A 700-elmo feature size over a 1024-elmo map gives roughly two landforms
- * per axis, and 300 elmos of amplitude across them puts plenty of ground past
- * the 27-degree line where BAR vehicles stop.
+ * per axis, and 300 elmos of amplitude across them puts plenty of ground on
+ * each side of the 27-degree line where BAR vehicles stop.
  */
 function terrainGraph(): Graph {
   return {
@@ -169,23 +175,9 @@ function decodeTexture(smt: Uint8Array, tileIndices: Int32Array): Uint8Array {
 }
 
 /**
- * Mean absolute RGB step between column `x - 1` and column `x`, over the whole
- * texture. A seam shows up here and nowhere else.
+ * Mean absolute RGB step between row `y - 1` and row `y`, over the whole
+ * texture. A seam left by a strip boundary shows up here and nowhere else.
  */
-function columnStep(texture: Uint8Array, x: number): number {
-  let total = 0;
-  for (let y = 0; y < TEXTURE_SIZE; y++) {
-    const a = (y * TEXTURE_SIZE + x - 1) * 4;
-    const b = (y * TEXTURE_SIZE + x) * 4;
-    total +=
-      Math.abs(texture[a] - texture[b]) +
-      Math.abs(texture[a + 1] - texture[b + 1]) +
-      Math.abs(texture[a + 2] - texture[b + 2]);
-  }
-  return total / (TEXTURE_SIZE * 3);
-}
-
-/** Same, between row `y - 1` and row `y`. */
 function rowStep(texture: Uint8Array, y: number): number {
   let total = 0;
   for (let x = 0; x < TEXTURE_SIZE; x++) {
@@ -199,11 +191,6 @@ function rowStep(texture: Uint8Array, y: number): number {
   return total / (TEXTURE_SIZE * 3);
 }
 
-function percentile(values: number[], fraction: number): number {
-  const sorted = [...values].sort((a, b) => a - b);
-  return sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * fraction))];
-}
-
 function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
   if (a.length !== b.length) return false;
   for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
@@ -212,11 +199,11 @@ function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
 
 let registry: NodeRegistry;
 let project: Project;
-/** The reference build: 16 bake blocks, so every block boundary is exercised. */
+/** The reference build: four 256-row strips, so strip boundaries are exercised. */
 let artifacts: BuildArtifacts;
 /** The same build again, to prove the whole path is deterministic. */
 let rebuilt: BuildArtifacts;
-/** The same map baked as one single block, as the control for the seam test. */
+/** The same map baked as one whole-texture strip, the control for the seam test. */
 let oneBlock: BuildArtifacts;
 let smf: SmfFile;
 
@@ -251,15 +238,14 @@ describe('the .smf the engine reads back', () => {
     expect(smf.metalMap.length).toBe((MAPX / 2) * (MAPY / 2));
     expect(smf.grassMap?.length).toBe((MAPX / 4) * (MAPY / 4));
     expect(smf.tileIndices.length).toBe((MAPX / 4) * (MAPY / 4));
-    expect(smf.minimap.length).toBe(MINIMAP_SIZE);
   });
 
-  it('is exactly 699048 bytes of minimap, whatever the map size', () => {
-    // MINIMAP_SIZE is fixed by SMFFormat.h: 1024x1024 DXT1 plus 8 mip levels.
-    // The engine reads that many bytes unconditionally, so a short block makes
-    // it walk into the next one.
-    expect(smf.minimap.length).toBe(699048);
+  it('carries exactly 699048 bytes of minimap, whatever the map size', () => {
+    // MINIMAP_SIZE is fixed by SMFFormat.h: 1024x1024 DXT1 plus 8 mip levels,
+    // the same for an 8x8 map and a 32x32 one. The engine reads that many bytes
+    // unconditionally, so a short block makes it read into whatever follows.
     expect(MINIMAP_SIZE).toBe(699048);
+    expect(smf.minimap.length).toBe(699048);
   });
 
   it('puts every block pointer inside the file', () => {
@@ -290,9 +276,10 @@ describe('the heightmap', () => {
   it('decodes through the engine divisor of 65536, not 65535', () => {
     // SMFReadMap.cpp reconstructs height as
     //   min + raw * (max - min) / 65536
-    // so raw 65535 lands one step *below* maxHeight and the top of the range is
-    // never quite reachable. An encoder that assumes 65535 puts the whole map
-    // slightly too high, which silently breaks the water line.
+    // so raw 65535 lands one step *below* maxHeight and the top of the declared
+    // range is never quite reachable. An encoder that assumes 65535 puts the
+    // whole map slightly too high, which is invisible in isolation and breaks
+    // the water line and anything that has to match a sibling map.
     const span = MAX_HEIGHT - MIN_HEIGHT;
     const step = span / HEIGHT_QUANT_DIVISOR;
     const topOfRange = MIN_HEIGHT + (65535 * span) / HEIGHT_QUANT_DIVISOR;
@@ -324,21 +311,22 @@ describe('the heightmap', () => {
     // a sample can land a whole step away rather than half of one. Anything
     // beyond that is a scaling bug, not rounding.
     expect(worst).toBeLessThanOrEqual(step * 1.001);
-    // And the step itself has to be small enough to be invisible: 440 elmos of
-    // range over 65536 levels is well under a centimetre of terrain.
     expect(artifacts.stats.quantizationStep).toBeCloseTo(step, 9);
+    // 440 elmos across 65536 levels is well under a centimetre of terrain, which
+    // is what keeps gentle slopes free of terracing.
     expect(step).toBeLessThan(0.01);
   });
 
   it('uses most of the range it declares', () => {
-    // A map whose terrain spans a tenth of its declared range throws away 90% of
-    // its precision and terraces on any gentle slope.
+    // A map whose terrain spans a tenth of its declared range has thrown away
+    // 90% of its precision and will terrace on anything gentle.
     expect(artifacts.stats.rangeUtilization).toBeGreaterThan(0.5);
   });
 });
 
 describe('the tile index array and the .smt it addresses', () => {
   it('has one index per tile position', () => {
+    // One 32x32 tile covers 4 map squares, so the array is (mapx/4) x (mapy/4).
     expect(smf.tileIndices.length).toBe(TILES_ACROSS * TILES_ACROSS);
   });
 
@@ -355,13 +343,21 @@ describe('the tile index array and the .smt it addresses', () => {
       if (index < 0 || index >= smt.numTiles) outOfRange++;
     }
     expect(outOfRange).toBe(0);
-    // Every tile position must be covered; a zero left behind by a block that
-    // never ran would point at tile 0 and be invisible here, so also check that
-    // the pool is actually used across its whole range.
-    expect(Math.max(...smf.tileIndices)).toBe(smt.numTiles - 1);
+
+    // A tile position a bake block never filled would still hold the 0 it was
+    // allocated with and look perfectly legal, so also check the pool's last
+    // tile is actually addressed.
+    let highest = -1;
+    for (let i = 0; i < smf.tileIndices.length; i++) {
+      if (smf.tileIndices[i] > highest) highest = smf.tileIndices[i];
+    }
+    expect(highest).toBe(smt.numTiles - 1);
   });
 
   it('stores 680 bytes per tile, mips included', () => {
+    // 512 (32x32) + 128 (16x16) + 32 (8x8) + 8 (4x4). The engine seeks to a tile
+    // by multiplying its index by this, so any other size desynchronises the
+    // whole pool.
     const smt = readSmt(artifacts.smt);
     expect(artifacts.smt.length).toBe(32 + smt.numTiles * SMALL_TILE_SIZE);
     for (const tile of smt.tiles) expect(tile.length).toBe(SMALL_TILE_SIZE);
@@ -369,8 +365,8 @@ describe('the tile index array and the .smt it addresses', () => {
 
   it('emits only opaque four-colour BC1 blocks', () => {
     // BC1 switches to a three-colour punch-through mode when color0 <= color1,
-    // and selector 3 in that mode is *transparent black*. Map tiles have no
-    // alpha, so a punch-through block renders as holes in the terrain.
+    // and selector 3 in that mode is transparent black. Map tiles carry no
+    // alpha, so a punch-through block renders as a hole in the terrain.
     const smt = readSmt(artifacts.smt);
     let punchThrough = 0;
     let checked = 0;
@@ -422,16 +418,22 @@ describe('the terrain type map', () => {
 
   it('is painted on terrain that really does have both slopes and flats', () => {
     const slope = slopeDegreesField(artifacts.heightfield, { cellSize: 8 });
-    let steep = 0;
-    let flat = 0;
+    let impassable = 0;
+    let drivable = 0;
+    let buildable = 0;
     for (let i = 0; i < slope.data.length; i++) {
-      if (slope.data[i] > 27) steep++;
-      if (slope.data[i] < 5) flat++;
+      if (slope.data[i] > 27) impassable++;
+      else drivable++;
+      // Under 10 degrees is where a factory or a lab will actually sit.
+      if (slope.data[i] < 10) buildable++;
     }
-    // 27 degrees is where BAR vehicles stop, so this is also the boundary the
-    // type map is trying to describe.
-    expect(steep / slope.data.length).toBeGreaterThan(0.02);
-    expect(flat / slope.data.length).toBeGreaterThan(0.02);
+    const n = slope.data.length;
+    // 27 degrees is where BAR vehicles stop, which is also the boundary the type
+    // map is trying to describe. Both sides of it have to exist for the tests
+    // below to mean anything.
+    expect(impassable / n).toBeGreaterThan(0.15);
+    expect(drivable / n).toBeGreaterThan(0.15);
+    expect(buildable / n).toBeGreaterThan(0.02);
   });
 
   it('contains more than one terrain type', () => {
@@ -458,15 +460,16 @@ describe('the terrain type map', () => {
     }
     expect(rockCount).toBeGreaterThan(0);
     expect(groundCount).toBeGreaterThan(0);
-    // Rock is the "vehicles stop here" band, so its cells must average well past
-    // 27 degrees while the buildable ground averages well short of it.
+    // Rock is the "vehicles stop here" band, so its cells must average past 27
+    // degrees while the buildable ground averages short of it. If those two ever
+    // crossed, the type map would disagree with what the player can see.
     expect(rockSum / rockCount).toBeGreaterThan(27);
     expect(groundSum / groundCount).toBeLessThan(27);
   });
 
   it('marks the sea bed as water', () => {
     // Water is at height 0 in BAR, so every cell typed as water must sit below
-    // it. Compared against the same box resample the deriver uses, because the
+    // it. Checked against the same box resample the deriver uses, because the
     // type map is half the heightfield's resolution.
     const half = MAPX / 2;
     const coarse = resampleField(artifacts.heightfield, half, half);
@@ -486,8 +489,9 @@ describe('the metal map', () => {
   it('paints a blob at every declared spot and nowhere else', () => {
     let painted = 0;
     for (let i = 0; i < smf.metalMap.length; i++) if (smf.metalMap[i] > 0) painted++;
-    // BAR's own spot placer paints a 5x5 block with the corners removed: 21
-    // cells, 80x80 elmos, comfortably inside a 90-elmo capture circle.
+    // BAR's own spot placer paints a 5x5 block of metal cells with the corners
+    // removed: 21 cells, 80x80 elmos, comfortably inside a 90-elmo capture
+    // circle and wide enough to be visible on the metal overlay.
     expect(painted).toBe(21 * project.metalSpots.length);
 
     for (const spot of project.metalSpots) {
@@ -516,8 +520,8 @@ describe('the metal map', () => {
   });
 
   it('leaves the ground between spots barren', () => {
-    // A faint wash of metal across the map reads as buildable-anywhere to BAR's
-    // spot finder and to every AI.
+    // A faint wash of metal across the whole map reads as buildable-anywhere to
+    // BAR's spot finder and to every AI that uses it.
     const map = { width: MAPX / 2, height: MAPY / 2, data: smf.metalMap };
     const income = extractorIncome(
       map,
@@ -543,22 +547,23 @@ describe('features', () => {
   });
 
   it('writes rotation in the engine 16-bit angle convention', () => {
-    // Spring's angle unit is SPRING_CIRCLE_DIVS = 65536 per full turn, stored in
-    // a float and C-cast to a short on load. 90 degrees is therefore 16384, not
-    // 90 and not pi/2.
+    // Spring's angle unit is SPRING_CIRCLE_DIVS = 65536 per full turn, stored as
+    // a float and C-cast to a short on load. A quarter turn is therefore 16384 —
+    // not 90, and not pi/2.
     expect(smf.features[0].rotation).toBe(0);
     expect(smf.features[1].rotation).toBe((90 / 360) * 65536);
     expect(smf.features[1].rotation).toBe(16384);
-    // 270 degrees is 49152, which wraps to -16384 once the engine casts it to a
-    // short — the same heading, which is why writing the unwrapped value is
-    // safe.
+    // Three quarters of a turn is 49152, which wraps to -16384 once the engine
+    // casts it to a short. That is the same heading, which is why writing the
+    // unwrapped value is safe.
     expect(smf.features[2].rotation).toBe(49152);
     expect(new Int16Array([smf.features[2].rotation])[0]).toBe(-16384);
   });
 
   it('samples the ground height under each feature', () => {
-    // The engine discards the stored Y and snaps to CGround::GetHeightReal, but
-    // writing the real height keeps third-party viewers honest.
+    // The engine discards the stored Y and snaps features to
+    // CGround::GetHeightReal, but writing the real height keeps third-party
+    // viewers and importers honest.
     for (const stored of smf.features) {
       expect(stored.y).toBeGreaterThanOrEqual(MIN_HEIGHT);
       expect(stored.y).toBeLessThanOrEqual(MAX_HEIGHT);
@@ -594,106 +599,169 @@ describe('a project with nothing wired to the height output', () => {
         groups: [],
       },
     });
-    await expect(
-      buildMapFiles(broken, { registry, blockSize: 256, extraTextures: false }),
-    ).rejects.toThrow(/Height output node/i);
-    await expect(
-      buildMapFiles(broken, { registry, blockSize: 256, extraTextures: false }),
-    ).rejects.toThrow(/Add one and connect your terrain to it/i);
+    const options = { registry, blockSize: 256, extraTextures: false as const };
+    await expect(buildMapFiles(broken, options)).rejects.toThrow(/Height output node/i);
+    await expect(buildMapFiles(broken, options)).rejects.toThrow(
+      /Add one and connect your terrain to it/i,
+    );
   });
 
   it('treats a bypassed height output as absent, and says so the same way', async () => {
-    const graph = terrainGraph();
-    graph.nodes[1].bypassed = true;
+    const bypassed = terrainGraph();
+    bypassed.nodes[1].bypassed = true;
     await expect(
-      buildMapFiles(testProject({ graph }), {
+      buildMapFiles(testProject({ graph: bypassed }), {
         registry,
         blockSize: 256,
-        extraTextures: false,
+        extraTextures: false as const,
       }),
     ).rejects.toThrow(/Height output node/i);
   });
 });
 
-describe('the texture bake is seamless', () => {
-  it('produces the same tiles however the texture is cut into blocks', () => {
-    // This is the halo doing its job. The shader reads a neighbourhood — the
-    // hillshade alone is a 3x3 stencil — so without the two-texel halo every
-    // block would see a clamped edge and leave a visible grid across the map.
-    // Sixteen blocks and one block must therefore agree exactly.
+describe("the texture baker's halo", () => {
+  const SIZE = 256;
+
+  /** A field whose value changes from texel to texel, so a clamped edge shows. */
+  function bumpyField(): Field {
+    const f = createField(SIZE, SIZE);
+    for (let y = 0; y < SIZE; y++) {
+      for (let x = 0; x < SIZE; x++) {
+        f.data[y * SIZE + x] =
+          0.5 + 0.25 * Math.sin(x * 0.7) * Math.cos(y * 0.55) + 0.15 * Math.sin((x + y) * 0.19);
+      }
+    }
+    return f;
+  }
+
+  /**
+   * A shader with a 3x3 stencil — the simplest thing that goes wrong without a
+   * halo. Everything neighbourhood-based in the real shading path, the
+   * hillshade above all, fails in exactly this way.
+   */
+  const stencilShader: BlockShader = (block) => {
+    const { width, height, fields } = block;
+    const out = new Float32Array(width * height * 4);
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        let sum = 0;
+        for (let dy = -1; dy <= 1; dy++) {
+          const yy = Math.min(height - 1, Math.max(0, y + dy));
+          for (let dx = -1; dx <= 1; dx++) {
+            const xx = Math.min(width - 1, Math.max(0, x + dx));
+            sum += fields.height[yy * width + xx];
+          }
+        }
+        const v = sum / 9;
+        const o = (y * width + x) * 4;
+        out[o] = v;
+        out[o + 1] = v;
+        out[o + 2] = v;
+        out[o + 3] = 1;
+      }
+    }
+    return out;
+  };
+
+  /** Bake the whole texture at a given strip height and halo, into one image. */
+  function bakeWhole(height: Field, blockSize: number, halo?: number): Uint8Array {
+    const out = new Uint8Array(SIZE * SIZE * 4);
+    const flat = createField(SIZE, SIZE);
+    bakeTexture(
+      {
+        height,
+        // Only the height channel matters to the stencil shader; the rest have
+        // to be present because the baker upsamples every channel a palette
+        // could read rather than letting the shader derive any of them.
+        slopeDegrees: flat,
+        flow: flat,
+        deposition: flat,
+        wear: flat,
+        occlusion: flat,
+        curvature: flat,
+        wetness: flat,
+      },
+      {
+        textureWidth: SIZE,
+        textureHeight: SIZE,
+        worldWidth: SIZE,
+        worldHeight: SIZE,
+        blockSize,
+        shader: stencilShader,
+        ...(halo === undefined ? {} : { halo }),
+      },
+      (strip: Rgba8Image, x: number, y: number) => {
+        for (let row = 0; row < strip.height; row++) {
+          const src = row * strip.width * 4;
+          out.set(strip.data.subarray(src, src + strip.width * 4), ((y + row) * SIZE + x) * 4);
+        }
+      },
+    );
+    return out;
+  }
+
+  it('gives a neighbourhood shader the same answer whatever the strip height', () => {
+    const height = bumpyField();
+    const whole = bakeWhole(height, SIZE);
+    for (const blockSize of [32, 64, 128]) {
+      expect(bytesEqual(bakeWhole(height, blockSize), whole)).toBe(true);
+    }
+  });
+
+  it('and without the halo the same shader disagrees at every strip edge', () => {
+    // The control. If this passed, the test above would be proving nothing.
+    const height = bumpyField();
+    const whole = bakeWhole(height, SIZE, 0);
+    expect(bytesEqual(bakeWhole(height, 64, 0), whole)).toBe(false);
+  });
+});
+
+describe('the built texture', () => {
+  it('is identical however the texture is cut into strips', () => {
+    // This is the halo and the pre-derived analysis channels doing their job
+    // together. The shading path reads a neighbourhood (the hillshade alone is a
+    // 3x3 stencil) and the palette rules read flow, wetness and deposition,
+    // which are global or near-global derivations — so a strip that had to
+    // derive them for itself would come out visibly different from its
+    // neighbours. Four strips and one whole-texture strip must agree exactly.
     expect(oneBlock.stats.uniqueTiles).toBe(artifacts.stats.uniqueTiles);
     expect(bytesEqual(oneBlock.smt, artifacts.smt)).toBe(true);
     expect(bytesEqual(oneBlock.smf, artifacts.smf)).toBe(true);
   });
 
-  it('shows no step at a bake-block boundary that the terrain does not justify', () => {
+  it('shows no step at a strip boundary that the terrain does not justify', () => {
+    // The direct measurement, for the case where the two bakes agree with each
+    // other but both carry a seam. Strips run the full width of the texture, so
+    // the boundaries are horizontal and fall on row 256, 512 and 768.
     const texture = decodeTexture(artifacts.smt, smf.tileIndices);
-    // The bake used 256-texel blocks, so the interior boundaries are here.
-    const boundaries = [256, 512, 768];
+    const steps: number[] = [];
+    // Every 32nd row: a tile edge is also a BC1 block edge, so this compares
+    // like with like instead of measuring BC1's own block structure.
+    for (let y = 32; y < TEXTURE_SIZE; y += 32) steps.push(rowStep(texture, y));
+    const sorted = [...steps].sort((a, b) => a - b);
+    const ceiling = sorted[Math.floor(sorted.length * 0.9)];
 
-    const columns: number[] = [];
-    const rows: number[] = [];
-    // Sample every 32nd line: a tile edge is also a BC1 block edge, so this
-    // measures like against like and keeps the test quick.
-    for (let at = 32; at < TEXTURE_SIZE; at += 32) {
-      columns.push(columnStep(texture, at));
-      rows.push(rowStep(texture, at));
-    }
-    const columnCeiling = percentile(columns, 0.9);
-    const rowCeiling = percentile(rows, 0.9);
-
-    for (const at of boundaries) {
-      // A broken halo shows up as a hard line: the block boundary would be the
-      // single largest step in the whole texture. Holding it under the 90th
-      // percentile of ordinary tile edges says it is not distinguishable from
-      // the terrain around it.
-      expect(columnStep(texture, at)).toBeLessThanOrEqual(columnCeiling);
-      expect(rowStep(texture, at)).toBeLessThanOrEqual(rowCeiling);
+    for (const y of [256, 512, 768]) {
+      // A broken halo shows up as a hard line: the strip boundary would be the
+      // single largest step in the texture. Holding it under the 90th percentile
+      // of ordinary tile edges says it is not distinguishable from the terrain.
+      expect(rowStep(texture, y)).toBeLessThanOrEqual(ceiling);
     }
   });
 
   it('keeps the minimap in step with the texture it was accumulated from', () => {
-    // The minimap is downscaled block by block as the bake streams past, so a
-    // block-ordering bug shows up as a minimap that does not match the map.
+    // The minimap is downscaled block by block as the bake streams past rather
+    // than from a finished texture, so a block-ordering bug shows up here as a
+    // minimap that does not match the map.
     expect(artifacts.preview.width).toBe(1024);
     expect(artifacts.preview.height).toBe(1024);
     const texture = decodeTexture(artifacts.smt, smf.tileIndices);
     // At this map size the minimap is a 1:1 copy of the diffuse, so the two
-    // should agree to within BC1's quantisation error.
+    // agree to within BC1's quantisation error and nothing else.
     let worst = 0;
     for (let i = 0; i < texture.length; i += 4) {
       worst = Math.max(worst, Math.abs(texture[i] - artifacts.preview.data[i]));
     }
     expect(worst).toBeLessThan(32);
-  });
-});
-
-describe('DIAG', () => {
-  it('measures the block seam', () => {
-    const a = decodeTexture(artifacts.smt, smf.tileIndices);
-    const b = decodeTexture(oneBlock.smt, readSmf(oneBlock.smf).tileIndices);
-    let diff = 0;
-    let worst = 0;
-    let differing = 0;
-    for (let i = 0; i < a.length; i += 4) {
-      const d = Math.abs(a[i] - b[i]) + Math.abs(a[i + 1] - b[i + 1]) + Math.abs(a[i + 2] - b[i + 2]);
-      if (d > 0) differing++;
-      diff += d;
-      worst = Math.max(worst, d);
-    }
-    const cols: string[] = [];
-    for (let at = 32; at < TEXTURE_SIZE; at += 32) cols.push(`${at}:${columnStep(a, at).toFixed(2)}`);
-    // eslint-disable-next-line no-console
-    console.error('mean abs diff per texel', diff / (a.length / 4), 'worst', worst, 'differing texels', differing, 'of', a.length / 4);
-    const slope = slopeDegreesField(artifacts.heightfield, { cellSize: 8 });
-    const hist: Record<string, number> = {};
-    for (const t of [3, 5, 10, 15, 20, 27, 35, 45]) {
-      let n = 0;
-      for (let i = 0; i < slope.data.length; i++) if (slope.data[i] < t) n++;
-      hist[`<${t}`] = n / slope.data.length;
-    }
-    // eslint-disable-next-line no-console
-    console.error('slope cdf', JSON.stringify(hist));
-    expect(true).toBe(true);
   });
 });

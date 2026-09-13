@@ -14,7 +14,9 @@
  */
 
 import { useEffect, useRef, useState } from 'react';
+import type { CurvePoint } from '@terrasmith/core';
 import type { ParamDef } from '@terrasmith/graph';
+import { CurveEditor } from './CurveEditor.js';
 
 interface Props {
   def: ParamDef;
@@ -37,7 +39,13 @@ export function ParamControl({ def, value, onChange, params }: Props) {
     case 'seed':
       return <SeedControl def={def} value={Number(value ?? 0)} onChange={onChange} />;
     case 'curve':
-      return <CurveNote def={def} />;
+      return (
+        <CurveParam
+          def={def}
+          value={Array.isArray(value) ? (value as CurvePoint[]) : []}
+          onChange={onChange}
+        />
+      );
     case 'number':
     case 'int':
       return <NumberControl def={def} value={Number(value ?? 0)} onChange={onChange} />;
@@ -242,11 +250,27 @@ function SeedControl({
   );
 }
 
-function CurveNote({ def }: { def: ParamDef }) {
+function CurveParam({
+  def,
+  value,
+  onChange,
+}: {
+  def: ParamDef;
+  value: CurvePoint[];
+  onChange(v: CurvePoint[]): void;
+}) {
+  const points =
+    value.length >= 2
+      ? value
+      : [
+          { x: 0, y: 0 },
+          { x: 1, y: 1 },
+        ];
   return (
     <div className="field">
       <Label def={def} />
-      <div className="field-help">Curve editing is available on the node itself.</div>
+      <CurveEditor points={points} onChange={onChange} />
+      <Help def={def} />
     </div>
   );
 }

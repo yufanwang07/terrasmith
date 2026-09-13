@@ -75,10 +75,12 @@ const TARGET_STRIP_TEXELS = 1 << 18;
  */
 function stripRowsFor(textureWidth: number): number {
   const rows = Math.round(TARGET_STRIP_TEXELS / Math.max(1, textureWidth) / 32) * 32;
-  // Never thinner than two tile rows: below that the per-strip setup — an axis
-  // table as wide as the texture, eight upsample buffers — starts to matter
-  // against the work, and the halo is a larger fraction of what gets computed.
-  return Math.max(64, Math.min(512, rows));
+  // One tile row is the hard floor — a thinner strip cannot produce a whole
+  // tile. The widest maps land there, and pay about a tenth of their shading
+  // twice over because the halo is a large fraction of a 32-row strip. That is
+  // the right trade against the alternative, which is a 32x32 map needing four
+  // times the memory of a 16x16 one.
+  return Math.max(32, Math.min(512, rows));
 }
 
 /** The largest graph resolution each quality level will evaluate at. */
