@@ -10,7 +10,9 @@ import { NodeRegistry } from '../registry.js';
 import type { NodeDefinition } from '../types.js';
 import { combinerNodes } from './combiners.js';
 import { filterNodes } from './filters.js';
+import { gameplayNodes } from './gameplay.js';
 import { generatorNodes } from './generators.js';
+import { layoutNodes } from './layout.js';
 import { naturalNodes } from './natural.js';
 import { outputNodes } from './outputs.js';
 import { selectorNodes } from './selectors.js';
@@ -22,8 +24,11 @@ export * from './filters.js';
 export * from './combiners.js';
 export * from './selectors.js';
 export * from './natural.js';
+export * from './layout.js';
+export * from './gameplay.js';
 export * from './outputs.js';
 export * from './utility.js';
+export * from './simulate.js';
 
 /** Every built-in node definition. */
 export const builtinNodes: readonly NodeDefinition<never>[] = [
@@ -32,6 +37,8 @@ export const builtinNodes: readonly NodeDefinition<never>[] = [
   ...combinerNodes,
   ...selectorNodes,
   ...naturalNodes,
+  ...layoutNodes,
+  ...gameplayNodes,
   ...outputNodes,
   ...utilityNodes,
 ] as unknown as readonly NodeDefinition<never>[];

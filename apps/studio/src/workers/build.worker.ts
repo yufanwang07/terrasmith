@@ -10,6 +10,7 @@
 import { buildMap } from '@terrasmith/build';
 import { CODER_LZMA, createLzmaCoder } from '@terrasmith/format';
 import { createDefaultRegistry, type Project } from '@terrasmith/graph';
+import { createBakePool } from './bakePool.js';
 
 export interface BuildRequest {
   kind: 'build';
@@ -75,10 +76,14 @@ async function run(request: BuildRequest): Promise<void> {
   const controller = new AbortController();
   controllers.set(request.id, controller);
   let lastPost = 0;
+  // Nested workers: this one orchestrates, its pool does the shading. Chrome,
+  // Firefox and Safari all allow a module worker to spawn workers.
+  const bakePool = createBakePool();
 
   try {
     const result = await buildMap(request.project, {
       registry,
+      stripRunner: bakePool,
       quality: request.quality,
       format: request.format,
       signal: controller.signal,
@@ -122,6 +127,7 @@ async function run(request: BuildRequest): Promise<void> {
       cancelled: controller.signal.aborted,
     });
   } finally {
+    bakePool.dispose?.();
     controllers.delete(request.id);
   }
 }
