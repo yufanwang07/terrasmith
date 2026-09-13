@@ -1,0 +1,19 @@
+{
+  "name": "@terrasmith/cli",
+  "version": "0.1.0",
+  "description": "Command line builds for Terrasmith projects",
+  "license": "MIT",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "bin": { "terrasmith": "./dist/cli.js" },
+  "exports": { ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" } },
+  "files": ["dist"],
+  "scripts": { "build": "tsc -b", "clean": "rm -rf dist *.tsbuildinfo" },
+  "dependencies": {
+    "@terrasmith/build": "0.1.0",
+    "@terrasmith/core": "0.1.0",
+    "@terrasmith/format": "0.1.0",
+    "@terrasmith/graph": "0.1.0"
+  }
+}

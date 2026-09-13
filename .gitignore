@@ -3,9 +3,11 @@ node_modules/
 .pnpm-store/
 
 # build output
+# Anchored so they do not swallow packages/build, which is source.
 dist/
-build/
-out/
+dist-types/
+/build/
+/out/
 *.tsbuildinfo
 .vite/
 coverage/

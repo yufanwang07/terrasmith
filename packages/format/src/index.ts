@@ -68,17 +68,5 @@ export {
 export { buildMinimap, buildSolidMinimap, MINIMAP_MIP_OFFSETS } from './minimap.js';
 
 export * from './mapinfo/index.js';
-export {
-  writeSdz,
-  normalizePath,
-  writeSd7,
-  crc32,
-  CODER_COPY,
-  CODER_LZMA,
-  type ArchiveEntry,
-  type ArchiveProgress,
-  type ZipOptions,
-  type SevenZipOptions,
-  type SevenZipCoder,
-  type CodedStream,
-} from './archive/index.js';
+export * from './archive/index.js';
+export * from './dds.js';
