@@ -1,0 +1,215 @@
+/**
+ * Defaults that produce a good-looking, playable BAR map without the author
+ * touching a single lighting value.
+ *
+ * These are not the *engine's* defaults. The engine's defaults render a map
+ * that is technically valid and visually flat; these are tuned to match what
+ * shipped BAR maps actually use, because "open the tool, press export, get
+ * something that looks like a real map" is the whole point.
+ */
+
+import type { MapInfo, TerrainType } from './types.js';
+
+/** Terrain type 0: ordinary buildable ground. */
+export const TERRAIN_TYPE_GROUND: TerrainType = {
+  name: 'Ground',
+  hardness: 1.0,
+  receiveTracks: true,
+  moveSpeeds: { tank: 1.0, kbot: 1.0, hover: 1.0, ship: 1.0 },
+};
+
+/** Terrain type 1: exposed rock — slower for ground units, resists cratering. */
+export const TERRAIN_TYPE_ROCK: TerrainType = {
+  name: 'Rock',
+  hardness: 5.0,
+  receiveTracks: false,
+  moveSpeeds: { tank: 0.75, kbot: 0.85, hover: 1.0, ship: 1.0 },
+};
+
+/** Terrain type 2: sand and shoreline — soft, slow for tracked units. */
+export const TERRAIN_TYPE_SAND: TerrainType = {
+  name: 'Sand',
+  hardness: 0.6,
+  receiveTracks: true,
+  moveSpeeds: { tank: 0.85, kbot: 0.9, hover: 1.0, ship: 1.0 },
+};
+
+/** Terrain type 3: water bed. */
+export const TERRAIN_TYPE_WATER: TerrainType = {
+  name: 'Water',
+  hardness: 0.4,
+  receiveTracks: false,
+  moveSpeeds: { tank: 1.0, kbot: 1.0, hover: 1.0, ship: 1.0 },
+};
+
+/** Terrain type 255: roads — the conventional slot for a speed-up surface. */
+export const TERRAIN_TYPE_ROAD: TerrainType = {
+  name: 'Road',
+  hardness: 1.0,
+  receiveTracks: true,
+  moveSpeeds: { tank: 1.25, kbot: 1.25, hover: 1.25, ship: 1.0 },
+};
+
+/** The terrain type table Terrasmith paints by default. */
+export const DEFAULT_TERRAIN_TYPES: Record<number, TerrainType> = {
+  0: TERRAIN_TYPE_GROUND,
+  1: TERRAIN_TYPE_ROCK,
+  2: TERRAIN_TYPE_SAND,
+  3: TERRAIN_TYPE_WATER,
+  255: TERRAIN_TYPE_ROAD,
+};
+
+/**
+ * Build a complete `MapInfo` with sensible defaults.
+ *
+ * Everything the caller supplies wins; everything else comes from values tuned
+ * against shipped BAR maps.
+ */
+export function createMapInfo(options: {
+  name: string;
+  shortname?: string;
+  description?: string;
+  author?: string;
+  version?: string;
+  /** Archive-relative path of the `.smf`, e.g. `maps/my_map.smf`. */
+  mapfile: string;
+  /** Bare `.smt` filename, e.g. `my_map.smt`. */
+  smtFileName: string;
+  minHeight: number;
+  maxHeight: number;
+  /** Metal yielded by a metalmap byte of 255. */
+  maxMetal?: number;
+  extractorRadius?: number;
+  tidalStrength?: number;
+  minWind?: number;
+  maxWind?: number;
+  gravity?: number;
+  /** Omit water entirely — the map floats in the void. */
+  voidWater?: boolean;
+  teams?: Record<number, { startPos: { x: number; z: number } }>;
+  terrainTypes?: Record<number, TerrainType>;
+  /** Extra `resources` entries for textures the exporter emitted. */
+  resources?: MapInfo['resources'];
+  splats?: MapInfo['splats'];
+  custom?: Record<string, unknown>;
+}): MapInfo {
+  return {
+    name: options.name,
+    shortname: options.shortname,
+    description: options.description ?? '',
+    author: options.author ?? '',
+    version: options.version ?? '1.0',
+    mapfile: options.mapfile,
+    modtype: 3,
+    depend: ['Map Helper v1'],
+    replace: [],
+
+    maphardness: 100,
+    notDeformable: false,
+    gravity: options.gravity ?? 130,
+    tidalStrength: options.tidalStrength ?? 18,
+    maxMetal: options.maxMetal ?? 1.0,
+    extractorRadius: options.extractorRadius ?? 100,
+    voidWater: options.voidWater ?? false,
+    voidGround: false,
+    autoShowMetal: true,
+
+    smf: {
+      minheight: options.minHeight,
+      maxheight: options.maxHeight,
+      smtFileName0: options.smtFileName,
+    },
+
+    sound: {
+      preset: 'default',
+      passfilter: { gainlf: 1.0, gainhf: 1.0 },
+    },
+
+    resources: {
+      detailTex: 'detailtexblurred.bmp',
+      ...options.resources,
+    },
+
+    splats: options.splats ?? {
+      texScales: [0.01, 0.005, 0.0075, 0.01],
+      texMults: [1.2, 0.4, 0.9, 0.25],
+    },
+
+    atmosphere: {
+      minWind: options.minWind ?? 5,
+      maxWind: options.maxWind ?? 25,
+      fogStart: 0.1,
+      fogEnd: 1.0,
+      fogColor: [0.7, 0.7, 0.8],
+      skyColor: [0.1, 0.15, 0.7],
+      sunColor: [1.0, 1.0, 1.0],
+      cloudColor: [1.0, 1.0, 1.0],
+      cloudDensity: 0.5,
+      skyAxisAngle: [0.0, 0.0, 1.0, 0.0],
+      skyBox: '',
+    },
+
+    grass: {
+      bladeWaveScale: 1.0,
+      bladeWidth: 0.32,
+      bladeHeight: 4.0,
+      bladeAngle: 1.57,
+      bladeColor: [0.59, 0.81, 0.57],
+    },
+
+    lighting: {
+      // A high, slightly off-axis sun reads well on terrain: low enough for
+      // long shadows to show relief, high enough that valleys are not black.
+      sunDir: [0.8, 1.0, -0.7, 1e9],
+      groundAmbientColor: [0.4, 0.4, 0.4],
+      groundDiffuseColor: [0.9, 0.9, 0.85],
+      groundSpecularColor: [0.7, 0.7, 0.7],
+      groundShadowDensity: 0.85,
+      unitAmbientColor: [0.5, 0.5, 0.55],
+      unitDiffuseColor: [0.99, 0.99, 0.95],
+      unitSpecularColor: [0.8, 0.6, 0.6],
+      unitShadowDensity: 0.9,
+      specularExponent: 100.0,
+    },
+
+    water: {
+      damage: 0,
+      repeatX: 10.0,
+      repeatY: 10.0,
+      absorb: [0.05, 0.005, 0.001],
+      baseColor: [0.3, 0.5, 0.5],
+      minColor: [0.0, 0.3, 0.3],
+      ambientFactor: 1.0,
+      diffuseFactor: 1.0,
+      specularFactor: 1.4,
+      specularPower: 40.0,
+      surfaceColor: [0.67, 0.8, 1.0],
+      surfaceAlpha: 0.02,
+      diffuseColor: [0.0, 0.0, 0.0],
+      specularColor: [0.5, 0.5, 0.5],
+      fresnelMin: 0.08,
+      fresnelMax: 0.5,
+      fresnelPower: 8.0,
+      reflectionDistortion: 1.0,
+      blurBase: 2.1,
+      blurExponent: 1.5,
+      perlinStartFreq: 8.0,
+      perlinLacunarity: 3.0,
+      perlinAmplitude: 0.85,
+      windSpeed: 0.5,
+      waveOffsetFactor: 0.3,
+      waveLength: 0.37,
+      waveFoamDistortion: 0.1,
+      waveFoamIntensity: 1.0,
+      causticsResolution: 100.0,
+      causticsStrength: 0.16,
+      shoreWaves: true,
+      forceRendering: false,
+      numTiles: 4,
+    },
+
+    teams: options.teams,
+    terrainTypes: options.terrainTypes ?? DEFAULT_TERRAIN_TYPES,
+    custom: options.custom,
+  };
+}

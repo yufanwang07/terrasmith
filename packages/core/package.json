@@ -1,7 +1,7 @@
 {
-  "name": "@terrasmith/format",
+  "name": "@terrasmith/core",
   "version": "0.1.0",
-  "description": "Read and write Spring/Recoil map formats (SMF, SMT, mapinfo.lua, .sd7/.sdz) — the format layer behind Terrasmith",
+  "description": "Resolution-independent terrain fields, noise, erosion and analysis — the engine behind Terrasmith",
   "license": "MIT",
   "type": "module",
   "main": "./dist/index.js",
@@ -12,15 +12,11 @@
       "default": "./dist/index.js"
     }
   },
-  "files": [
-    "dist"
-  ],
+  "files": ["dist"],
   "sideEffects": false,
   "scripts": {
     "build": "tsc -b",
     "clean": "rm -rf dist *.tsbuildinfo"
   },
-  "dependencies": {
-    "fflate": "^0.8.3"
-  }
+  "dependencies": {}
 }
