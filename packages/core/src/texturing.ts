@@ -50,6 +50,7 @@ import {
   type Rgb,
 } from './materials.js';
 import { fractalNoise2D, type NoiseParams } from './noise.js';
+import { gaussianBlur } from './ops.js';
 import { Rng } from './random.js';
 
 // --- Colour space ----------------------------------------------------------
@@ -143,20 +144,41 @@ export interface TexturingOptions {
    */
   readonly occlusionRadius?: number;
   /**
-   * Profile curvature, in 1/elmo, that saturates the convexity mask. A gully
-   * whose cross-section turns through a right angle over 250 elmos has a
-   * curvature near 0.006, so 0.004 saturates on tight gullies and ridges while
-   * leaving broad slopes near the neutral 0.5.
-   * @default 0.004
+   * Profile curvature, in 1/elmo, that saturates the convexity mask.
+   * See {@link DEFAULT_CURVATURE_SCALE}.
+   * @default 0.02
    */
   readonly curvatureScale?: number;
+  /**
+   * Drainage area, as a fraction of the whole map, at which flow starts to read
+   * as a channel. See {@link DEFAULT_CHANNEL_AREA}.
+   * @default 0.0015
+   */
+  readonly channelArea?: number;
 }
+
+/**
+ * Profile curvature, in 1/elmo, that saturates the convexity mask by default.
+ *
+ * Curvature is a second derivative, so it is the noisiest thing in this module:
+ * measured over adjacent samples it picks up every wrinkle in the terrain, and
+ * whatever scale saturates it turns the mask into a two-tone stencil at the
+ * grid's own frequency. A rule keyed to that paints a fine web of lines across
+ * the whole map rather than picking out the gullies and crests it was aimed at.
+ *
+ * So the saturation point is set well out in the tail. 0.02 is a radius of
+ * curvature of 50 elmos — a gully that turns through a right angle in about 80
+ * elmos, which is a real, visible landform rather than a bump. On the shipped
+ * templates that leaves about 1% of the map saturated at either end and the
+ * rest spread smoothly around the neutral 0.5, which is what a modifier wants.
+ */
+export const DEFAULT_CURVATURE_SCALE = 0.02;
 
 /**
  * Map a signed curvature field (1/elmo, as `curvatureField` returns) onto the
  * 0..1 convexity mask rules expect: 0 is a tight gully, 0.5 flat, 1 a crest.
  */
-export function normalizeCurvature(curvature: Field, scale = 0.004): Field {
+export function normalizeCurvature(curvature: Field, scale = DEFAULT_CURVATURE_SCALE): Field {
   const out = createField(curvature.width, curvature.height);
   const inv = scale === 0 ? 0 : 1 / scale;
   for (let i = 0; i < curvature.data.length; i++) {
@@ -257,12 +279,13 @@ export function resolveTextureInputs(
     (needsCurvature
       ? normalizeCurvature(
           curvatureField(height, 'profile', { cellSize, mode }),
-          options.curvatureScale ?? 0.004,
+          options.curvatureScale ?? DEFAULT_CURVATURE_SCALE,
         )
       : neutral());
 
   const needsFlow = wants('flow') || wants('wetness');
-  const flow = inputs.flow ?? (needsFlow ? deriveFlow(height, cellSize) : neutral());
+  const flow =
+    inputs.flow ?? (needsFlow ? deriveFlow(height, cellSize, options.channelArea, mode) : neutral());
 
   const occlusion =
     inputs.occlusion ??
@@ -288,43 +311,139 @@ export function resolveTextureInputs(
 }
 
 /**
- * Flow accumulation squashed into a usable 0..1 mask.
+ * Drainage area, as a fraction of the map, at which the flow mask leaves zero.
+ *
+ * This is a channel-initiation threshold: the catchment a hillside has to
+ * gather before overland flow stops being a sheet and cuts a defined channel.
+ * 0.0015 of a 16x16 map is about 10^5 elmos², a catchment 300 elmos on a side,
+ * and it puts roughly 5-10% of a typical template's texels somewhere on the
+ * ramp with about 1% up near the top — a dendritic network with a trunk, which
+ * is what a flow accent is for.
+ *
+ * It is a fraction of the map rather than an absolute area on purpose. The
+ * physical threshold is absolute, but a texture tool that used one would put a
+ * dense network on a 24x24 map and three streams on an 8x8; keying it to the
+ * map means a palette's flow thresholds mean the same thing whatever size the
+ * author picked, and the size they picked is not a statement about rainfall.
+ */
+export const DEFAULT_CHANNEL_AREA = 0.0015;
+
+/** Decades of drainage area between "a channel starts" and "the mask is full". */
+const CHANNEL_AREA_DECADES = 2;
+
+/**
+ * Width to widen the finished flow mask to, in elmos.
+ *
+ * Flow accumulation concentrates into a single cell, so a stream is one texel
+ * wide whatever the grid is: at a preview's 20 elmos per sample that is a
+ * 20-elmo river and at the build's one elmo per texel it is a hairline nobody
+ * will ever see. Giving it a fixed world width is what makes the preview
+ * predict the build, which is the whole bargain of resolution independence.
+ *
+ * The widening is a **dilation**, not a blur. Blurring a one-cell spike spreads
+ * its mass rather than its extent, so the channel gets wider and weaker at once
+ * — on a 2-elmo grid a blur took a saturated trunk stream down to 0.38 while
+ * the same stream on a 16-elmo grid read 0.99, which is exactly the resolution
+ * dependence this is here to remove. Taking the maximum over the window widens
+ * without touching the value, and a light blur afterwards only rounds the edge
+ * of the plateau it leaves.
+ */
+const CHANNEL_WIDTH_ELMOS = 7;
+
+/**
+ * Separable maximum filter, radius in samples.
+ *
+ * Naive two-pass rather than a monotonic deque: the radius here is a handful of
+ * samples even at build resolution, and the deque's bookkeeping costs more than
+ * the comparisons it saves until the window is tens of cells wide.
+ */
+function dilate(field: Field, radius: number, mode: WrapMode): Field {
+  const r = Math.round(radius);
+  if (r <= 0) return field;
+  const { width, height, data } = field;
+  const tmp = createField(width, height);
+  for (let y = 0; y < height; y++) {
+    const row = y * width;
+    for (let x = 0; x < width; x++) {
+      let m = data[row + x];
+      for (let k = -r; k <= r; k++) {
+        const v = data[row + wrapCoord(x + k, width, mode)];
+        if (v > m) m = v;
+      }
+      tmp.data[row + x] = m;
+    }
+  }
+  for (let x = 0; x < width; x++) {
+    for (let y = 0; y < height; y++) {
+      let m = tmp.data[y * width + x];
+      for (let k = -r; k <= r; k++) {
+        const v = tmp.data[wrapCoord(y + k, height, mode) * width + x];
+        if (v > m) m = v;
+      }
+      data[y * width + x] = m;
+    }
+  }
+  return field;
+}
+
+/**
+ * Flow accumulation turned into a 0..1 "is this a watercourse" mask.
  *
  * Accumulation has a very long tail — one trunk channel can drain a square
- * kilometre while its tributaries drain a hectare — so a linear normalisation
- * leaves everything but the main stem at zero. `log1p` against the field
- * maximum is what makes the whole dendritic network visible, which is the thing
- * worth texturing.
+ * kilometre while its tributaries drain a hectare — so the ramp is taken over
+ * the logarithm of drainage area, which is what makes the whole dendritic
+ * network visible rather than just the main stem.
+ *
+ * **Where the ramp starts is the whole design.** Running it from zero (or from
+ * `log1p(area) / log1p(maxArea)`, which amounts to the same thing) puts every
+ * hillside texel with a handful of cells above it near the middle of the range:
+ * five upstream cells on a 21-elmo grid is already 0.42 of the way up, so more
+ * than half of every map reads as "channel" and a flow-keyed accent crazes the
+ * surface with a web of pale lines at the frequency of the drainage network's
+ * finest twigs. Anchoring the bottom of the ramp at {@link DEFAULT_CHANNEL_AREA}
+ * instead means the mask is *zero* on a hillside and only leaves zero where
+ * water has somewhere real to have come from.
  *
  * The log is taken of the drainage **area in elmos²**, not of the raw cell
  * count. `flowAccumulation` counts cells, so the same stream on the same terrain
- * accumulates four times as much when the grid is sampled twice as finely, and
- * `log1p(count) / log1p(maxCount)` drifts upward with every refinement —
- * converging on 1 everywhere — which puts a flow accent tuned on a 512 preview
- * somewhere else entirely at 8192. Catchment area is a property of the terrain
- * and not of the grid, so scaling by the cell footprint makes the mask read the
- * same at a given place on the map whatever the resolution.
- *
- * What that does *not* fix is channel width: accumulation concentrates into a
- * single cell, so a stream is one texel wide however coarse the grid is. Keying
- * an accent off `flow` and expecting a fixed real-world width needs a blur, or
- * erosion's own flow field passed in.
+ * accumulates four times as much when the grid is sampled twice as finely.
+ * Catchment area is a property of the terrain and not of the grid, so scaling by
+ * the cell footprint makes the mask read the same at a given place on the map
+ * whatever the resolution — and then a blur to {@link CHANNEL_WIDTH_ELMOS}
+ * gives the channel a world-constant width to go with it.
  */
-function deriveFlow(height: Field, cellSize: number): Field {
+function deriveFlow(
+  height: Field,
+  cellSize: number,
+  channelArea: number | undefined,
+  mode: WrapMode,
+): Field {
   const acc = flowAccumulation(height, { cellSize, dinf: true });
   // `flowAccumulation` seeds every cell with itself, so subtracting one leaves
   // the area that drains *into* the cell: zero on a ridge line at any
   // resolution, where leaving the seed in would report one cell's worth of
   // footprint and move the whole mask's floor with the grid.
   const cellArea = cellSize * cellSize;
-  const { max } = fieldRange(acc);
-  const maxArea = (max - 1) * cellArea;
-  const norm = maxArea > 0 ? 1 / Math.log1p(maxArea) : 0;
+  const mapArea = height.width * height.height * cellArea;
+  const fraction = Math.max(channelArea ?? DEFAULT_CHANNEL_AREA, Number.MIN_VALUE);
+  const startArea = fraction * mapArea;
+  const span = CHANNEL_AREA_DECADES * Math.LN10;
+  const logStart = Math.log(startArea);
+
   for (let i = 0; i < acc.data.length; i++) {
     const area = (acc.data[i] - 1) * cellArea;
-    acc.data[i] = area > 0 ? Math.log1p(area) * norm : 0;
+    if (area <= startArea) {
+      acc.data[i] = 0;
+      continue;
+    }
+    let t = (Math.log(area) - logStart) / span;
+    if (t > 1) t = 1;
+    acc.data[i] = t * t * (3 - 2 * t);
   }
-  return acc;
+
+  const radius = Math.round(CHANNEL_WIDTH_ELMOS / (2 * cellSize));
+  if (radius <= 0) return acc;
+  return gaussianBlur(dilate(acc, radius, mode), radius * 0.5, mode, acc);
 }
 
 /** Flatness (1 on level ground, 0 at `limit` degrees and steeper). */
@@ -337,8 +456,14 @@ function flatness(slopeDegrees: number, limit: number): number {
 
 /**
  * World Machine's Select Wetness, reduced to its two terms: water lingers where
- * the ground is flat, and arrives where upstream drainage sends it. The flow
- * term is weighted higher because a channel is wet regardless of how flat it is.
+ * the ground is flat, and arrives where upstream drainage sends it.
+ *
+ * The two terms are balanced so that level ground with no catchment above it
+ * sits at 0.5 and a channel floor reaches 1. That midpoint matters: it means a
+ * rule can ask for "wetter than average" (above 0.5) or "dry" (below) and get
+ * what it asked for on any map. Weighting them to saturate — as adding 0.55 and
+ * 0.8 does — leaves most of a gentle map pinned at 1, and a mask that is 1
+ * everywhere gates nothing at all.
  */
 function deriveWetness(height: Field, slope: Field, flow: Field, waterLevel: number): Field {
   const out = createField(height.width, height.height);
@@ -347,39 +472,38 @@ function deriveWetness(height: Field, slope: Field, flow: Field, waterLevel: num
       out.data[i] = 1;
       continue;
     }
-    const w = 0.55 * flatness(slope.data[i], 30) + 0.8 * flow.data[i];
+    const w = 0.5 * flatness(slope.data[i], 28) + 0.6 * flow.data[i];
     out.data[i] = w > 1 ? 1 : w;
   }
   return out;
 }
 
+/**
+ * Sediment settles where the ground is both flat enough to stop carrying it and
+ * concave enough to collect it, so the proxy is the product of those two.
+ *
+ * Both factors are used as they stand rather than doubled. Doubling made the
+ * common case — flat, mildly concave ground — clip at 1 across more than half a
+ * map, which turns a gradient into a stencil and takes the palette's deposition
+ * influences out of service entirely.
+ */
 function deriveDeposition(slope: Field, convexity: Field): Field {
   const out = createField(slope.width, slope.height);
   for (let i = 0; i < out.data.length; i++) {
-    // Sediment settles where the ground is both flat enough to stop carrying it
-    // and concave enough to collect it.
     const concave = 1 - convexity.data[i];
-    out.data[i] = flatness(slope.data[i], 25) * concave * 2;
+    out.data[i] = flatness(slope.data[i], 25) * concave;
   }
-  clamp01InPlace(out);
   return out;
 }
 
+/** The mirror of {@link deriveDeposition}: material leaves steep convex ground. */
 function deriveWear(slope: Field, convexity: Field): Field {
   const out = createField(slope.width, slope.height);
   for (let i = 0; i < out.data.length; i++) {
     const steep = 1 - flatness(slope.data[i], 45);
-    out.data[i] = steep * convexity.data[i] * 2;
+    out.data[i] = steep * convexity.data[i];
   }
-  clamp01InPlace(out);
   return out;
-}
-
-function clamp01InPlace(f: Field): void {
-  for (let i = 0; i < f.data.length; i++) {
-    const v = f.data[i];
-    f.data[i] = v < 0 ? 0 : v > 1 ? 1 : v;
-  }
 }
 
 // --- Rule evaluation -------------------------------------------------------
@@ -486,7 +610,54 @@ function weightsOf(
       data[i] = c <= 0 ? 0 : (exclusion === 1 ? c : Math.pow(c, exclusion)) * scale;
     }
   }
+
+  applyCaps(out, palette);
   return out;
+}
+
+/**
+ * Hold every capped layer down to its share of the texel.
+ *
+ * Weights are relative and get normalised per texel, so `cap` has to be turned
+ * into an absolute limit before normalisation: for a cap of `c` against an
+ * uncapped total `b`, the largest weight that still ends up at or below `c` of
+ * the final mix is `b * c / (1 - c)`.
+ *
+ * The limit is computed against the uncapped total alone and not against the
+ * running total, which makes it conservative when two accents overlap — they
+ * end up with less than their caps between them rather than more. Sharing the
+ * space is the right failure: the point of a cap is that the terrain underneath
+ * stays visible, and two accents stacked on one texel is exactly when it would
+ * otherwise stop being.
+ *
+ * A texel with nothing uncapped on it keeps its accent at full strength. There
+ * is no ground there to protect, and zeroing the only material that applies
+ * would fall through to the fallback colour and punch a hole in the map.
+ */
+function applyCaps(weights: Field[], palette: MaterialPalette): void {
+  let limits: Float64Array | undefined;
+  for (let layer = 0; layer < palette.length; layer++) {
+    const cap = palette[layer].rule.cap;
+    if (cap === undefined || cap >= 1) continue;
+    limits ??= new Float64Array(palette.length).fill(-1);
+    limits[layer] = cap <= 0 ? 0 : cap / (1 - cap);
+  }
+  if (limits === undefined) return;
+
+  const n = weights[0].data.length;
+  for (let i = 0; i < n; i++) {
+    let base = 0;
+    for (let layer = 0; layer < palette.length; layer++) {
+      if (limits[layer] < 0) base += weights[layer].data[i];
+    }
+    if (base <= 0) continue;
+    for (let layer = 0; layer < palette.length; layer++) {
+      const k = limits[layer];
+      if (k < 0) continue;
+      const limit = k * base;
+      if (weights[layer].data[i] > limit) weights[layer].data[i] = limit;
+    }
+  }
 }
 
 /**
@@ -523,11 +694,30 @@ export function dominantMaterial(weights: readonly Field[]): Field {
 
 // --- Satmap ----------------------------------------------------------------
 
+/**
+ * How far ambient occlusion is allowed to darken a texel, by default.
+ *
+ * Chosen against the occlusion a real template actually produces rather than
+ * against a swatch. On the shipped mountain template sampled at 8 elmos, the
+ * occlusion field runs 0.87 at the median, 0.64 at the fifth percentile and
+ * around 0.35 in the deepest gorges. At 0.35 strength that is a 4.5% darkening
+ * of ordinary ground, 13% at the bottom of a valley and 23% in a gorge — enough
+ * that a crevice reads as deep, small enough that a basin stays a basin.
+ *
+ * The old 0.55 took the same gorge down by 36% and, compounded with the
+ * engine's own sun and shadow map and then seen through water, was most of why
+ * low ground on a generated map came out looking like a hole in the texture.
+ * Underwater ground is the worst case: it gets this darkening, then the water
+ * layer's, and it has no sun on it to win any of it back.
+ */
+export const DEFAULT_OCCLUSION_STRENGTH = 0.35;
+
 export interface LightingOptions {
   /**
    * How far ambient occlusion is allowed to darken a texel. Clamped to 0..1;
-   * at 0.55 a fully occluded crevice keeps 45% of its albedo.
-   * @default 0.55
+   * at 0.35 a fully occluded crevice keeps 65% of its albedo.
+   * See {@link DEFAULT_OCCLUSION_STRENGTH}.
+   * @default 0.35
    */
   readonly occlusionStrength?: number;
   /**
@@ -594,7 +784,9 @@ export function generateSatmap(
 
   const lighting = options.lighting === false ? undefined : (options.lighting ?? {});
   const need = channelsUsedBy(palette);
-  if (lighting !== undefined && (lighting.occlusionStrength ?? 0.55) > 0) need.add('occlusion');
+  if (lighting !== undefined && (lighting.occlusionStrength ?? DEFAULT_OCCLUSION_STRENGTH) > 0) {
+    need.add('occlusion');
+  }
   const resolved = resolveTextureInputs(inputs, { ...options, need });
   const weights = weightsOf(resolved, palette, options);
 
@@ -676,7 +868,7 @@ function bakeShading(
   lighting: LightingOptions,
   options: TexturingOptions,
 ): Float32Array {
-  const aoStrength = clamp01(lighting.occlusionStrength ?? 0.55);
+  const aoStrength = clamp01(lighting.occlusionStrength ?? DEFAULT_OCCLUSION_STRENGTH);
   const hsStrength = clamp01(lighting.hillshadeStrength ?? 0.12);
   const n = height.width * height.height;
   const out = new Float32Array(n);

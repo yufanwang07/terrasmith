@@ -2,9 +2,15 @@
  * Canyon lanes — plateaus split by dry channels.
  *
  * Everything buildable is on top, everything fast is in the channels, and the
- * ramps between them are the whole game. The terracing is what gives the
- * plateaus real edges: a smooth hill flattened into steps reads as a mesa,
- * while a hill that merely happens to be flattish on top does not.
+ * ramps between them are the whole game. Two things make that work rather than
+ * merely look like it.
+ *
+ * The first is terracing. A smooth hill flattened into steps reads as a mesa
+ * with an edge; a hill that merely happens to be flattish on top does not, and
+ * it gives players nothing to build on either. The second is the floor under
+ * the channels: clamping the low ground to one level turns a set of V-shaped
+ * gullies into a connected road network at a single elevation, which is what a
+ * lane map needs and what an inverted ridge on its own does not give.
  */
 
 import { GraphBuilder, type Template } from './shared.js';
@@ -12,86 +18,108 @@ import { GraphBuilder, type Template } from './shared.js';
 export const CANYON_LANES: Template = {
   id: 'canyon-lanes',
   name: 'Canyon lanes',
-  tagline: 'Plateaus split by deep channels',
+  tagline: 'Flat mesas split by deep channels',
   description:
-    'Flat-topped plateaus cut apart by dry canyons. Build on top, move fast in the channels, and ' +
-    'fight over the ramps between them.',
+    'Flat-topped plateaus cut apart by dry canyons. Build on top, move fast along the channels, and ' +
+    'fight over the handful of ramps that join the two. The walls stop tanks almost everywhere, and ' +
+    'the tallest of them stop bots as well.',
   sizeX: 20,
   sizeZ: 16,
   symmetry: 'rotate180',
   palette: 'arid-desert',
-  minPlayers: 4,
+  minPlayers: 6,
   maxPlayers: 16,
   tags: ['land', 'chokepoints', 'lanes'],
   build() {
     const g = new GraphBuilder();
 
+    // A broad, simple base. Everything the map does to it afterwards depends on
+    // its gradient being gentle: the terrace risers below get their width from
+    // this slope, so a rough base would give ragged benches.
     g.node('mesa', 'generator.noise', {
       fractal: 'fbm',
-      featureSize: 6000,
-      amplitude: 300,
+      featureSize: 5200,
+      amplitude: 520,
       octaves: 3,
-      gain: 0.4,
-      warpAmount: 800,
-      warpSize: 7000,
+      gain: 0.42,
+      warpAmount: 1100,
+      warpSize: 6000,
     }, 40, 140);
 
-    // Five benches across the height range. High sharpness is what makes them
-    // plateaus rather than a staircase of gentle slopes.
-    g.node('terrace', 'filter.terrace', { steps: 5, sharpness: 0.88 }, 260, 140);
+    // Four benches across the height range. The sharpness is what makes them
+    // plateaus rather than a staircase of gentle slopes: at 0.93 the riser is
+    // squeezed into the last few percent of each step, so it comes out steeper
+    // than the 54 degrees that stops bots, while the bench itself is dead flat.
+    g.node('bench', 'filter.terrace', {
+      steps: 4,
+      sharpness: 0.95,
+      useRange: true,
+      low: -260,
+      high: 260,
+    }, 280, 140);
 
-    // Ridged noise inverted becomes a network of channels. Its ridge lines are
-    // continuous, which is exactly what a canyon system needs and what random
-    // low spots would not give.
+    // Ridged noise turned upside down becomes a network of channels. Its ridge
+    // lines are continuous, which is exactly what a canyon system needs and
+    // what a field of random low spots would not give.
     g.node('channels', 'generator.noise', {
       fractal: 'ridged',
-      featureSize: 3200,
-      amplitude: 230,
-      octaves: 3,
-      sharpness: 1.5,
+      featureSize: 2800,
+      amplitude: 620,
+      octaves: 2,
+      gain: 0.4,
+      sharpness: 3,
       warpAmount: 900,
       warpSize: 4200,
       seed: 23,
-    }, 40, 340);
-    g.node('invert', 'utility.math', { operation: 'negate', operand: 1 }, 260, 340);
+    }, 40, 360);
+    g.node('invert', 'utility.math', { operation: 'negate', operand: 1 }, 280, 360);
 
-    g.node('cut', 'combiner.combine', { mode: 'add', factor: 0.9 }, 480, 220);
+    g.node('cut', 'combiner.combine', { mode: 'add', factor: 1 }, 520, 240);
 
-    // A short slumping pass so the canyon walls are climbable somewhere. With
-    // none at all the channels become walls no bot can leave.
-    g.node('slump', 'natural.thermal', { angle: 50, amount: 0.5 }, 680, 220);
+    // The canyon floor. Everything below this height flattens onto one level,
+    // which joins the separate gullies into a road network a vehicle can
+    // actually drive along instead of a set of dead-end V-shaped ditches.
+    g.node('floor', 'filter.clamp', { min: -300, max: 4000, softness: 0 }, 720, 240);
 
+    // Wind-blown grit. Twenty elmos at this scale is about six elmos of rise
+    // across a 96-elmo factory footprint, so it breaks up the benches visually
+    // and still leaves them inside the +/-10.7 elmos a lab needs.
     g.node('grit', 'generator.noise', {
       fractal: 'fbm',
       featureSize: 700,
-      amplitude: 16,
+      amplitude: 22,
       octaves: 3,
-      warpAmount: 240,
+      warpAmount: 220,
       warpSize: 1200,
       seed: 41,
-    }, 480, 420);
-    g.node('add', 'combiner.combine', { mode: 'add', factor: 1 }, 880, 300);
+    }, 720, 440);
+    g.node('rough', 'combiner.combine', { mode: 'add', factor: 1 }, 920, 300);
 
-    g.node('range', 'filter.remap', { mode: 'auto', outLow: 0, outHigh: 420 }, 1080, 300);
-    // Dry: the canyons are the low ground, and flooding them would remove the
-    // fast movement the map is built around.
-    g.node('sea', 'filter.seaLevel', { mode: 'coverage', coverage: 0.0 }, 1270, 300);
+    // Slumping does two jobs here. It piles scree at the foot of every wall,
+    // and where the base was nearly level the riser was gentle to begin with —
+    // those places become the ramps. Without any slumping the channels are a
+    // pit nothing can leave.
+    g.node('slump', 'natural.thermal', { angle: 60, amount: 0.8 }, 1120, 240);
+
+    // Dry. Flooding the channels would remove the fast movement the whole map
+    // is built around.
+    g.node('sea', 'filter.seaLevel', { mode: 'coverage', coverage: 0 }, 1320, 240);
     g.node('out', 'output.height', {
       autoRange: false,
       minHeight: -40,
-      maxHeight: 440,
-    }, 1460, 300);
+      maxHeight: 520,
+    }, 1520, 240);
 
     return g
-      .link('mesa', 'terrace')
+      .link('mesa', 'bench')
       .link('channels', 'invert:in')
-      .link('terrace', 'cut:a')
+      .link('bench', 'cut:a')
       .link('invert', 'cut:b')
-      .link('cut', 'slump')
-      .link('slump', 'add:a')
-      .link('grit', 'add:b')
-      .link('add', 'range')
-      .link('range', 'sea')
+      .link('cut', 'floor')
+      .link('floor', 'rough:a')
+      .link('grit', 'rough:b')
+      .link('rough', 'slump')
+      .link('slump', 'sea')
       .link('sea', 'out')
       .done();
   },

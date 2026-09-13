@@ -107,10 +107,14 @@ A flat value everywhere. A sea floor, a base plate, or a fixed mask.
 
 ## Filters
 
-Operations that reshape an existing terrain. **Every filter takes an optional Mask input**: where the mask
-is 1 the effect applies fully, where it is 0 the input passes through untouched. That is why masking works
-uniformly across the whole tool instead of being a per-node afterthought — and why any selector can drive
-any filter.
+Operations that reshape an existing terrain. **Every filter that changes heights in place takes an
+optional Mask input**: where the mask is 1 the effect applies fully, where it is 0 the input passes
+through untouched. That is why masking works uniformly across the whole tool instead of being a per-node
+afterthought — and why any selector can drive any filter.
+
+The two exceptions are **Transform** and **Sea level**, which move or shift the entire terrain rather than
+modifying it point by point, so there is nothing for a partial mask to blend between. Each node's Inputs
+line below is authoritative; if it does not list `mask`, the node does not have one.
 
 ### Smooth
 `filter.smooth`
@@ -315,8 +319,8 @@ standard way to give different parts of a map different character.
 Uses A below a height and B above it. A quick way to give lowlands and highlands different treatment
 without building a mask by hand.
 
-- **Inputs:** `a` (field, "Low"), `b` (field, "High"), `reference` (field, optional — which terrain decides
-  the height; defaults to Low).
+- **Inputs:** `a` (field, "Low"), `b` (field, "High"), `reference` (field, "Measured from", optional —
+  which terrain decides the height; defaults to Low).
 - **Outputs:** `out` (field); `mask` (field) — the split itself, reusable elsewhere.
 
 | Parameter | Type | Range | Default |
@@ -349,12 +353,18 @@ The BAR thresholds worth knowing, and the reason this node exists:
 | **54°** | All bots, commanders, amphibians, amphibious vehicles and hover-amphibians. |
 | above 54° | Spiders, Vanguard/Karganeth, Korgoth and T4 all-terrain only. |
 
-Leaving *To* at its default of 27 selects exactly the ground BAR vehicles can drive on.
+Leaving *To* at its default of 27 selects the ground BAR vehicles can drive on. Note which side the
+softness falls on: the band itself is fully selected and *Edge softness* feathers **outside** it, so the
+default 4 degrees means everything up to 27 is a full 1 and the mask fades to 0 by 31. Set softness to 0
+when you want the mask to mean "vehicles can cross here" exactly and nothing beyond it.
 
-One caveat when you are using this node to reason about pathing rather than to drive an effect: the engine
-evaluates slope over 16x16-elmo cells, blending the steepest of the eight triangles in the cell with their
-average so that isolated spikes do not block units. This node measures per-sample slope by central
-difference, which is close but not identical. When you need the engine's own answer — "is this pocket
+One caveat when you are using this node to reason about pathing rather than to drive an effect: this node
+measures per-sample slope by central difference, and the engine does something else. The engine evaluates
+slope over 16x16-elmo cells and blends the steepest of the eight triangles in the cell toward their
+average, weighted so that the steeper that triangle is the less the average pulls it back. The practical
+consequence runs the opposite way to the folklore: a single heightmap corner 20 elmos above flat ground
+makes the engine read that cell as 66 degrees, where a central difference reads far less. So this node
+reads **flatter** than the engine on rough ground. When you need the engine's own answer — "is this pocket
 actually unreachable" — use the validator, which reconstructs the engine's slope map exactly.
 
 - **Inputs:** `terrain` (field).

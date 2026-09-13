@@ -122,6 +122,7 @@ function normalizeParam(def: ParamDef, raw: unknown): unknown {
       return allowed.includes(String(raw)) ? String(raw) : def.default;
     }
     case 'string':
+    case 'image':
       return String(raw);
     case 'vec2':
       return Array.isArray(raw) && raw.length === 2 && raw.every((n) => typeof n === 'number')

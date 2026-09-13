@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 
 import { createField, fieldRange, filledField, type ColorField, type Field } from '../src/field.js';
+import { mapField } from '../src/ops.js';
 import {
   ALPINE_SNOW,
   ARID_DESERT,
@@ -8,6 +9,7 @@ import {
   MARS_RED,
   PALETTE_PRESETS,
   PALETTE_REFERENCE_HEIGHTS,
+  SPLAT_CHANNELS,
   TEMPERATE,
   TERRAIN_GRADIENT,
   enforceSlopeBands,
@@ -21,6 +23,9 @@ import {
   type Rgb,
 } from '../src/materials.js';
 import {
+  DEFAULT_CHANNEL_AREA,
+  DEFAULT_CURVATURE_SCALE,
+  DEFAULT_OCCLUSION_STRENGTH,
   addTextureNoise,
   channelsUsedBy,
   colorizeByHeight,
@@ -714,29 +719,93 @@ describe('palettes', () => {
 });
 
 describe('rescalePaletteHeights', () => {
-  it('moves height bands onto the terrain and leaves slope alone', () => {
+  it('scales each side of the water line by its own span, and leaves slope alone', () => {
     const target = { min: -40, max: 180 };
     const scaled = rescalePaletteHeights(ALPINE_SNOW, target);
     const ref = PALETTE_REFERENCE_HEIGHTS;
-    const factor = (target.max - target.min) / (ref.max - ref.min);
+    const below = -target.min / -ref.min;
+    const above = target.max / ref.max;
+    expect(below).not.toBeCloseTo(above, 2); // otherwise the test proves nothing
 
     for (let i = 0; i < ALPINE_SNOW.length; i++) {
       const before = ALPINE_SNOW[i].rule;
       const after = scaled[i].rule;
       expect(after.slope).toEqual(before.slope);
-      if (before.height?.min !== undefined) {
-        const expected = target.min + (before.height.min - ref.min) * factor;
-        expect(after.height?.min).toBeCloseTo(expected, 6);
-      }
-      if (before.height?.blend !== undefined) {
-        expect(after.height?.blend).toBeCloseTo(before.height.blend * factor, 6);
+      for (const edge of ['min', 'max'] as const) {
+        const value = before.height?.[edge];
+        if (value === undefined) continue;
+        expect(after.height?.[edge], `${ALPINE_SNOW[i].material.id}.${edge}`).toBeCloseTo(
+          value * (value < 0 ? below : above),
+          6,
+        );
       }
     }
-    // The water line at 0 elmos stays at 0 elmos.
-    expect(scaled[0].rule.height?.max).toBeCloseTo(
-      target.min + (0 - ref.min) * factor,
-      6,
-    );
+  });
+
+  it('pins the water line at zero on a range a real template produces', () => {
+    // The bug: one linear fit through -200..450 lands the reference frame's
+    // water line at +50 elmos, so the seabed material paints the first 50
+    // elmos of dry land and the beach draws a contour partway up the hillside.
+    // Every shipped palette leads with a below-water band, so every shipped
+    // palette had a shoreline in the wrong place.
+    for (const preset of PALETTE_PRESETS) {
+      const scaled = rescalePaletteHeights(preset.palette, { min: -200, max: 450 });
+      for (let i = 0; i < preset.palette.length; i++) {
+        const before = preset.palette[i].rule.height;
+        const after = scaled[i].rule.height;
+        const label = `${preset.id}/${preset.palette[i].material.id}`;
+        // A band edge never crosses the water line, whichever way it is scaled.
+        if (before?.max !== undefined) {
+          expect(Math.sign(after?.max ?? 0), `${label} max`).toBe(Math.sign(before.max));
+        }
+        if (before?.min !== undefined) {
+          expect(Math.sign(after?.min ?? 0), `${label} min`).toBe(Math.sign(before.min));
+        }
+      }
+    }
+  });
+
+  it('feathers each edge on the scale of its own side of the water', () => {
+    // A shore band straddles the water line. Its lower edge belongs to the
+    // depth zones and its upper edge to the beach, and on a map with deep water
+    // and low hills those two scales differ by a factor of several.
+    const straddling: MaterialPalette = [
+      {
+        material: { id: 'shore', label: 'Shore', color: [0.5, 0.5, 0.5] },
+        rule: { height: { min: -20, max: 20, blend: 10, blendMin: 40, blendMax: 4 } },
+      },
+    ];
+    const scaled = rescalePaletteHeights(straddling, { min: -240, max: 100 });
+    const below = 240 / 120; // 2
+    const above = 100 / 400; // 0.25
+    const band = scaled[0].rule.height;
+    expect(band?.min).toBeCloseTo(-40, 6);
+    expect(band?.max).toBeCloseTo(5, 6);
+    expect(band?.blendMin).toBeCloseTo(40 * below, 6);
+    expect(band?.blendMax).toBeCloseTo(Math.max(4 * above, 4), 6); // floored, not 1 elmo
+    expect(band?.blend).toBeCloseTo(10 * ((below + above) / 2), 6);
+  });
+
+  it('keeps a feather wide enough to stay a feather on a map with a puddle', () => {
+    // Two elmos of water would otherwise squeeze a 20-elmo shoreline blend to
+    // 0.3 elmos, which is a hard cut: a contour line drawn round the water.
+    const scaled = rescalePaletteHeights(TEMPERATE, { min: -2, max: 300 });
+    for (const layer of scaled) {
+      const blend = layer.rule.height?.blend;
+      if (blend === undefined) continue;
+      expect(blend).toBeGreaterThan(3);
+    }
+  });
+
+  it('borrows the other side\'s scale for a map with no water at all', () => {
+    // Otherwise every below-water band collapses onto zero and a rule that dips
+    // just under the shoreline turns into a step.
+    const scaled = rescalePaletteHeights(TEMPERATE, { min: 0, max: 400 });
+    for (let i = 0; i < TEMPERATE.length; i++) {
+      const before = TEMPERATE[i].rule.height;
+      if (before?.min === undefined) continue;
+      expect(scaled[i].rule.height?.min).toBeCloseTo(before.min, 6);
+    }
   });
 
   it('brings a band back into reach on a low-relief map', () => {
@@ -1073,5 +1142,358 @@ describe('enforceSlopeBands colours', () => {
     const mid = banded[banded.length - 2].material.color;
     const steep = banded[banded.length - 1].material.color;
     expect(colorDistance(mid, steep)).toBeGreaterThan(0.3);
+  });
+});
+
+describe('band feathers', () => {
+  it('gives each edge its own feather when the band asks for one', () => {
+    // Meadow runs from a shoreline to a tree line: the lower edge is metres of
+    // blend and the upper is hundreds. One `blend` cannot be both.
+    const band = { min: 0, max: 100, blend: 10, blendMin: 4, blendMax: 80 };
+    expect(evaluateBand(0, band)).toBeCloseTo(0.5, 6);
+    expect(evaluateBand(2.1, band)).toBeGreaterThan(0.99); // 4-wide lower edge
+    expect(evaluateBand(100, band)).toBeCloseTo(0.5, 6);
+    expect(evaluateBand(80, band)).toBeLessThan(0.95); // 80-wide upper edge
+    expect(evaluateBand(80, band)).toBeGreaterThan(0.6);
+  });
+
+  it('falls back to the shared blend for an edge that names none', () => {
+    const shared = { min: 0, max: 100, blend: 20 };
+    const half = { min: 0, max: 100, blend: 20, blendMax: 4 };
+    expect(evaluateBand(5, half)).toBeCloseTo(evaluateBand(5, shared), 6);
+    expect(evaluateBand(99, half)).toBeGreaterThan(evaluateBand(99, shared));
+  });
+});
+
+describe('accent caps', () => {
+  const base: MaterialPalette = [
+    { material: { id: 'ground', label: 'Ground', color: [0.3, 0.3, 0.3] }, rule: { weight: 1 } },
+  ];
+  const accentRule = { weight: 4, flow: undefined } as const;
+
+  function withAccent(cap?: number): MaterialPalette {
+    return [
+      ...base,
+      {
+        material: { id: 'accent', label: 'Accent', color: [0.9, 0.9, 0.9] },
+        rule: cap === undefined ? { weight: accentRule.weight } : { weight: accentRule.weight, cap },
+      },
+    ];
+  }
+
+  const height = filledField(4, 4, 50);
+
+  function accentShare(palette: MaterialPalette): number {
+    const w = evaluateMaterialWeights({ height }, palette, { cellSize: 8, layerPriority: 0 });
+    return w[1].data[0] / (w[0].data[0] + w[1].data[0]);
+  }
+
+  it('lets an uncapped accent take the whole texel', () => {
+    expect(accentShare(withAccent())).toBeCloseTo(0.8, 6);
+  });
+
+  it('holds a capped accent to its share of the mix', () => {
+    expect(accentShare(withAccent(0.5))).toBeCloseTo(0.5, 6);
+    expect(accentShare(withAccent(0.25))).toBeCloseTo(0.25, 6);
+  });
+
+  it('shares the space rather than stacking when two accents overlap', () => {
+    // Each is capped at 0.4; together they must not add up to 0.8 of the texel
+    // and leave the ground at a fifth of it.
+    const two: MaterialPalette = [
+      ...base,
+      { material: { id: 'a', label: 'A', color: [0.9, 0.9, 0.9] }, rule: { weight: 4, cap: 0.4 } },
+      { material: { id: 'b', label: 'B', color: [0.9, 0.9, 0.9] }, rule: { weight: 4, cap: 0.4 } },
+    ];
+    const w = evaluateMaterialWeights({ height }, two, { cellSize: 8, layerPriority: 0 });
+    const total = w[0].data[0] + w[1].data[0] + w[2].data[0];
+    expect((w[1].data[0] + w[2].data[0]) / total).toBeLessThan(0.75);
+    expect(w[0].data[0] / total).toBeGreaterThan(0.25);
+  });
+
+  it('leaves a lone accent alone rather than punching a hole', () => {
+    // Nothing uncapped applies here, so capping would zero the only material
+    // that does and drop the texel through to the fallback colour.
+    const lonely: MaterialPalette = [
+      {
+        material: { id: 'high', label: 'High', color: [0.3, 0.3, 0.3] },
+        rule: { height: { min: 5000 } },
+      },
+      {
+        material: { id: 'accent', label: 'Accent', color: [0.9, 0.9, 0.9] },
+        rule: { weight: 2, cap: 0.4 },
+      },
+    ];
+    const w = evaluateMaterialWeights({ height }, lonely, { cellSize: 8 });
+    expect(w[0].data[0]).toBe(0);
+    expect(w[1].data[0]).toBeGreaterThan(0);
+  });
+
+  it('caps the splat weights the same way it caps the diffuse', () => {
+    // Diffuse and splat must agree, or the detail normals blend along different
+    // boundaries from the colour.
+    const palette: MaterialPalette = [
+      {
+        material: { id: 'g', label: 'G', color: [0.3, 0.3, 0.3], splatChannel: SPLAT_CHANNELS.ground },
+        rule: { weight: 1 },
+      },
+      {
+        material: { id: 'a', label: 'A', color: [0.9, 0.9, 0.9], splatChannel: SPLAT_CHANNELS.accent },
+        rule: { weight: 4, cap: 0.5 },
+      },
+    ];
+    const splat = generateSplatWeights({ height }, palette, { cellSize: 8, layerPriority: 0 });
+    expect(splat.data[3]).toBeCloseTo(0.5, 6);
+  });
+});
+
+describe('the flow mask picks out channels, not hillsides', () => {
+  /** Fractal-ish terrain with real drainage: enough relief to cut channels. */
+  function catchment(n: number, cellSize: number): Field {
+    const f = createField(n, n);
+    for (let y = 0; y < n; y++) {
+      for (let x = 0; x < n; x++) {
+        const u = (x / (n - 1)) * Math.PI * 2;
+        const v = (y / (n - 1)) * Math.PI * 2;
+        f.data[y * n + x] =
+          180 * Math.sin(u * 0.5) * Math.cos(v * 0.5) +
+          40 * Math.sin(u * 2.3 + 1.1) * Math.sin(v * 1.9) +
+          12 * Math.cos(u * 5.1) * Math.cos(v * 4.7) -
+          (y / (n - 1)) * 60;
+      }
+    }
+    return f;
+  }
+
+  it('leaves most of the map at zero', () => {
+    // The bug this catches: normalising log(drainage area) against the field
+    // maximum puts a hillside cell with five cells above it at 0.4 of the
+    // range, so more than half the map reads as "channel" and every flow-keyed
+    // accent crazes the surface with a web of pale lines.
+    const cellSize = 16;
+    const { flow } = resolveTextureInputs(
+      { height: catchment(128, cellSize) },
+      { cellSize, need: new Set(['flow'] as const) },
+    );
+    let wet = 0;
+    let channel = 0;
+    for (const v of flow.data) {
+      if (v > 0.02) wet++;
+      if (v > 0.5) channel++;
+    }
+    const n = flow.data.length;
+    expect(wet / n, 'texels with any flow at all').toBeLessThan(0.3);
+    expect(channel / n, 'texels reading as a channel').toBeLessThan(0.1);
+    expect(channel, 'but there has to be a channel network').toBeGreaterThan(0);
+  });
+
+  it('moves the whole network when the channel threshold moves', () => {
+    const cellSize = 16;
+    const terrain = catchment(128, cellSize);
+    const wetness = (channelArea: number): number => {
+      const { flow } = resolveTextureInputs(
+        { height: terrain },
+        { cellSize, channelArea, need: new Set(['flow'] as const) },
+      );
+      let sum = 0;
+      for (const v of flow.data) sum += v;
+      return sum;
+    };
+    expect(wetness(DEFAULT_CHANNEL_AREA / 10)).toBeGreaterThan(wetness(DEFAULT_CHANNEL_AREA));
+  });
+});
+
+describe('derived masks stay usable as gradients', () => {
+  // Gentle and almost entirely dry: the case these proxies have to stay useful
+  // on, since a steep or drowned map pins several of them at an end by itself.
+  const terrain = mapField(hillField(48, 48, 60), (v) => v + 90);
+
+  function quantiles(f: Field): { p10: number; p50: number; p90: number } {
+    const a = Float64Array.from(f.data).sort();
+    const at = (q: number): number => a[Math.floor(q * (a.length - 1))];
+    return { p10: at(0.1), p50: at(0.5), p90: at(0.9) };
+  }
+
+  it('does not pin deposition at one across half the map', () => {
+    // Doubling the flat-and-concave product clipped it at 1 everywhere gentle,
+    // and a mask that is 1 everywhere gates nothing: every deposition influence
+    // in every palette quietly stopped doing anything.
+    const { deposition } = resolveTextureInputs(
+      { height: terrain },
+      { cellSize: 32, need: new Set(['deposition'] as const) },
+    );
+    const q = quantiles(deposition);
+    expect(q.p90).toBeLessThan(0.99);
+    expect(q.p50).toBeLessThan(0.8);
+    expect(q.p90).toBeGreaterThan(q.p10);
+  });
+
+  it('centres wetness so a rule can ask for wet or dry', () => {
+    const { wetness } = resolveTextureInputs(
+      { height: terrain },
+      { cellSize: 32, need: new Set(['wetness'] as const) },
+    );
+    const q = quantiles(wetness);
+    expect(q.p50).toBeGreaterThan(0.2);
+    expect(q.p50).toBeLessThan(0.8);
+  });
+
+  it('saturates curvature only in the tail', () => {
+    // Curvature is a second derivative, so a scale that saturates it turns the
+    // mask into a two-tone stencil at the grid's own frequency — which is what
+    // paints a fine web over the whole map.
+    const { curvature } = resolveTextureInputs(
+      { height: hillField(96, 96, 300) },
+      { cellSize: 16, need: new Set(['curvature'] as const) },
+    );
+    let clipped = 0;
+    for (const v of curvature.data) if (v <= 0.001 || v >= 0.999) clipped++;
+    expect(clipped / curvature.data.length).toBeLessThan(0.1);
+    expect(DEFAULT_CURVATURE_SCALE).toBeGreaterThan(0.01);
+  });
+});
+
+describe('palette legibility', () => {
+  /** Rough perceived lightness; good enough to compare two terrain colours. */
+  function luma(c: Rgb): number {
+    return 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+  }
+
+  it('keeps the sea bed light enough to read through water', () => {
+    // BAR draws water as a translucent blue layer over the texture, and baked
+    // occlusion darkens the same ground again. A sea bed authored near black
+    // reads in game as a hole in the map rather than as a floor.
+    for (const preset of PALETTE_PRESETS) {
+      for (const layer of preset.palette) {
+        if ((layer.rule.height?.max ?? 1) > 0) continue;
+        expect(luma(layer.material.color), `${preset.id}/${layer.material.id}`).toBeGreaterThan(0.18);
+      }
+    }
+  });
+
+  it('hands the ground over to an upland form at one shared elevation', () => {
+    // The ground's upper edge and the upland's lower edge are the same edge; a
+    // mismatch leaves a gap the fallback colour shows through.
+    for (const preset of PALETTE_PRESETS) {
+      const ground = preset.palette.find((l) => l.rule.height?.blendMax !== undefined);
+      const upland = preset.palette.find(
+        (l) => (l.rule.height?.min ?? -Infinity) > 150 && l.rule.height?.max === undefined,
+      );
+      expect(ground, preset.id).toBeDefined();
+      expect(upland, preset.id).toBeDefined();
+      expect(ground?.rule.height?.max, preset.id).toBe(upland?.rule.height?.min);
+      expect(ground?.rule.height?.blendMax, preset.id).toBe(upland?.rule.height?.blend);
+      // Wide enough to be a gradient rather than a contour line.
+      expect(upland?.rule.height?.blend ?? 0, preset.id).toBeGreaterThan(200);
+      // And the two have to be far enough apart in value to see.
+      const step = Math.abs(luma(upland!.material.color) - luma(ground!.material.color));
+      expect(step, `${preset.id} ground to upland`).toBeGreaterThan(0.05);
+    }
+  });
+
+  it('separates ground, slope rock and cliff on every palette', () => {
+    // The slope ladder is what a player reads the drivable ground from, and it
+    // has to be there before `enforceSlopeBands` adds anything.
+    for (const preset of PALETTE_PRESETS) {
+      const slopes = preset.palette
+        .filter((l) => (l.rule.slope?.min ?? 0) > 0)
+        .sort((a, b) => (a.rule.slope!.min ?? 0) - (b.rule.slope!.min ?? 0));
+      expect(slopes.length, preset.id).toBeGreaterThanOrEqual(2);
+      const cliff = slopes[slopes.length - 1];
+      const scree = slopes[0];
+      expect(colorDistance(cliff.material.color, scree.material.color), preset.id).toBeGreaterThan(0.1);
+    }
+  });
+
+  it('paints no flow accent out at sea', () => {
+    // Flow accumulation runs under water too, so an ungated accent draws silt
+    // channels across the open sea.
+    for (const preset of PALETTE_PRESETS) {
+      for (const layer of preset.palette) {
+        const gatedByWater =
+          layer.rule.flow !== undefined ||
+          (layer.rule.wetness !== undefined && (layer.rule.wetness.amount ?? 1) >= 1);
+        if (!gatedByWater) continue;
+        expect(layer.rule.height?.min, `${preset.id}/${layer.material.id}`).toBeDefined();
+        expect(layer.rule.cap, `${preset.id}/${layer.material.id}`).toBeLessThan(0.75);
+      }
+    }
+  });
+
+  it('produces a real spread of colour on real terrain, in every palette', () => {
+    const terrain = hillField(64, 64, 280);
+    for (const preset of PALETTE_PRESETS) {
+      const palette = rescalePaletteHeights(preset.palette, fieldRange(terrain));
+      const map = generateSatmap({ height: terrain }, palette, { cellSize: 8 });
+      let min = 1;
+      let max = 0;
+      for (let i = 0; i < map.data.length; i += 4) {
+        const l = luma([map.data[i], map.data[i + 1], map.data[i + 2]]);
+        if (l < min) min = l;
+        if (l > max) max = l;
+      }
+      // Nothing crushed to black, nothing blown out, and a real range between.
+      expect(min, `${preset.id} darkest`).toBeGreaterThan(0.04);
+      expect(max, `${preset.id} lightest`).toBeLessThan(0.95);
+      expect(max - min, `${preset.id} range`).toBeGreaterThan(0.2);
+    }
+  });
+});
+
+describe('slope bands stay terrain', () => {
+  it('leaves the palette showing through the bands it adds', () => {
+    // The two bands are appended at the highest priority, so uncapped they take
+    // the texel outright and a mountain loses its snow and scree to two flat
+    // greys — the checklist asks for distinguishable, not for a slope diagram.
+    const banded = enforceSlopeBands(ALPINE_SNOW);
+    const weights = evaluateMaterialWeights(
+      {
+        height: filledField(8, 8, 380),
+        slopeDegrees: filledField(8, 8, 40),
+      },
+      banded,
+      { cellSize: 8 },
+    );
+    let total = 0;
+    for (const w of weights) total += w.data[0];
+    const bandShare = weights[banded.length - 2].data[0] / total;
+    expect(bandShare).toBeGreaterThan(0.4); // still clearly the dominant colour
+    expect(bandShare).toBeLessThan(0.8); // but not the only one
+  });
+
+  it('caps both added bands', () => {
+    const banded = enforceSlopeBands(TEMPERATE);
+    for (const layer of banded.slice(TEMPERATE.length)) {
+      expect(layer.rule.cap, layer.material.id).toBeGreaterThan(0);
+      expect(layer.rule.cap, layer.material.id).toBeLessThan(1);
+    }
+  });
+});
+
+describe('baked occlusion strength', () => {
+  /** A plateau cut by a narrow gorge, which is the worst case for occlusion. */
+  function gorge(): Field {
+    const f = filledField(64, 64, 300);
+    for (let y = 0; y < 64; y++) for (let x = 30; x < 34; x++) f.data[y * 64 + x] = 0;
+    return f;
+  }
+
+  it('keeps a gorge floor well clear of black at the default strength', () => {
+    // 0.55 took a fully shut crevice down by more than a third, and the engine's
+    // own sun, shadow map and water layer then darken the same ground again.
+    const flat: MaterialPalette = [
+      { material: { id: 'g', label: 'G', color: [0.4, 0.4, 0.4] }, rule: {} },
+    ];
+    const terrain = gorge();
+    const map = generateSatmap({ height: terrain }, flat, {
+      cellSize: 8,
+      lighting: { hillshadeStrength: 0 },
+    });
+    const floor = texelRgb(map, 32, 32)[0];
+    const plateau = texelRgb(map, 2, 32)[0];
+    expect(floor).toBeLessThan(plateau); // the crevice still reads as deep
+    expect(floor / plateau).toBeGreaterThan(0.6); // but it is not a hole
+    expect(DEFAULT_OCCLUSION_STRENGTH).toBeLessThan(0.45);
+    expect(DEFAULT_OCCLUSION_STRENGTH).toBeGreaterThan(0.15);
   });
 });

@@ -28,6 +28,7 @@ import {
   createField,
   rasterizeShapes,
   ridgeFromSpline,
+  sampleBilinear,
   signedDistanceField,
   symmetryGroupOrder,
   symmetryRequiresSquare,
@@ -159,7 +160,12 @@ export function parseShapes(raw: unknown): LayoutShape[] {
       throw new Error(`shape ${i} has no points`);
     }
     const points = s.points.map((p, k) => {
-      if (typeof p !== 'object' || p === null || typeof p.x !== 'number' || typeof p.y !== 'number') {
+      // Finite, not merely numeric. A NaN coordinate is not caught anywhere
+      // downstream: it poisons the shape's bounding box, so the rasteriser
+      // quietly draws a different shape from the one that was asked for instead
+      // of failing. It does not even survive a save — `JSON.stringify` writes
+      // NaN and Infinity as `null`.
+      if (typeof p !== 'object' || p === null || !Number.isFinite(p.x) || !Number.isFinite(p.y)) {
         throw new Error(`shape ${i} point ${k} is not a pair of numbers in elmos`);
       }
       return { x: p.x, y: p.y };
@@ -169,15 +175,33 @@ export function parseShapes(raw: unknown): LayoutShape[] {
       kind,
       points,
       closed: s.closed,
-      value: typeof s.value === 'number' ? s.value : undefined,
-      width: typeof s.width === 'number' ? s.width : undefined,
-      falloff: typeof s.falloff === 'number' ? s.falloff : undefined,
+      value: finiteOrUndefined(s.value, i, 'height'),
+      width: finiteOrUndefined(s.width, i, 'width'),
+      falloff: finiteOrUndefined(s.falloff, i, 'soft edge'),
       // Kept as `false` rather than folded into undefined: undefined means
       // "whatever the consuming node defaults to", and a shape an author
       // explicitly straightened must not quietly curve again.
       smooth: typeof s.smooth === 'boolean' ? s.smooth : undefined,
     };
   });
+}
+
+/**
+ * One of a shape's optional scalars, or `undefined` when it is absent.
+ *
+ * Absent means "let the consuming node decide", which is a legitimate answer;
+ * present but not a finite number is a broken layout, and saying which field of
+ * which shape is broken is the difference between a fixable file and a mystery.
+ */
+function finiteOrUndefined(v: unknown, shapeIndex: number, field: string): number | undefined {
+  if (v === undefined || v === null) return undefined;
+  if (typeof v !== 'number' || !Number.isFinite(v)) {
+    // Printed with String for a number, because `JSON.stringify(NaN)` is the
+    // text "null" and an error that names the wrong value is worse than none.
+    const shown = typeof v === 'number' ? String(v) : JSON.stringify(v);
+    throw new Error(`shape ${shapeIndex} has a ${field} of ${shown}; expected a number of elmos`);
+  }
+  return v;
 }
 
 /** Serialise a layout to the JSON text the `layout.shapes` parameter holds. */
@@ -326,8 +350,12 @@ function defaultLayout(): LayoutShape[] {
       { x: x - 384, y: y + 384 },
     ],
     closed: true,
-    value: 60,
-    falloff: 192,
+    // No height of its own on purpose: a pad with no height levels to the
+    // ground it covers, so it is flat and buildable without picking a fight
+    // with whatever terrain it lands on. A pad pinned to an absolute height
+    // has to climb or drop to reach it, and that edge is what turns into a rim
+    // too steep for a vehicle.
+    falloff: 384,
   });
   return [
     pad('base-northwest', 1700, 1700),
@@ -340,20 +368,24 @@ function defaultLayout(): LayoutShape[] {
         { x: 4096, y: 4096 },
         { x: 1392, y: 6800 },
       ],
-      value: 320,
-      width: 900,
+      // No height and no width of its own, for the same reason: a stock shape
+      // that carries them makes the Ridge node's own Height and Width controls
+      // do nothing at all on the layout everybody starts from, which reads as a
+      // broken slider rather than as a shape overriding a default.
       smooth: true,
     },
     {
+      // Every point is the 180-degree partner of the one opposite it about the
+      // middle of the map, to the elmo. A river that is a few elmos out of true
+      // is the kind of asymmetry nobody spots and everybody loses to.
       id: 'river-main',
       kind: 'polyline',
       points: [
         { x: 200, y: 4600 },
         { x: 2400, y: 4900 },
-        { x: 5800, y: 3300 },
+        { x: 5792, y: 3292 },
         { x: 7992, y: 3592 },
       ],
-      width: 160,
       smooth: true,
     },
   ];
@@ -383,12 +415,15 @@ export const layoutShapesNode: NodeDefinition<ShapesParams> = {
     'you change the build resolution.',
   keywords: ['shapes', 'layout', 'draw', 'vector', 'polygon', 'path', 'spline', 'sketch'],
   inputs: [
-    shapesIn(
-      'add',
-      'Add to',
-      'Optional. Shapes from another layout, kept ahead of this one, so where they overlap this ' +
-        'node’s own shapes are the ones that win.',
-    ),
+    {
+      ...shapesIn(
+        'add',
+        'Add to',
+        'Optional. Shapes from another layout, kept ahead of this one, so where they overlap this ' +
+          'node’s own shapes are the ones that win.',
+      ),
+      optional: true,
+    },
   ],
   outputs: [shapesOut()],
   params: [
@@ -629,7 +664,13 @@ export const layoutFlattenNode: NodeDefinition<FlattenParams> = {
       'smoothSet',
       [
         { value: 'smoothSet', label: 'Level', description: 'Replaces the terrain, easing in at the edge. The usual choice.' },
-        { value: 'set', label: 'Level (linear edge)', description: 'Replaces the terrain with a straight-line transition.' },
+        {
+          value: 'set',
+          label: 'Level (linear edge)',
+          description:
+            'Replaces the terrain with a straight-line transition. For the same soft edge its steepest ' +
+            'point is about half as steep, at the cost of a visible crease where it meets flat ground.',
+        },
         { value: 'max', label: 'Raise only', description: 'Only lifts ground that is below the height; leaves anything higher alone.' },
         { value: 'min', label: 'Lower only', description: 'Only cuts ground that is above the height. Good for carving a basin.' },
         { value: 'add', label: 'Add', description: 'Adds the height on top of what is there instead of replacing it.' },
@@ -646,13 +687,25 @@ export const layoutFlattenNode: NodeDefinition<FlattenParams> = {
       step: 0.05,
       description: 'How much of the way to the flattened height the terrain moves. 1 is fully flat.',
     }),
-    elmos('falloff', 'Soft edge', 256, {
+    // The figure in the help is the real one, not the average grade. The band
+    // is a ramp, and its steepest point is in the middle: the coverage falloff
+    // is a Hermite smoothstep (peak slope 1.5x the average) and the default
+    // `smoothSet` blend puts Perlin's quintic on top of it (another 1.875x), so
+    // the worst grade across a band of width `f` bridging a step `H` is
+    // 2.8125·H/f. Under 27 degrees (tan 0.5095) that needs f >= 5.52·H. Quoting
+    // the average instead would tell an author 400 elmos is enough for a
+    // 200-elmo step, and the real edge there measures 54.5 degrees — a cliff
+    // that stops bots, not just tanks.
+    elmos('falloff', 'Soft edge', 384, {
       min: 0,
       max: 8192,
-      softMax: 1024,
+      softMax: 2048,
       description:
         'Width of the slope that blends the flattened area back into the terrain around it. Too narrow ' +
-        'and the edge becomes a cliff no vehicle can climb.',
+        'and the edge becomes a cliff no vehicle can climb: to stay under the 27 degrees that stops ' +
+        'tanks, this has to be about five and a half times the height it is bridging, so a 200-elmo ' +
+        'step wants roughly 1100 elmos. At 400 that same step is already past 54 degrees, which stops ' +
+        'bots as well.',
     }),
     elmos('lineWidth', 'Line width', 128, {
       min: 0,
@@ -780,8 +833,10 @@ export const layoutRiverNode: NodeDefinition<RiverParams> = {
     bool('reverse', 'Flow the other way', false, {
       description: 'Rivers run from the first point of a line to the last. This swaps the ends.',
     }),
-    bool('setMouthHeight', 'Set where it ends up', false, {
-      description: 'Forces the downstream end to a height you choose, instead of following the ground.',
+    bool('setMouthHeight', 'Run it down to a set height', false, {
+      description:
+        'Grades the bed evenly from the source down to a height you choose, instead of following the ' +
+        'ground. This is how you make a river actually reach the sea.',
     }),
     num('mouthHeight', 'Mouth height', 0, {
       unit: 'elmos',
@@ -790,7 +845,7 @@ export const layoutRiverNode: NodeDefinition<RiverParams> = {
       softMin: -200,
       softMax: 400,
       visibleWhen: (p) => Boolean(p.setMouthHeight),
-      description: 'Height of the bed at the downstream end. Water is at height 0, so 0 puts the mouth at the shoreline.',
+      description: 'Height of the bed where the river ends. Water is at height 0, so 0 puts the mouth at the shoreline.',
     }),
     bool('smooth', 'Curve the line', true, {
       tier: 'advanced',
@@ -811,6 +866,16 @@ export const layoutRiverNode: NodeDefinition<RiverParams> = {
       // point has no length to run along.
       if (isClosed(shape) || shape.points.length < 2) continue;
       const line: Vec2World[] = shape.points.map((p) => ({ x: p.x, z: p.y }));
+      // A mouth height on its own only pins the very last station, leaving the
+      // bed to follow the ground and then fall off a cliff into the sea in the
+      // final cell. Pinning the source as well turns it into an even grade over
+      // the whole run, which is the river someone asking for a mouth height
+      // meant. The source level is read off the terrain, so the river still
+      // starts where the ground is.
+      const source = params.reverse ? line[line.length - 1] : line[0];
+      const startHeight = params.setMouthHeight
+        ? sampleBilinear(out, source.x / cell, source.z / cell) - params.depth
+        : undefined;
       out = carveChannel(out, line, {
         cellSize: cell,
         width: shape.width ?? params.width,
@@ -819,14 +884,16 @@ export const layoutRiverNode: NodeDefinition<RiverParams> = {
         profile: params.profile,
         minSlope: params.fall / SLOPE_REFERENCE_ELMOS,
         reverse: params.reverse,
+        startHeight,
         endHeight: params.setMouthHeight ? params.mouthHeight : undefined,
         smooth: shape.smooth ?? params.smooth,
       });
     }
 
     const masked = applyMask(terrain, out, inputs.mask);
-    // Measured against the terrain that came in, not against the last pass, so
-    // two rivers crossing report one channel rather than cancelling.
+    // Measured against the terrain that came in rather than against each pass
+    // in turn, so where two rivers cross, the mask shows both channels instead
+    // of only the last one carved.
     const channel = createField(ctx.width, ctx.height);
     const scale = 1 / Math.max(1, params.depth);
     for (let i = 0; i < channel.data.length; i++) {
@@ -914,7 +981,7 @@ export const layoutRidgeNode: NodeDefinition<RidgeParams> = {
         'What fraction of the length fades out at each end. Without it the ridge stops dead and leaves ' +
         'a cliff across the end of the spine.',
     }),
-    elmos('crestNoise', 'Crest variation', 80, {
+    elmos('crestNoise', 'Crest variation', 100, {
       min: 0,
       max: 4000,
       softMax: 500,
@@ -933,7 +1000,7 @@ export const layoutRidgeNode: NodeDefinition<RidgeParams> = {
       tier: 'advanced',
       description: 'How much fine detail is layered onto the crest variation.',
     }),
-    elmos('breakup', 'Wobble the edges', 120, {
+    elmos('breakup', 'Wobble the edges', 180, {
       min: 0,
       max: 4000,
       softMax: 600,
@@ -954,7 +1021,13 @@ export const layoutRidgeNode: NodeDefinition<RidgeParams> = {
       'add',
       [
         { value: 'add', label: 'Add on top', description: 'The ridge rides over whatever relief is already there.' },
-        { value: 'max', label: 'Rise above', description: 'The height is absolute: the ridge shows only where it stands taller than the terrain.' },
+        {
+          value: 'max',
+          label: 'Rise above',
+          description:
+            'The height is absolute: the ridge shows only where it stands taller than the terrain, and ' +
+            'ground it does not reach is left exactly as it was.',
+        },
         { value: 'replace', label: 'Replace', description: 'Ignores the incoming terrain and outputs the ridge alone.' },
       ],
       { tier: 'advanced' },
@@ -965,7 +1038,12 @@ export const layoutRidgeNode: NodeDefinition<RidgeParams> = {
   evaluate({ inputs, params, ctx, seed }) {
     const shapes = inputShapes(inputs.shapes, params.only);
     const cell = cellSize(ctx);
-    const offset = createField(ctx.width, ctx.height);
+    // Filled by the first ridge rather than allocated up front. Core returns a
+    // whole field per shape, so on an 8192 build each one is a quarter of a
+    // gigabyte; the usual layout holds a single spine, and there is no reason
+    // for that case to allocate a second field and walk 67 million texels to
+    // merge a field into an empty one.
+    let offset: Field | null = null;
 
     for (const shape of shapes) {
       if (shape.points.length < 2) continue;
@@ -993,6 +1071,10 @@ export const layoutRidgeNode: NodeDefinition<RidgeParams> = {
         seed: (seed + params.seed) | 0,
         smooth: shape.smooth ?? true,
       });
+      if (!offset) {
+        offset = piece;
+        continue;
+      }
       // Tallest crest wins where two spines overlap, compared by magnitude so a
       // negative height (a trench) is not thrown away against the zero the
       // field starts at.
@@ -1000,6 +1082,7 @@ export const layoutRidgeNode: NodeDefinition<RidgeParams> = {
         if (Math.abs(piece.data[i]) > Math.abs(offset.data[i])) offset.data[i] = piece.data[i];
       }
     }
+    offset ??= createField(ctx.width, ctx.height);
 
     const terrain = inputs.terrain && typeof inputs.terrain === 'object' && 'data' in inputs.terrain
       ? (inputs.terrain as Field)
@@ -1010,8 +1093,19 @@ export const layoutRidgeNode: NodeDefinition<RidgeParams> = {
     for (let i = 0; i < combined.data.length; i++) {
       const h = terrain.data[i];
       const v = offset.data[i];
-      combined.data[i] =
-        params.combine === 'replace' ? v : params.combine === 'max' ? Math.max(h, v) : h + v;
+      if (params.combine === 'replace') {
+        combined.data[i] = v;
+      } else if (params.combine === 'max') {
+        // Only where the ridge actually reaches. The offset is exactly zero
+        // outside the foot, and zero is a real elevation in BAR — it is the
+        // water line — so a bare `Math.max(h, v)` over the whole field would
+        // lift every square of sea floor on the map up to the shoreline and
+        // drain it. A negative crest is a trench, so there the absolute height
+        // cuts down instead of standing up.
+        combined.data[i] = v === 0 ? h : v > 0 ? Math.max(h, v) : Math.min(h, v);
+      } else {
+        combined.data[i] = h + v;
+      }
     }
     return { out: applyMask(terrain, combined, inputs.mask), offset };
   },
@@ -1075,6 +1169,7 @@ interface RadialParams {
   size: number;
   startAngle: number;
   symmetry: SymmetryKind;
+  setHeight: boolean;
   value: number;
   falloff: number;
   centerX: number;
@@ -1100,7 +1195,10 @@ export const layoutRadialNode: NodeDefinition<RadialParams> = {
     'the map and made symmetric. The quick way to lay out start positions or a ring of plateaus.',
   keywords: ['radial', 'symmetry', 'start positions', 'spokes', 'ring', 'arrange', 'circle', 'layout'],
   inputs: [
-    shapesIn('add', 'Add to', 'Optional. Shapes from another layout, kept ahead of the generated ones.'),
+    {
+      ...shapesIn('add', 'Add to', 'Optional. Shapes from another layout, kept ahead of the generated ones.'),
+      optional: true,
+    },
   ],
   outputs: [shapesOut()],
   params: [
@@ -1149,7 +1247,10 @@ export const layoutRadialNode: NodeDefinition<RadialParams> = {
       min: 0,
       max: 360,
       step: 5,
-      description: 'Turns the whole arrangement. 0 puts the first feature due east; the angle runs clockwise on the map.',
+      description:
+        'Turns the whole arrangement. 0 puts the first feature due east; the angle runs clockwise on the ' +
+        'map. With a mirror symmetry the turn has to stay small: a feature that lands on the mirror line ' +
+        'is its own partner, so the pair would collapse into one spot.',
     }),
     choice(
       'symmetry',
@@ -1165,12 +1266,19 @@ export const layoutRadialNode: NodeDefinition<RadialParams> = {
       ],
       { description: 'Which balance the arrangement has to satisfy exactly.' },
     ),
-    num('value', 'Height', 0, {
+    bool('setHeight', 'Give them a height', false, {
+      description:
+        'Off, the shapes carry no height of their own: a pad flattens to the ground it covers instead of ' +
+        'climbing to a number, and a spoke takes the height from the node that draws it. Turn it on only ' +
+        'when the arrangement itself decides how high these features are.',
+    }),
+    num('value', 'Height', 200, {
       unit: 'elmos',
       min: -2000,
       max: 8000,
       softMin: 0,
       softMax: 1000,
+      visibleWhen: (p) => Boolean(p.setHeight),
       description: 'The height carried by each shape, for whatever node consumes the layout. Water is at height 0.',
     }),
     elmos('falloff', 'Soft edge', 192, {
@@ -1230,8 +1338,52 @@ export const layoutRadialNode: NodeDefinition<RadialParams> = {
       for (const t of transforms) centres.push(t.transformPoint(p.x, p.z));
     }
 
+    // Two features in the same place is not an arrangement: it is one feature
+    // and a player with nowhere to start. Both ways of producing it are one
+    // slider away — a rotation that lands the seeds on a mirror line, where a
+    // feature is its own partner and the pair collapses, and a distance from
+    // the centre of zero, which stacks the lot in the middle. Neither can be
+    // silently repaired (the count is what the author asked for and the mirror
+    // is what the map is), so the node says which slider did it. Within one
+    // heightmap square counts as the same place: closer than that and the build
+    // cannot tell the two features apart anyway.
+    const distinct = centres.filter(
+      (p, i) => !centres.some((q, k) => k < i && Math.hypot(p.x - q.x, p.z - q.z) < 8),
+    ).length;
+    if (distinct < centres.length) {
+      // Under half a heightmap square from the middle, every feature and its
+      // partner land in the same place whatever the symmetry, so the rotation
+      // is not what is wrong.
+      if (params.radius < 8) {
+        throw new Error(
+          `a distance from centre of ${params.radius} elmos stacks all ${centres.length} features in the ` +
+            'middle of the map; move them out from the centre, or ask for just one',
+        );
+      }
+      throw new Error(
+        `a rotation of ${params.startAngle}° puts features on the ${kind} mirror line, where a feature is ` +
+          `its own partner, so ${centres.length} of them come out in ${distinct} places; rotate by less ` +
+          `than ${(step / 2).toFixed(0)}° either way, or use a rotational symmetry, which any rotation suits`,
+      );
+    }
+
+    // `undefined`, not 0, when the arrangement carries no height of its own.
+    // Zero is not "no opinion" — it is the water line — so a shape stamped with
+    // it drags every pad down to sea level and leaves a rim around each one too
+    // steep for a vehicle, and it overrides the Ridge node's own Height with
+    // nothing at all.
+    const value = params.setHeight ? params.value : undefined;
+
     const shapes: LayoutShape[] = [];
     if (params.form === 'ring') {
+      // Two positions bound no area, and one bounds nothing at all; core would
+      // take either as a degenerate outline and stroke it as a line.
+      if (centres.length < 3) {
+        throw new Error(
+          `a ring needs at least 3 corners, but a count of ${params.count} under ${kind} symmetry ` +
+            `gives ${centres.length}; raise "How many" to 3 or more`,
+        );
+      }
       // One area whose corners are the positions. Sorted by angle so the ring
       // is a simple polygon: taking them in generation order would weave the
       // symmetric partners across the middle and produce a star that winds over
@@ -1244,7 +1396,7 @@ export const layoutRadialNode: NodeDefinition<RadialParams> = {
         kind: 'polygon',
         points: sorted.map((p) => ({ x: p.x, y: p.z })),
         closed: true,
-        value: params.value,
+        value,
         falloff: params.falloff,
       });
     } else {
@@ -1257,7 +1409,7 @@ export const layoutRadialNode: NodeDefinition<RadialParams> = {
           // wastes the corners it no longer covers.
           shapes.push(
             fromWorldShape(
-              buildPad(p, params.size, { id, value: params.value, falloff: params.falloff }),
+              buildPad(p, params.size, { id, value, falloff: params.falloff }),
             ),
           );
           return;
@@ -1267,7 +1419,7 @@ export const layoutRadialNode: NodeDefinition<RadialParams> = {
             id,
             kind: 'point',
             points: [{ x: p.x, y: p.z }],
-            value: params.value,
+            value,
             width: params.size,
             falloff: params.falloff,
           });
@@ -1283,7 +1435,7 @@ export const layoutRadialNode: NodeDefinition<RadialParams> = {
             { x: cx + (dx / len) * params.innerRadius, y: cz + (dz / len) * params.innerRadius },
             { x: p.x, y: p.z },
           ],
-          value: params.value,
+          value,
           falloff: params.falloff,
         });
       });

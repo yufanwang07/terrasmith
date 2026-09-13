@@ -29,10 +29,11 @@ document. The workflow, reconstructed from BAR's own guides and from the `pymapc
   1281 in Photoshop smears every cliff edge relative to the texture that is supposed to sit on it.
 - **You type the height range in by hand.** `pymapconv -n`/`-x` take the minimum and maximum height as
   numbers you guess. Guess wrong and the whole map is squashed or clipped, and you recompile.
-- **Six more images, at five resolutions, with three channel conventions.** Normals at `512N`, specular at
+- **Seven more images, at six resolutions, with three channel conventions.** Normals at `512N`, specular at
   `256N`, splat at a power of two, metalmap and typemap at `32N` as 8-bit *RGB* BMPs (greyscale silently
-  produces a broken map), grass at `16N`, features at `64N`. Every DDS has to be vertically flipped, by
-  drag-and-drop `.bat` file. None of them regenerate when you change the heightmap.
+  produces a broken map), grass at `16N`, features at `64N`. Every DDS has to be vertically flipped, which
+  on Windows means a drag-and-drop `.bat` and on Linux means running the ImageMagick scripts by hand. None
+  of them regenerate when you change the heightmap.
 - **The texture has to agree with the slope map, and nothing checks that it does.** BAR's map checklist
   asks for vehicle-flat ground, bot-only ground and all-terrain ground to be visually distinct. That is a
   correspondence between two files maintained by hand.
@@ -42,8 +43,11 @@ document. The workflow, reconstructed from BAR's own guides and from the `pymapc
 - **Then you hand-write ~200 lines of `mapinfo.lua`** — lighting, fog, water, `tidalStrength`, splat
   scales, team start positions — usually by copying another map's and tuning by trial and error, restarting
   the engine each time.
-- **And the failures are silent.** Pack the archive solid and the map is invisible with no error. Rename
-  anything after compiling and the map loads pink.
+- **And the failures do not stop you.** Rename the `.smt` after compiling without fixing the name recorded
+  inside the `.smf` and the engine does not error out: it logs one line and fills every tile with `0xaa`,
+  which is the famous pink map. Pack the archive solid and it still loads — just decompressed on one
+  thread — because the engine's own rejection path is dormant on current Recoil master; you find out when
+  BAR's CI refuses the archive and your pull request will not merge.
 
 The number that matters: **the realistic loop time for a one-pixel terrain change is 10 to 40 minutes.**
 That is the thing to beat, and it is why Terrasmith is one program that owns the whole chain rather than
@@ -94,7 +98,7 @@ and the percentage of the map that is drivable, impassable and underwater.
 
 - **[Making your first BAR map](docs/GUIDE.md)** — the guide to read if you play BAR and have never used a
   terrain tool. Map sizes for a given player count, where flat ground has to go, how metal spots work, why
-  71% of BAR maps are 180-degree rotational, and how to get a finished map into BAR's pool.
+  180-degree rotation is the symmetry to reach for, and how to get a finished map into BAR's pool.
 - **[Node reference](docs/NODES.md)** — every node, its ports and its parameters.
 - **[Architecture](docs/ARCHITECTURE.md)** — how the packages fit together and why.
 - **[Research](docs/research/)** — the engine-verified reference material the whole project is written
@@ -139,22 +143,26 @@ every layer runs in a browser tab, in a worker, in Node and in CI.
 
 Being concrete about this is more useful than a roadmap.
 
-- **The editor is not finished.** The viewport, toolbar, overlays and evaluation workers exist; the node
-  palette, inspector, guided-mode form and dialogs are under construction, so `npm run dev` is not yet a
-  usable application. The CLI path is the one that works end to end.
+- **The editor is young.** The viewport, toolbar, overlays, evaluation workers, node graph, palette,
+  inspector, guided-mode panel and the template/export/issues dialogs are all wired up in
+  `apps/studio/src/App.tsx`, but the editor has had far less exercise than the CLI, which is the path
+  covered end to end by tests.
 - **Everything runs on the CPU.** The WebGPU acceleration the architecture describes does not exist. A
   full-resolution erosion pass on a 24x24 map is minutes, not seconds.
-- **There are no gameplay, layout or texture nodes.** Metal spots, start positions, start boxes and
-  features are project data that the exporter reads; they are not yet nodes you can wire into a graph, and
-  nothing places them for you.
+- **The catalog is terrain-only.** The 37 registered node types shape heightfields and masks. Metal spots,
+  start positions, start boxes and features are project data the exporter reads, not something you wire
+  into a graph. Gameplay and layout node definitions are being written but are not in
+  `createDefaultRegistry` yet; `node packages/cli/dist/cli.js nodes` always prints the real list.
 - **No feature placement.** Trees, rocks and geothermal vents are in the project model and in the archive
   writer, but nothing generates or edits them.
 - **The automatic texturing is rough.** It produces a plausible diffuse from the terrain and the material
   palette, but the high-frequency detail reads as mottling rather than as ground at map scale. Look at
   `samples/renders/` and judge for yourself; this is the most visible thing still to fix.
-- **The advanced-shading texture set is generated but not packed.** The build produces the specular, splat
-  and detail-normal DDS files, and they are not yet added to the archive or referenced from the generated
-  `mapinfo.lua`, so exported maps use the basic shading path.
+- **The advanced-shading texture set is packed but barely tuned.** The build writes a specular map and
+  four tiling detail-normal textures into `maps/` and names them in the generated `mapinfo.lua`'s
+  `resources` block, so the engine takes its advanced shading path. But the splat-distribution map is only
+  written when a Splat output is connected, the map-sized detail normal map is off unless you ask for it,
+  and the `texMults` strengths are a first guess rather than the result of looking at a map in game.
 - **No importer.** You cannot open an existing `.sd7` and edit it, even though the format layer can read one.
 
 ## Contributing

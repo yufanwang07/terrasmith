@@ -77,6 +77,19 @@ export interface Band {
   readonly max?: number;
   /** Total feather width, in the same units as `min`/`max`. @default 0 */
   readonly blend?: number;
+  /**
+   * Feather for the lower edge alone, overriding `blend`.
+   *
+   * A band's two edges are often different kinds of boundary. Meadow runs from
+   * the beach to the treeline: the lower edge is a shoreline and wants a few
+   * metres of feather, while the upper edge is grass slowly giving way to
+   * fell field over a couple of hundred. One number cannot be both — set it
+   * wide and the grass washes down into the sea, set it narrow and the treeline
+   * becomes a contour line.
+   */
+  readonly blendMin?: number;
+  /** Feather for the upper edge alone, overriding `blend`. See {@link blendMin}. */
+  readonly blendMax?: number;
 }
 
 /**
@@ -196,10 +209,16 @@ function smoothstep(edge0: number, edge1: number, x: number): number {
  */
 export function evaluateBand(value: number, band: Band | undefined): number {
   if (band === undefined) return 1;
-  const half = Math.max(band.blend ?? 0, 0) * 0.5;
+  const blend = Math.max(band.blend ?? 0, 0);
   let w = 1;
-  if (band.min !== undefined) w = smoothstep(band.min - half, band.min + half, value);
-  if (w > 0 && band.max !== undefined) w *= 1 - smoothstep(band.max - half, band.max + half, value);
+  if (band.min !== undefined) {
+    const half = Math.max(band.blendMin ?? blend, 0) * 0.5;
+    w = smoothstep(band.min - half, band.min + half, value);
+  }
+  if (w > 0 && band.max !== undefined) {
+    const half = Math.max(band.blendMax ?? blend, 0) * 0.5;
+    w *= 1 - smoothstep(band.max - half, band.max + half, value);
+  }
   return w;
 }
 
@@ -324,6 +343,28 @@ export const GREYSCALE_GRADIENT: Gradient = [
  */
 export const PALETTE_REFERENCE_HEIGHTS = { min: -120, max: 400 } as const;
 
+/**
+ * Reference elevation at which the dominant ground hands over to its upland
+ * form, and the feather that handover is spread across.
+ *
+ * Both numbers are shared by every palette so the two layers always agree: the
+ * ground's upper edge and the upland's lower edge are the same edge, and a
+ * mismatch between them either leaves a gap the fallback colour shows through
+ * or double-counts a band.
+ *
+ * The feather is deliberately enormous — wider than the band it feathers. That
+ * is because it is doing the work of a hypsometric tint rather than drawing a
+ * treeline: rescaled onto a real map it runs from about a tenth of the peak
+ * height to about nine tenths, so ground colour gives way to upland colour
+ * smoothly across the whole of the terrain's relief. Generated heightfields are
+ * strongly bottom-heavy, so a crisp line anywhere high paints almost nothing,
+ * and one placed low cuts the map in half; a gradient is right at any
+ * hypsometry, and it is the only elevation cue a map too flat to produce slope
+ * contrast has.
+ */
+const UPLAND_CROSSOVER = 240;
+const UPLAND_FEATHER = 330;
+
 // Every shipped palette runs least-specific first: two depth zones, two
 // shoreline zones, the dominant ground, an upland variant of that ground, two
 // slope materials, and last the accents. Later entries outrank earlier ones, so
@@ -360,7 +401,7 @@ export const PALETTE_REFERENCE_HEIGHTS = { min: -120, max: 400 } as const;
  *
  * The meadow covers most of a temperate map on its own, so the pale dry upland
  * above it is doing most of the work of making the landforms visible; the
- * two are 15 points of lightness apart and share a hue, which reads as the same
+ * two are ten points of lightness apart and share a hue, which reads as the same
  * grass drying out with altitude rather than as a second biome.
  */
 export const TEMPERATE: MaterialPalette = [
@@ -419,7 +460,7 @@ export const TEMPERATE: MaterialPalette = [
     },
     rule: {
       weight: 1.25,
-      height: { min: 12, blend: 26 },
+      height: { min: 12, max: UPLAND_CROSSOVER, blend: 26, blendMax: UPLAND_FEATHER },
       slope: { max: 30, blend: 14 },
       wetness: { from: 0.15, to: 0.55, amount: 0.3 },
     },
@@ -428,12 +469,16 @@ export const TEMPERATE: MaterialPalette = [
     material: {
       id: 'temperate-highland',
       label: 'Dry upland grass',
-      color: [0.494, 0.478, 0.376],
+      color: [0.455, 0.443, 0.337],
       roughness: 0.78,
       splatChannel: SPLAT_CHANNELS.ground,
       detailScale: 66,
     },
-    rule: { weight: 1.15, height: { min: 250, blend: 230 }, slope: { max: 34, blend: 16 } },
+    rule: {
+      weight: 1.15,
+      height: { min: UPLAND_CROSSOVER, blend: UPLAND_FEATHER },
+      slope: { max: 34, blend: 16 },
+    },
   },
   {
     material: {
@@ -473,6 +518,7 @@ export const TEMPERATE: MaterialPalette = [
     rule: {
       weight: 1.1,
       cap: 0.5,
+      height: { min: -4, blend: 20 },
       slope: { max: 22, blend: 12 },
       flow: { from: 0.25, to: 0.7 },
       deposition: { from: 0.25, to: 0.7, amount: 0.4 },
@@ -484,103 +530,130 @@ export const TEMPERATE: MaterialPalette = [
  * Arid desert: bleached dune sand, ochre gravel, oxidised sandstone.
  *
  * Deserts are far less saturated in person than in photographs — the
- * orange-red of a postcard dune is low sun plus a warm white balance. These
- * ochres sit near 25% saturation so a whole map of them does not vibrate, and
- * the mesa caps go *darker* than the plain, which is what gives a flat desert
- * any legible relief from above.
+ * orange-red of a postcard dune is low sun plus a warm white balance. The sand
+ * and gravel that cover most of a desert map sit around a third saturation so a
+ * whole map of them does not vibrate; only the sandstone that appears on slopes
+ * is allowed to go redder, and it is on a small enough fraction of the map to
+ * carry it.
+ *
+ * The mesa caps go *darker* than the plain, which is what gives a flat desert
+ * any legible relief from above: a desert has almost no value range of its own,
+ * so every drop of contrast has to be spent on the edges that matter, and the
+ * edge that matters most is the one a tank cannot climb.
  */
 export const ARID_DESERT: MaterialPalette = [
   {
     material: {
       id: 'desert-oasis-bed',
       label: 'Oasis bed',
-      color: [0.176, 0.192, 0.161],
+      color: [0.294, 0.302, 0.271],
       roughness: 0.45,
       splatChannel: SPLAT_CHANNELS.sediment,
       detailScale: 60,
     },
-    rule: { weight: 1, height: { max: -2, blend: 18 } },
+    rule: { weight: 1, height: { max: -6, blend: 36 } },
+  },
+  {
+    material: {
+      id: 'desert-shallows',
+      label: 'Silt shallows',
+      color: [0.435, 0.42, 0.357],
+      roughness: 0.55,
+      splatChannel: SPLAT_CHANNELS.sediment,
+      detailScale: 44,
+    },
+    rule: { weight: 1.1, height: { min: -70, max: 1, blend: 26 } },
   },
   {
     material: {
       id: 'desert-playa',
       label: 'Salt playa',
-      color: [0.722, 0.698, 0.624],
+      color: [0.745, 0.722, 0.647],
       roughness: 0.9,
       splatChannel: SPLAT_CHANNELS.sediment,
       detailScale: 40,
     },
-    rule: { weight: 1.1, height: { min: -8, max: 14, blend: 14 }, slope: { max: 10, blend: 8 } },
+    rule: { weight: 1.15, height: { min: -6, max: 16, blend: 16 }, slope: { max: 10, blend: 8 } },
   },
   {
     material: {
       id: 'desert-dune',
       label: 'Dune sand',
-      color: [0.749, 0.678, 0.522],
+      color: [0.741, 0.675, 0.529],
       roughness: 0.9,
       splatChannel: SPLAT_CHANNELS.sediment,
       detailScale: 34,
     },
-    rule: { weight: 1.1, height: { min: 0, max: 90, blend: 40 }, slope: { max: 24, blend: 12 } },
+    rule: { weight: 1.1, height: { min: 2, max: 100, blend: 44 }, slope: { max: 24, blend: 12 } },
   },
   {
     material: {
       id: 'desert-gravel',
       label: 'Gravel plain',
-      color: [0.639, 0.549, 0.408],
+      color: [0.529, 0.451, 0.333],
       roughness: 0.85,
       splatChannel: SPLAT_CHANNELS.ground,
       detailScale: 50,
     },
-    rule: { weight: 1.2, height: { min: 30, blend: 60 }, slope: { max: 26, blend: 14 } },
-  },
-  {
-    material: {
-      id: 'desert-sandstone',
-      label: 'Sandstone slope',
-      color: [0.557, 0.408, 0.29],
-      roughness: 0.75,
-      splatChannel: SPLAT_CHANNELS.rock,
-      detailScale: 75,
+    rule: {
+      weight: 1.25,
+      height: { min: 30, max: UPLAND_CROSSOVER, blend: 60, blendMax: UPLAND_FEATHER },
+      slope: { max: 26, blend: 14 },
     },
-    rule: { weight: 1.15, slope: { min: 22, blend: 14 } },
-  },
-  {
-    material: {
-      id: 'desert-mesa-cap',
-      label: 'Mesa cap',
-      color: [0.404, 0.318, 0.251],
-      roughness: 0.6,
-      splatChannel: SPLAT_CHANNELS.rock,
-      detailScale: 100,
-    },
-    rule: { weight: 1.3, slope: { min: 44, blend: 10 } },
   },
   {
     material: {
       id: 'desert-bleached',
       label: 'Sun-bleached rim',
-      color: [0.729, 0.686, 0.596],
+      color: [0.741, 0.702, 0.608],
       roughness: 0.85,
-      splatChannel: SPLAT_CHANNELS.accent,
+      splatChannel: SPLAT_CHANNELS.ground,
       detailScale: 70,
     },
-    rule: { weight: 1, height: { min: 260, blend: 110 }, slope: { max: 34, blend: 14 } },
+    rule: {
+      weight: 1.15,
+      height: { min: UPLAND_CROSSOVER, blend: UPLAND_FEATHER },
+      slope: { max: 32, blend: 14 },
+    },
+  },
+  {
+    material: {
+      id: 'desert-sandstone',
+      label: 'Sandstone slope',
+      color: [0.553, 0.404, 0.286],
+      roughness: 0.75,
+      splatChannel: SPLAT_CHANNELS.rock,
+      detailScale: 75,
+    },
+    rule: { weight: 1.2, slope: { min: 22, blend: 14 } },
+  },
+  {
+    material: {
+      id: 'desert-mesa-cap',
+      label: 'Mesa cap',
+      color: [0.353, 0.275, 0.22],
+      roughness: 0.6,
+      splatChannel: SPLAT_CHANNELS.rock,
+      detailScale: 100,
+    },
+    rule: { weight: 1.4, slope: { min: 44, blend: 10 } },
   },
   {
     material: {
       id: 'desert-wadi',
       label: 'Wadi floor',
-      color: [0.494, 0.451, 0.353],
+      color: [0.51, 0.463, 0.365],
       roughness: 0.7,
       splatChannel: SPLAT_CHANNELS.accent,
       detailScale: 36,
     },
     rule: {
-      weight: 1,
+      weight: 1.1,
+      cap: 0.5,
+      height: { min: -4, blend: 20 },
       slope: { max: 20, blend: 10 },
-      flow: { from: 0.3, to: 0.7 },
-      curvature: { from: 0.55, to: 0.2, amount: 0.5 },
+      flow: { from: 0.25, to: 0.7 },
+      curvature: { from: 0.6, to: 0.25, amount: 0.4 },
     },
   },
 ];
@@ -593,93 +666,137 @@ export const ARID_DESERT: MaterialPalette = [
  * minimap so the player cannot read the ridge lines at all. Snow also carries a
  * slope cap: it does not stick to a 60-degree face, and a snow-covered cliff is
  * the fastest way to make a range look like a plastic model.
+ *
+ * The snow line is feathered across 200 elmos rather than drawn. Generated
+ * terrain is strongly bottom-heavy — on a typical mountain template only about
+ * one texel in ten sits above a third of the peak height — so a crisp line high
+ * up paints a few white specks and nothing else, while the same line feathered
+ * gives a proper gradient from bare fell to full snowpack across the upper
+ * quarter of the map. The fell field between meadow and snow is what keeps that
+ * gradient from being green fading straight into white.
  */
 export const ALPINE_SNOW: MaterialPalette = [
   {
     material: {
       id: 'alpine-lakebed',
       label: 'Lake bed',
-      color: [0.145, 0.176, 0.196],
+      color: [0.212, 0.239, 0.251],
       roughness: 0.45,
       splatChannel: SPLAT_CHANNELS.sediment,
       detailScale: 60,
     },
-    rule: { weight: 1, height: { max: 0, blend: 18 } },
+    rule: { weight: 1, height: { max: -6, blend: 34 } },
+  },
+  {
+    material: {
+      id: 'alpine-shallows',
+      label: 'Glacial flour',
+      color: [0.408, 0.435, 0.443],
+      roughness: 0.5,
+      splatChannel: SPLAT_CHANNELS.sediment,
+      detailScale: 44,
+    },
+    rule: { weight: 1.1, height: { min: -70, max: 1, blend: 26 } },
   },
   {
     material: {
       id: 'alpine-shore',
       label: 'Glacial gravel',
-      color: [0.412, 0.404, 0.384],
+      color: [0.478, 0.471, 0.447],
       roughness: 0.8,
       splatChannel: SPLAT_CHANNELS.sediment,
       detailScale: 32,
     },
-    rule: { weight: 1.1, height: { min: -14, max: 18, blend: 14 }, slope: { max: 26, blend: 10 } },
+    rule: { weight: 1.15, height: { min: -14, max: 20, blend: 16 }, slope: { max: 26, blend: 10 } },
   },
   {
     material: {
       id: 'alpine-meadow',
       label: 'Alpine meadow',
-      color: [0.259, 0.298, 0.216],
+      color: [0.275, 0.318, 0.224],
       roughness: 0.8,
       splatChannel: SPLAT_CHANNELS.ground,
       detailScale: 48,
     },
     rule: {
-      weight: 1.2,
-      height: { min: 10, max: 260, blend: 50 },
+      weight: 1.25,
+      height: { min: 12, max: UPLAND_CROSSOVER, blend: 26, blendMax: UPLAND_FEATHER },
       slope: { max: 30, blend: 14 },
+    },
+  },
+  {
+    material: {
+      id: 'alpine-fellfield',
+      label: 'Fell field',
+      color: [0.431, 0.424, 0.353],
+      roughness: 0.82,
+      splatChannel: SPLAT_CHANNELS.ground,
+      detailScale: 62,
+    },
+    rule: {
+      weight: 1.15,
+      height: { min: UPLAND_CROSSOVER, blend: UPLAND_FEATHER },
+      slope: { max: 34, blend: 16 },
     },
   },
   {
     material: {
       id: 'alpine-talus',
       label: 'Talus',
-      color: [0.384, 0.376, 0.357],
+      color: [0.514, 0.498, 0.463],
       roughness: 0.85,
       splatChannel: SPLAT_CHANNELS.rock,
       detailScale: 60,
     },
-    rule: { weight: 1.15, slope: { min: 26, blend: 14 }, deposition: { from: 0.15, to: 0.6, amount: 0.35 } },
+    rule: {
+      weight: 1.2,
+      slope: { min: 26, blend: 14 },
+      deposition: { from: 0.1, to: 0.55, amount: 0.3 },
+    },
   },
   {
     material: {
       id: 'alpine-granite',
       label: 'Granite face',
-      color: [0.298, 0.302, 0.314],
+      color: [0.282, 0.29, 0.306],
       roughness: 0.5,
       splatChannel: SPLAT_CHANNELS.rock,
       detailScale: 110,
     },
-    rule: { weight: 1.35, slope: { min: 46, blend: 12 } },
+    rule: { weight: 1.4, slope: { min: 46, blend: 12 } },
   },
   {
     material: {
       id: 'alpine-snow',
       label: 'Snowpack',
-      color: [0.847, 0.867, 0.886],
+      color: [0.839, 0.859, 0.882],
       roughness: 0.55,
       splatChannel: SPLAT_CHANNELS.accent,
       detailScale: 64,
     },
     rule: {
-      weight: 1.5,
-      height: { min: 230, blend: 120 },
-      slope: { max: 38, blend: 14 },
-      occlusion: { from: 0.45, to: 0.85, amount: 0.5 },
+      weight: 1.3,
+      height: { min: 300, blend: 200 },
+      slope: { max: 46, blend: 18 },
+      occlusion: { from: 0.4, to: 0.85, amount: 0.45 },
     },
   },
   {
     material: {
       id: 'alpine-meltwater',
       label: 'Meltwater channel',
-      color: [0.435, 0.471, 0.475],
+      color: [0.478, 0.51, 0.51],
       roughness: 0.6,
       splatChannel: SPLAT_CHANNELS.accent,
       detailScale: 34,
     },
-    rule: { weight: 1, slope: { max: 26, blend: 12 }, flow: { from: 0.4, to: 0.8 } },
+    rule: {
+      weight: 1.1,
+      cap: 0.45,
+      height: { min: -4, blend: 20 },
+      slope: { max: 26, blend: 12 },
+      flow: { from: 0.3, to: 0.75 },
+    },
   },
 ];
 
@@ -687,199 +804,257 @@ export const ALPINE_SNOW: MaterialPalette = [
  * Volcanic: basalt blacks, ash greys, a rust-and-sulphur accent.
  *
  * A near-black map is a trap — the diffuse is what the minimap is built from,
- * and black terrain gives a player no read on the terrain at all. So nothing
- * here goes below 0.09, the value separation between ash plain and basalt cliff
- * is deliberately wide, and the hue carries the rest: warm scoria against cold
- * basalt. The lava accent is a cooled-crust orange at 0.4, not an emissive one;
- * the engine has no emissive term for terrain, so a bright orange only reads as
- * bright orange paint.
+ * and black terrain gives a player no read on the terrain at all. So the ash
+ * plain that covers most of a volcanic map is a proper pale grey at 0.40, which
+ * is what ash actually is once it has weathered, and the blacks are reserved
+ * for the basalt that only appears on cliffs. That is a wide value separation
+ * between the two things a player needs to tell apart, and the hue carries the
+ * rest: warm scoria against cold basalt.
+ *
+ * The lava accent is a cooled-crust rust at 0.35, not an emissive orange; the
+ * engine has no emissive term for terrain, so a bright orange only reads as
+ * bright orange paint. It is capped as well, because a lava field is a few
+ * channels crossing an ash plain and not a net thrown over it.
  */
 export const VOLCANIC: MaterialPalette = [
   {
     material: {
       id: 'volcanic-seabed',
       label: 'Basalt seabed',
-      color: [0.094, 0.09, 0.094],
+      color: [0.216, 0.212, 0.22],
       roughness: 0.4,
       splatChannel: SPLAT_CHANNELS.sediment,
       detailScale: 60,
     },
-    rule: { weight: 1, height: { max: 0, blend: 18 } },
+    rule: { weight: 1, height: { max: -6, blend: 34 } },
+  },
+  {
+    material: {
+      id: 'volcanic-shallows',
+      label: 'Ash shallows',
+      color: [0.271, 0.263, 0.263],
+      roughness: 0.55,
+      splatChannel: SPLAT_CHANNELS.sediment,
+      detailScale: 44,
+    },
+    rule: { weight: 1.1, height: { min: -70, max: 1, blend: 26 } },
   },
   {
     material: {
       id: 'volcanic-black-sand',
       label: 'Black sand',
-      color: [0.196, 0.188, 0.184],
+      color: [0.302, 0.29, 0.282],
       roughness: 0.85,
       splatChannel: SPLAT_CHANNELS.sediment,
       detailScale: 30,
     },
-    rule: { weight: 1.1, height: { min: -14, max: 16, blend: 12 }, slope: { max: 24, blend: 10 } },
+    rule: { weight: 1.15, height: { min: -12, max: 18, blend: 14 }, slope: { max: 24, blend: 10 } },
   },
   {
     material: {
       id: 'volcanic-ash',
       label: 'Ash plain',
-      color: [0.267, 0.251, 0.239],
+      color: [0.396, 0.373, 0.349],
       roughness: 0.9,
       splatChannel: SPLAT_CHANNELS.ground,
       detailScale: 46,
     },
-    rule: { weight: 1.2, height: { min: 6, blend: 26 }, slope: { max: 28, blend: 14 } },
+    rule: {
+      weight: 1.25,
+      height: { min: 10, max: UPLAND_CROSSOVER, blend: 26, blendMax: UPLAND_FEATHER },
+      slope: { max: 28, blend: 14 },
+    },
+  },
+  {
+    material: {
+      id: 'volcanic-tephra',
+      label: 'Pumice upland',
+      color: [0.612, 0.588, 0.545],
+      roughness: 0.88,
+      splatChannel: SPLAT_CHANNELS.ground,
+      detailScale: 62,
+    },
+    rule: {
+      weight: 1.15,
+      height: { min: UPLAND_CROSSOVER, blend: UPLAND_FEATHER },
+      slope: { max: 32, blend: 16 },
+    },
   },
   {
     material: {
       id: 'volcanic-scoria',
       label: 'Scoria slope',
-      color: [0.322, 0.235, 0.196],
+      color: [0.294, 0.212, 0.176],
       roughness: 0.85,
       splatChannel: SPLAT_CHANNELS.rock,
       detailScale: 55,
     },
-    rule: { weight: 1.15, slope: { min: 24, blend: 14 } },
+    rule: { weight: 1.2, slope: { min: 24, blend: 14 } },
   },
   {
     material: {
       id: 'volcanic-basalt',
       label: 'Basalt column',
-      color: [0.153, 0.149, 0.157],
+      color: [0.173, 0.169, 0.18],
       roughness: 0.45,
       splatChannel: SPLAT_CHANNELS.rock,
       detailScale: 105,
     },
-    rule: { weight: 1.35, slope: { min: 46, blend: 12 } },
+    rule: { weight: 1.4, slope: { min: 46, blend: 12 } },
   },
   {
     material: {
       id: 'volcanic-sulphur',
       label: 'Sulphur rim',
-      color: [0.478, 0.427, 0.278],
+      color: [0.541, 0.486, 0.29],
       roughness: 0.75,
       splatChannel: SPLAT_CHANNELS.accent,
       detailScale: 50,
     },
     rule: {
-      weight: 1.2,
-      height: { min: 280, blend: 110 },
-      curvature: { from: 0.4, to: 0.75, amount: 0.5 },
+      weight: 1.3,
+      cap: 0.55,
+      height: { min: 290, blend: 140 },
+      curvature: { from: 0.45, to: 0.8, amount: 0.5 },
     },
   },
   {
     material: {
       id: 'volcanic-lava-channel',
       label: 'Cooled lava channel',
-      color: [0.404, 0.184, 0.106],
+      color: [0.353, 0.192, 0.141],
       roughness: 0.5,
       splatChannel: SPLAT_CHANNELS.accent,
       detailScale: 40,
     },
-    rule: { weight: 1.1, flow: { from: 0.45, to: 0.8 }, slope: { max: 34, blend: 14 } },
+    rule: {
+      weight: 1.1,
+      cap: 0.45,
+      height: { min: -4, blend: 20 },
+      flow: { from: 0.35, to: 0.8 },
+      slope: { max: 34, blend: 14 },
+    },
   },
 ];
 
 /**
  * Tropical island: coral sand, dark wet jungle, red laterite cuts.
  *
- * The jungle green is the darkest ground of any palette here (value 0.25) on
- * purpose — dense canopy in daylight is very dark, and the contrast against a
- * near-white coral beach is what makes an island read as an island on the
- * minimap. Laterite is the exposed-soil colour rather than grey rock: in the
- * wet tropics the weathered iron soil is what a cut hillside actually shows.
+ * The jungle green is the darkest ground of any palette here (0.30 against the
+ * 0.36 to 0.51 the rest use) on purpose — dense canopy in daylight is very
+ * dark, and the contrast against a near-white coral beach is what makes an
+ * island read as an island on the minimap. That one pairing carries the whole
+ * palette, so the beach sits high at 0.80 and the lagoon floor between them is
+ * pale enough to show the shelf through the water.
+ *
+ * Laterite is the exposed-soil colour rather than grey rock: in the wet tropics
+ * the weathered iron soil is what a cut hillside actually shows, and it starts
+ * at 30 degrees rather than 32 so that a jungle slope steep enough to stop a
+ * tank is also visibly bare.
  */
 export const TROPICAL_ISLAND: MaterialPalette = [
   {
     material: {
       id: 'tropical-reef-deep',
       label: 'Deep reef',
-      color: [0.149, 0.243, 0.251],
+      color: [0.196, 0.286, 0.294],
       roughness: 0.4,
       splatChannel: SPLAT_CHANNELS.sediment,
       detailScale: 60,
     },
-    rule: { weight: 1, height: { max: -18, blend: 30 } },
+    rule: { weight: 1, height: { max: -20, blend: 44 } },
   },
   {
     material: {
       id: 'tropical-lagoon',
       label: 'Lagoon floor',
-      color: [0.518, 0.549, 0.475],
+      color: [0.475, 0.506, 0.443],
       roughness: 0.6,
       splatChannel: SPLAT_CHANNELS.sediment,
       detailScale: 36,
     },
-    rule: { weight: 1.1, height: { min: -30, max: 2, blend: 20 } },
+    rule: { weight: 1.1, height: { min: -60, max: 1, blend: 28 } },
   },
   {
     material: {
       id: 'tropical-coral-sand',
       label: 'Coral sand',
-      color: [0.792, 0.745, 0.643],
+      color: [0.804, 0.757, 0.655],
       roughness: 0.9,
       splatChannel: SPLAT_CHANNELS.sediment,
       detailScale: 26,
     },
-    rule: { weight: 1.2, height: { min: -4, max: 22, blend: 14 }, slope: { max: 22, blend: 10 } },
+    rule: { weight: 1.25, height: { min: -5, max: 18, blend: 12 }, slope: { max: 22, blend: 10 } },
   },
   {
     material: {
       id: 'tropical-jungle',
       label: 'Jungle canopy',
-      color: [0.216, 0.29, 0.184],
+      color: [0.224, 0.298, 0.188],
       roughness: 0.85,
       splatChannel: SPLAT_CHANNELS.ground,
       detailScale: 44,
     },
     rule: {
       weight: 1.3,
-      height: { min: 10, blend: 26 },
+      height: { min: 12, max: UPLAND_CROSSOVER, blend: 26, blendMax: UPLAND_FEATHER },
       slope: { max: 36, blend: 16 },
-      wetness: { from: 0.1, to: 0.5, amount: 0.3 },
+      wetness: { from: 0.15, to: 0.55, amount: 0.3 },
+    },
+  },
+  {
+    material: {
+      id: 'tropical-ridge-scrub',
+      label: 'Ridge scrub',
+      color: [0.404, 0.435, 0.306],
+      roughness: 0.8,
+      splatChannel: SPLAT_CHANNELS.ground,
+      detailScale: 55,
+    },
+    rule: {
+      weight: 1.15,
+      height: { min: UPLAND_CROSSOVER, blend: UPLAND_FEATHER },
+      slope: { max: 34, blend: 14 },
     },
   },
   {
     material: {
       id: 'tropical-laterite',
       label: 'Laterite cut',
-      color: [0.435, 0.318, 0.231],
+      color: [0.478, 0.337, 0.239],
       roughness: 0.8,
       splatChannel: SPLAT_CHANNELS.rock,
       detailScale: 60,
     },
-    rule: { weight: 1.2, slope: { min: 32, blend: 14 } },
+    rule: { weight: 1.25, slope: { min: 30, blend: 14 } },
   },
   {
     material: {
       id: 'tropical-basalt',
       label: 'Sea cliff',
-      color: [0.263, 0.259, 0.243],
+      color: [0.251, 0.247, 0.235],
       roughness: 0.5,
       splatChannel: SPLAT_CHANNELS.rock,
       detailScale: 100,
     },
-    rule: { weight: 1.35, slope: { min: 50, blend: 10 } },
-  },
-  {
-    material: {
-      id: 'tropical-ridge-scrub',
-      label: 'Ridge scrub',
-      color: [0.361, 0.396, 0.29],
-      roughness: 0.8,
-      splatChannel: SPLAT_CHANNELS.accent,
-      detailScale: 55,
-    },
-    rule: { weight: 1, height: { min: 240, blend: 120 }, slope: { max: 34, blend: 14 } },
+    rule: { weight: 1.4, slope: { min: 48, blend: 10 } },
   },
   {
     material: {
       id: 'tropical-silt',
       label: 'Silt runoff',
-      color: [0.478, 0.412, 0.298],
+      color: [0.494, 0.427, 0.31],
       roughness: 0.7,
       splatChannel: SPLAT_CHANNELS.accent,
       detailScale: 34,
     },
-    rule: { weight: 1, flow: { from: 0.35, to: 0.75 }, slope: { max: 22, blend: 10 } },
+    rule: {
+      weight: 1.1,
+      cap: 0.45,
+      height: { min: -4, blend: 20 },
+      flow: { from: 0.3, to: 0.75 },
+      slope: { max: 22, blend: 10 },
+    },
   },
 ];
 
@@ -890,90 +1065,129 @@ export const TROPICAL_ISLAND: MaterialPalette = [
  * for most of the year, and that is what separates a tundra map from a snow map
  * at a glance. Snow appears as a high, flat-ground patch rather than a cap,
  * because on low tundra relief it survives in hollows and on lee slopes, not on
- * summits.
+ * summits: hence the inverted occlusion influence, which asks for *less* open
+ * sky rather than more. It is capped at half a texel so those patches keep the
+ * ground showing through and read as drifts rather than as paint.
  */
 export const TUNDRA: MaterialPalette = [
   {
     material: {
       id: 'tundra-lakebed',
       label: 'Thaw lake bed',
-      color: [0.176, 0.204, 0.204],
+      color: [0.231, 0.259, 0.259],
       roughness: 0.45,
       splatChannel: SPLAT_CHANNELS.sediment,
       detailScale: 60,
     },
-    rule: { weight: 1, height: { max: 0, blend: 16 } },
+    rule: { weight: 1, height: { max: -6, blend: 32 } },
+  },
+  {
+    material: {
+      id: 'tundra-shallows',
+      label: 'Silt shallows',
+      color: [0.396, 0.408, 0.388],
+      roughness: 0.55,
+      splatChannel: SPLAT_CHANNELS.sediment,
+      detailScale: 44,
+    },
+    rule: { weight: 1.1, height: { min: -70, max: 1, blend: 26 } },
   },
   {
     material: {
       id: 'tundra-frost-gravel',
       label: 'Frost gravel',
-      color: [0.451, 0.435, 0.396],
+      color: [0.494, 0.478, 0.439],
       roughness: 0.85,
       splatChannel: SPLAT_CHANNELS.sediment,
       detailScale: 30,
     },
-    rule: { weight: 1.1, height: { min: -12, max: 16, blend: 12 }, slope: { max: 24, blend: 10 } },
+    rule: { weight: 1.15, height: { min: -12, max: 18, blend: 14 }, slope: { max: 24, blend: 10 } },
   },
   {
     material: {
       id: 'tundra-sedge',
       label: 'Sedge and peat',
-      color: [0.412, 0.376, 0.286],
+      color: [0.431, 0.38, 0.259],
       roughness: 0.85,
       splatChannel: SPLAT_CHANNELS.ground,
       detailScale: 48,
     },
-    rule: { weight: 1.25, height: { min: 6, blend: 24 }, slope: { max: 26, blend: 14 } },
+    rule: {
+      weight: 1.25,
+      height: { min: 10, max: UPLAND_CROSSOVER, blend: 24, blendMax: UPLAND_FEATHER },
+      slope: { max: 26, blend: 14 },
+    },
+  },
+  {
+    material: {
+      id: 'tundra-lichen',
+      label: 'Lichen fell',
+      color: [0.51, 0.49, 0.412],
+      roughness: 0.85,
+      splatChannel: SPLAT_CHANNELS.ground,
+      detailScale: 62,
+    },
+    rule: {
+      weight: 1.15,
+      height: { min: UPLAND_CROSSOVER, blend: UPLAND_FEATHER },
+      slope: { max: 30, blend: 14 },
+    },
   },
   {
     material: {
       id: 'tundra-shattered-rock',
       label: 'Shattered rock',
-      color: [0.4, 0.388, 0.361],
+      color: [0.42, 0.412, 0.392],
       roughness: 0.85,
       splatChannel: SPLAT_CHANNELS.rock,
       detailScale: 58,
     },
-    rule: { weight: 1.15, slope: { min: 22, blend: 14 } },
+    rule: { weight: 1.2, slope: { min: 22, blend: 14 } },
   },
   {
     material: {
       id: 'tundra-basalt',
       label: 'Dark outcrop',
-      color: [0.278, 0.271, 0.263],
+      color: [0.255, 0.251, 0.243],
       roughness: 0.5,
       splatChannel: SPLAT_CHANNELS.rock,
       detailScale: 100,
     },
-    rule: { weight: 1.3, slope: { min: 44, blend: 12 } },
+    rule: { weight: 1.4, slope: { min: 44, blend: 12 } },
   },
   {
     material: {
       id: 'tundra-snow-patch',
       label: 'Snow patch',
-      color: [0.741, 0.761, 0.776],
+      color: [0.749, 0.769, 0.784],
       roughness: 0.6,
       splatChannel: SPLAT_CHANNELS.accent,
       detailScale: 64,
     },
     rule: {
-      weight: 1.2,
-      height: { min: 190, blend: 140 },
+      weight: 1.0,
+      cap: 0.5,
+      height: { min: 330, blend: 140 },
       slope: { max: 26, blend: 12 },
-      occlusion: { from: 0.9, to: 0.5, amount: 0.4 },
+      occlusion: { from: 0.95, to: 0.55, amount: 0.45 },
     },
   },
   {
     material: {
       id: 'tundra-moss-seep',
       label: 'Moss seep',
-      color: [0.286, 0.333, 0.251],
+      color: [0.294, 0.345, 0.259],
       roughness: 0.8,
       splatChannel: SPLAT_CHANNELS.accent,
       detailScale: 36,
     },
-    rule: { weight: 1, wetness: { from: 0.4, to: 0.8 }, slope: { max: 20, blend: 10 } },
+    rule: {
+      weight: 1.15,
+      cap: 0.5,
+      height: { min: -4, blend: 20 },
+      wetness: { from: 0.55, to: 0.95 },
+      slope: { max: 20, blend: 10 },
+    },
   },
 ];
 
@@ -991,78 +1205,120 @@ export const MARS_RED: MaterialPalette = [
     material: {
       id: 'mars-basin',
       label: 'Basin fines',
-      color: [0.271, 0.18, 0.133],
+      color: [0.294, 0.22, 0.184],
       roughness: 0.8,
       splatChannel: SPLAT_CHANNELS.sediment,
       detailScale: 60,
     },
-    rule: { weight: 1, height: { max: -4, blend: 24 } },
+    rule: { weight: 1, height: { max: -6, blend: 32 } },
+  },
+  {
+    material: {
+      id: 'mars-hardpan',
+      label: 'Lowland hardpan',
+      color: [0.42, 0.341, 0.294],
+      roughness: 0.85,
+      splatChannel: SPLAT_CHANNELS.sediment,
+      detailScale: 44,
+    },
+    rule: { weight: 1.1, height: { min: -70, max: 1, blend: 26 } },
   },
   {
     material: {
       id: 'mars-dust-drift',
       label: 'Dust drift',
-      color: [0.635, 0.451, 0.318],
+      color: [0.616, 0.475, 0.373],
       roughness: 0.95,
       splatChannel: SPLAT_CHANNELS.sediment,
       detailScale: 32,
     },
-    rule: { weight: 1.1, height: { min: -12, max: 40, blend: 30 }, slope: { max: 16, blend: 10 } },
+    rule: { weight: 1.15, height: { min: -10, max: 44, blend: 30 }, slope: { max: 16, blend: 10 } },
   },
   {
     material: {
       id: 'mars-regolith',
       label: 'Regolith',
-      color: [0.529, 0.353, 0.243],
+      color: [0.494, 0.357, 0.275],
       roughness: 0.9,
       splatChannel: SPLAT_CHANNELS.ground,
       detailScale: 50,
     },
-    rule: { weight: 1.25, height: { min: 0, blend: 40 }, slope: { max: 28, blend: 14 } },
+    rule: {
+      weight: 1.25,
+      height: { min: 4, max: UPLAND_CROSSOVER, blend: 40, blendMax: UPLAND_FEATHER },
+      slope: { max: 28, blend: 14 },
+    },
+  },
+  {
+    material: {
+      id: 'mars-highlands',
+      label: 'Cratered highlands',
+      color: [0.573, 0.467, 0.396],
+      roughness: 0.88,
+      splatChannel: SPLAT_CHANNELS.ground,
+      detailScale: 66,
+    },
+    rule: {
+      weight: 1.15,
+      height: { min: UPLAND_CROSSOVER, blend: UPLAND_FEATHER },
+      slope: { max: 32, blend: 16 },
+    },
   },
   {
     material: {
       id: 'mars-oxidised-slope',
       label: 'Oxidised slope',
-      color: [0.412, 0.263, 0.188],
+      color: [0.404, 0.294, 0.235],
       roughness: 0.8,
       splatChannel: SPLAT_CHANNELS.rock,
       detailScale: 65,
     },
-    rule: { weight: 1.15, slope: { min: 24, blend: 14 } },
+    rule: { weight: 1.2, slope: { min: 24, blend: 14 } },
   },
   {
     material: {
       id: 'mars-basalt',
       label: 'Stripped basalt',
-      color: [0.267, 0.212, 0.18],
+      color: [0.251, 0.231, 0.224],
       roughness: 0.5,
       splatChannel: SPLAT_CHANNELS.rock,
       detailScale: 105,
     },
-    rule: { weight: 1.35, slope: { min: 42, blend: 12 } },
+    rule: { weight: 1.4, slope: { min: 42, blend: 12 } },
   },
   {
     material: {
       id: 'mars-frost',
       label: 'Frost cap',
-      color: [0.702, 0.663, 0.616],
+      color: [0.741, 0.714, 0.678],
       roughness: 0.7,
       splatChannel: SPLAT_CHANNELS.accent,
       detailScale: 70,
     },
-    rule: { weight: 1.2, height: { min: 300, blend: 110 }, slope: { max: 30, blend: 12 } },
+    rule: {
+      weight: 1.2,
+      cap: 0.7,
+      height: { min: 320, blend: 150 },
+      slope: { max: 30, blend: 12 },
+      occlusion: { from: 0.5, to: 0.9, amount: 0.4 },
+    },
   },
   {
     material: {
       id: 'mars-outflow',
       label: 'Outflow channel',
-      color: [0.361, 0.243, 0.192],
+      color: [0.365, 0.278, 0.239],
       roughness: 0.75,
       splatChannel: SPLAT_CHANNELS.accent,
       detailScale: 40,
     },
-    rule: { weight: 1, flow: { from: 0.35, to: 0.75 }, slope: { max: 26, blend: 12 } },
+    rule: {
+      weight: 1.1,
+      cap: 0.45,
+      height: { min: -4, blend: 20 },
+      flow: { from: 0.3, to: 0.75 },
+      slope: { max: 26, blend: 12 },
+    },
   },
 ];
 
@@ -1139,31 +1395,35 @@ const MIN_RESCALED_BLEND = 4;
  * two edges, and a band that straddles the shoreline (wet sand, say) has one
  * edge under water and one above.
  */
-function rescaleBand(
-  band: Band | undefined,
-  below: number,
-  above: number,
-): Band | undefined {
+function scaleBlend(blend: number | undefined, scale: number): number | undefined {
+  if (blend === undefined) return undefined;
+  // Never shrink a feather below the point where it stops being a feather, and
+  // never widen one that was already narrower than the floor.
+  return Math.max(blend * scale, Math.min(blend, MIN_RESCALED_BLEND));
+}
+
+function rescaleBand(band: Band | undefined, below: number, above: number): Band | undefined {
   if (band === undefined) return undefined;
-  const out: { min?: number; max?: number; blend?: number } = {};
-  let scaleSum = 0;
-  let scaleCount = 0;
-  if (band.min !== undefined) {
-    const s = band.min < 0 ? below : above;
-    out.min = band.min * s;
-    scaleSum += s;
-    scaleCount++;
-  }
-  if (band.max !== undefined) {
-    const s = band.max < 0 ? below : above;
-    out.max = band.max * s;
-    scaleSum += s;
-    scaleCount++;
-  }
-  if (band.blend !== undefined) {
-    const s = scaleCount === 0 ? above : scaleSum / scaleCount;
-    out.blend = Math.max(band.blend * s, Math.min(band.blend, MIN_RESCALED_BLEND));
-  }
+  const out: {
+    min?: number;
+    max?: number;
+    blend?: number;
+    blendMin?: number;
+    blendMax?: number;
+  } = {};
+  const minScale = band.min === undefined ? undefined : band.min < 0 ? below : above;
+  const maxScale = band.max === undefined ? undefined : band.max < 0 ? below : above;
+  if (band.min !== undefined) out.min = band.min * (minScale as number);
+  if (band.max !== undefined) out.max = band.max * (maxScale as number);
+
+  // A per-edge feather knows which side of the water its own edge is on; the
+  // shared one has to serve both, so it gets the mean of the scales the band's
+  // edges used.
+  const edges = [minScale, maxScale].filter((s): s is number => s !== undefined);
+  const shared = edges.length === 0 ? above : edges.reduce((a, b) => a + b, 0) / edges.length;
+  out.blend = scaleBlend(band.blend, shared);
+  out.blendMin = scaleBlend(band.blendMin, minScale ?? shared);
+  out.blendMax = scaleBlend(band.blendMax, maxScale ?? shared);
   return out;
 }
 
@@ -1245,6 +1505,24 @@ function shiftValue(c: Rgb, delta: number): Rgb {
 }
 
 /**
+ * The dimmest a derived band is allowed to get, as a peak component.
+ *
+ * Darkening by a fixed fraction is the right move on a grey or ochre rock and
+ * the wrong one on basalt, which starts at 0.18: the all-terrain band came out
+ * at 0.14 and a volcanic map with a fifth of its area impassable turned into a
+ * silhouette. Baked occlusion and the engine's own shading both land on top of
+ * whatever is here, so the band keeps enough albedo to still be a rock face.
+ */
+const MIN_BAND_VALUE = 0.18;
+
+/** {@link shiftValue} toward black, stopping at {@link MIN_BAND_VALUE}. */
+function darkenToFloor(c: Rgb, amount: number): Rgb {
+  const peak = Math.max(c[0], c[1], c[2]);
+  if (peak <= MIN_BAND_VALUE) return c;
+  return mixRgb(c, [0, 0, 0], Math.min(amount, 1 - MIN_BAND_VALUE / peak));
+}
+
+/**
  * Slope thresholds, in real degrees, that gate BAR's three broad move classes.
  *
  * Straight from `gamedata/movedefs.lua`'s `SLOPE` table: `MINIMUM = 27`,
@@ -1280,6 +1558,18 @@ export interface SlopeBandOptions {
   readonly blendDegrees?: number;
   /** Base weight of the two added bands. @default 1.6 */
   readonly strength?: number;
+  /**
+   * The most of a texel the added bands may claim, 0..1.
+   *
+   * They are appended, so they outrank everything the palette put down and would
+   * otherwise replace it outright: a mountain map would lose its snow, its talus
+   * and its scree to two flat colours and end up a slope diagram rather than
+   * terrain. Holding them to roughly two thirds leaves the biome's own rock
+   * showing through, which is enough to keep the map looking like a place and
+   * still far more separation than the checklist asks for.
+   * @default 0.65
+   */
+  readonly cap?: number;
   /** Splat channel for the added bands. Default: the steepest material's channel. */
   readonly splatChannel?: 0 | 1 | 2 | 3;
 }
@@ -1344,6 +1634,12 @@ function flattestLayer(palette: MaterialPalette): MaterialLayer | undefined {
  * The feather stays narrow — 2.5 degrees by default — because here the edge is
  * the information. Wide enough not to alias, narrow enough to still read as a
  * boundary.
+ *
+ * Both bands are capped (see {@link SlopeBandOptions.cap}) so that they tint
+ * the palette's own rock rather than paint over it. The checklist asks for the
+ * three levels to be *distinguishable*, which two thirds of a texel achieves
+ * easily; taking the whole texel would replace a mountain's snow and scree with
+ * two flat greys and turn the map into a diagram of its own slope field.
  */
 export function enforceSlopeBands(
   palette: MaterialPalette,
@@ -1355,9 +1651,10 @@ export function enforceSlopeBands(
   const ground = options.flatColor ?? flatSource?.material.color ?? rock;
   const contrast = Math.max(options.contrast ?? 0.22, 0);
   const mid = options.midColor ?? shiftValue(mixRgb(ground, rock, 0.7), contrast);
-  const steep = options.steepColor ?? shiftValue(rock, -contrast);
+  const steep = options.steepColor ?? darkenToFloor(rock, contrast);
   const blend = options.blendDegrees ?? 2.5;
   const strength = options.strength ?? 1.6;
+  const cap = options.cap ?? 0.65;
   const channel = options.splatChannel ?? steepSource?.material.splatChannel ?? SPLAT_CHANNELS.rock;
 
   return [
@@ -1373,6 +1670,7 @@ export function enforceSlopeBands(
       },
       rule: {
         weight: strength,
+        cap,
         slope: { min: BAR_SLOPE_BANDS.vehicle, max: BAR_SLOPE_BANDS.bot, blend },
       },
     },
@@ -1385,7 +1683,7 @@ export function enforceSlopeBands(
         splatChannel: channel,
         detailScale: steepSource?.material.detailScale ?? 100,
       },
-      rule: { weight: strength * 1.15, slope: { min: BAR_SLOPE_BANDS.bot, blend } },
+      rule: { weight: strength * 1.15, cap, slope: { min: BAR_SLOPE_BANDS.bot, blend } },
     },
   ];
 }

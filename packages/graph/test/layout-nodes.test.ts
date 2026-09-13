@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { createField, sampleBilinear, type Field } from '@terrasmith/core';
+import { createField, sampleBilinear, slopeDegreesField, type Field } from '@terrasmith/core';
 import { NodeRegistry } from '../src/registry.js';
 import { cellSize, type EvalContext, type NodeDefinition, type PortValue } from '../src/types.js';
 import {
@@ -30,10 +30,14 @@ function ctx(width: number, overrides: Partial<EvalContext> = {}): EvalContext {
   };
 }
 
-/** Run a node with its declared defaults, overriding only what a test cares about. */
-async function run<P extends Record<string, unknown>>(
+/**
+ * Run a node with its declared defaults, overriding only what a test cares
+ * about — the same thing the registry does when a project loads, so a test
+ * never silently exercises a parameter set the editor could not produce.
+ */
+async function run<P>(
   def: NodeDefinition<P>,
-  opts: { ctx: EvalContext; inputs?: Record<string, PortValue>; params?: Partial<P> } ,
+  opts: { ctx: EvalContext; inputs?: Record<string, PortValue>; params?: Record<string, unknown> },
 ): Promise<Record<string, PortValue>> {
   const params: Record<string, unknown> = {};
   for (const p of def.params) params[p.id] = p.default;
@@ -135,6 +139,18 @@ describe('layout node definitions', () => {
     }
   });
 
+  it('marks every input a node can run without as optional', () => {
+    // The evaluator refuses to run a node whose non-optional input has nothing
+    // wired to it, so a source node with a required merge input could never be
+    // used as a source at all.
+    const optionalById = (type: string, port: string): boolean | undefined =>
+      layoutNodes.find((d) => d.type === type)?.inputs.find((p) => p.id === port)?.optional;
+    expect(optionalById('layout.shapes', 'add')).toBe(true);
+    expect(optionalById('layout.radial', 'add')).toBe(true);
+    expect(optionalById('layout.ridge', 'terrain')).toBe(true);
+    expect(optionalById('layout.mask', 'shapes')).toBeFalsy();
+  });
+
   it('names every node type uniquely', () => {
     const types = layoutNodes.map((d) => d.type);
     expect(new Set(types).size).toBe(types.length);
@@ -163,6 +179,32 @@ describe('layout.shapes', () => {
     expect(ca.y + cb.y).toBeCloseTo(8192, 3);
   });
 
+  it('places the default layout exactly on its 180-degree partner', async () => {
+    // "Almost symmetric" is the worst outcome there is: nobody goes looking for
+    // an eight-elmo difference between the two halves of a map, they just lose
+    // to it. Every point of every stock shape has to land on the image of
+    // another under a half turn about the middle, to the elmo.
+    const out = await run(layoutShapesNode, { ctx: ctx(64) });
+    const all = (out.shapes as LayoutShapeSet).shapes;
+    const points = all.flatMap((s) => s.points);
+    expect(points.length).toBeGreaterThan(10);
+    for (const p of points) {
+      const image = points.find((q) => Math.abs(q.x - (8192 - p.x)) < 1e-9 && Math.abs(q.y - (8192 - p.y)) < 1e-9);
+      expect(image, `no half-turn partner for ${p.x},${p.y}`).toBeDefined();
+    }
+  });
+
+  it('leaves the stock shapes free of heights and widths, so the node controls govern', async () => {
+    // A shape that carries its own height or width silently wins over the
+    // parameter of the node drawing it, and the author sees a slider that does
+    // nothing on the one layout everybody starts from.
+    const out = await run(layoutShapesNode, { ctx: ctx(64) });
+    for (const s of (out.shapes as LayoutShapeSet).shapes) {
+      expect(s.value, `${s.id} carries a height`).toBeUndefined();
+      expect(s.width, `${s.id} carries a width`).toBeUndefined();
+    }
+  });
+
   it('round-trips through its serialised form', () => {
     const shapes = parseShapes(serializeShapes([square('pad', 1000, 2000, 400, { value: 55, falloff: 12 })]));
     expect(shapes).toHaveLength(1);
@@ -182,6 +224,20 @@ describe('layout.shapes', () => {
     expect(() => parseShapes([{ kind: 'polygon' }])).toThrow(/shape 0 has no points/);
     expect(() => parseShapes([{ kind: 'blob', points: [{ x: 0, y: 0 }] }])).toThrow(/kind/);
     expect(() => parseShapes([{ kind: 'polyline', points: [{ x: 0 }] }])).toThrow(/point 0/);
+  });
+
+  it('refuses a coordinate that is not a finite number', () => {
+    // NaN is caught nowhere downstream: it poisons the shape's bounding box, so
+    // the rasteriser draws a different shape from the one asked for and says
+    // nothing. It does not even survive a save — JSON writes it as null.
+    expect(() => parseShapes([{ kind: 'point', points: [{ x: NaN, y: 1 }] }])).toThrow(/point 0/);
+    expect(() => parseShapes([{ kind: 'point', points: [{ x: 1, y: Infinity }] }])).toThrow(/point 0/);
+    expect(() =>
+      parseShapes([{ kind: 'point', points: [{ x: 1, y: 1 }], value: NaN }]),
+    ).toThrow(/shape 0 has a height/);
+    expect(() =>
+      parseShapes([{ kind: 'point', points: [{ x: 1, y: 1 }], falloff: 'wide' }]),
+    ).toThrow(/shape 0 has a soft edge/);
   });
 
   it('stretches a layout drawn for one map size onto another', async () => {
@@ -387,6 +443,34 @@ describe('layout.flatten', () => {
     expect(atWorld(out.out as Field, c, 4104, 4104)).toBeCloseTo(120, 3);
   });
 
+  it('holds the soft edge the help promises under the slope it names', async () => {
+    // The help on "Soft edge" quotes a number an author will act on, so the
+    // number has to be the steepest point of the transition rather than its
+    // average grade: the coverage ramp peaks at 1.5x the average and the
+    // default Level blend puts a quintic on top of that, so the worst grade
+    // bridging a step H over a band f is 2.8125·H/f.
+    const fine = ctx(1024); // 8 elmos a sample, the engine's own heightmap lattice
+    const cell = cellSize(fine);
+    const flat = createField(fine.width, fine.height);
+    const pad = shapeSet([square('pad', 4104, 4104, 2048, { value: 200 })]);
+    const worstSlope = async (falloff: number): Promise<number> => {
+      const out = await run(layoutFlattenNode, {
+        ctx: fine,
+        inputs: { terrain: flat, shapes: pad },
+        params: { falloff },
+      });
+      const slope = slopeDegreesField(out.out as Field, { cellSize: cell });
+      let worst = 0;
+      for (const v of slope.data) if (v > worst) worst = v;
+      return worst;
+    };
+    // 5.52 x a 200-elmo step is 1104, and the help rounds that to 1100.
+    expect(await worstSlope(1104)).toBeLessThan(27);
+    // The figure the help used to quote. Not merely over 27: over 54, which is
+    // where bots stop as well.
+    expect(await worstSlope(400)).toBeGreaterThan(54);
+  });
+
   it('raises without cutting when asked to raise only', async () => {
     const terrain = analyticTerrain(c);
     const out = await run(layoutFlattenNode, {
@@ -461,7 +545,13 @@ describe('layout.river', () => {
       inputs: { terrain, shapes: river() },
       params: { setMouthHeight: true, mouthHeight: 0, width: 384, depth: 80 },
     });
-    expect(atWorld(out.out as Field, c, 7580, 4096)).toBeLessThanOrEqual(0.5);
+    const result = out.out as Field;
+    // The mouth itself sits exactly at the water line, and the bed grades down
+    // to it rather than dropping off a cliff in the last cell: 20 elmos back
+    // upstream it is still within an elmo of zero.
+    expect(atWorld(result, c, 7600, 4096)).toBeCloseTo(0, 3);
+    expect(atWorld(result, c, 7580, 4096)).toBeLessThan(1);
+    expect(atWorld(result, c, 4096, 4096)).toBeGreaterThan(50);
   });
 
   it('reports where it cut, as a mask', async () => {
@@ -527,6 +617,140 @@ describe('layout.ridge', () => {
     }
   });
 
+  it('leaves ground it does not reach alone when set to rise above the terrain', async () => {
+    // The offset is exactly zero outside the ridge foot, and zero is a real
+    // elevation in BAR: it is the water line. A plain max() against it lifts
+    // every square of sea floor on the map to the shoreline and drains the sea.
+    const c2 = ctx(128);
+    const cell = cellSize(c2);
+    const terrain = createField(c2.width, c2.height);
+    for (let iz = 0; iz < c2.height; iz++) {
+      for (let ix = 0; ix < c2.width; ix++) {
+        terrain.data[iz * c2.width + ix] = -200 + 400 * Math.sin((ix * cell) / 2000);
+      }
+    }
+    const out = await run(layoutRidgeNode, {
+      ctx: c2,
+      inputs: { terrain, shapes: spine() },
+      params: { combine: 'max', height: 400, width: 900, crestNoise: 0, breakup: 0 },
+    });
+    const result = out.out as Field;
+    const offset = out.offset as Field;
+    let untouched = 0;
+    for (let i = 0; i < result.data.length; i++) {
+      if (offset.data[i] !== 0) continue;
+      untouched++;
+      expect(result.data[i]).toBe(terrain.data[i]);
+    }
+    // Most of the map is away from the ridge, and the sea floor is still there.
+    expect(untouched).toBeGreaterThan(result.data.length / 2);
+    expect(atWorld(result, c2, 4000, 4000)).toBeGreaterThan(300);
+  });
+
+  it('cuts down rather than up where a shape asks for a trench', async () => {
+    // A negative crest is a trench, so "the height is absolute" has to mean
+    // "cut to it", not "raise to it" — a max() would throw the trench away.
+    const c2 = ctx(128);
+    const terrain = createField(c2.width, c2.height);
+    terrain.data.fill(100);
+    const shapes = shapeSet([{ ...spine().shapes[0], value: -150 }]);
+    const out = await run(layoutRidgeNode, {
+      ctx: c2,
+      inputs: { terrain, shapes },
+      params: { combine: 'max', crestNoise: 0, breakup: 0 },
+    });
+    expect(atWorld(out.out as Field, c2, 4000, 4000)).toBeLessThan(-100);
+    expect(atWorld(out.out as Field, c2, 1500, 1500)).toBe(100);
+  });
+
+  it('answers its own Height control on the layout that ships with the node', async () => {
+    // The stock ridge shape must not carry a height of its own: if it does, the
+    // node's Height slider moves nothing on the layout every new project opens
+    // with, which reads as a broken control.
+    const shapes = (await run(layoutShapesNode, { ctx: c })).shapes as LayoutShapeSet;
+    const crest = async (height: number): Promise<number> => {
+      const out = await run(layoutRidgeNode, {
+        ctx: c,
+        inputs: { shapes },
+        params: { only: 'ridge', height, crestNoise: 0, breakup: 0 },
+      });
+      let max = 0;
+      for (const v of (out.offset as Field).data) if (v > max) max = v;
+      return max;
+    };
+    expect(await crest(200)).toBeCloseTo(200, 0);
+    expect(await crest(800)).toBeCloseTo(800, 0);
+  });
+
+  it('lets the taller of two crossing spines win, and keeps a trench a trench', async () => {
+    const c2 = ctx(128);
+    const shapes = shapeSet([
+      { ...spine().shapes[0], id: 'ridge-low', value: 150 },
+      {
+        id: 'ridge-high',
+        kind: 'polyline',
+        points: [
+          { x: 1200, y: 1200 },
+          { x: 6800, y: 6800 },
+        ],
+        value: 450,
+        smooth: false,
+      },
+      {
+        id: 'ridge-trench',
+        kind: 'polyline',
+        points: [
+          { x: 600, y: 2200 },
+          { x: 7600, y: 2200 },
+        ],
+        value: -300,
+        smooth: false,
+      },
+    ]);
+    const out = await run(layoutRidgeNode, {
+      ctx: c2,
+      inputs: { shapes },
+      params: { width: 700, crestNoise: 0, breakup: 0, taper: 0.05 },
+    });
+    const offset = out.offset as Field;
+    // Where the two spines cross in the middle, the taller one governs.
+    expect(atWorld(offset, c2, 4096, 4096)).toBeGreaterThan(400);
+    // A negative crest survives the merge instead of losing to the zero the
+    // field starts at.
+    expect(atWorld(offset, c2, 4096, 2200)).toBeLessThan(-250);
+  });
+
+  it('closes a ring into a rim with no notch at the join', async () => {
+    // A crater rim is a closed spine, and the join is where a ring breaks: the
+    // spline has to come back to its first point, and the end taper has to be
+    // off, or the rim opens a gap straight into the middle.
+    const c2 = ctx(256);
+    const corners = 14;
+    const ring: LayoutShape = {
+      id: 'rim',
+      kind: 'polygon',
+      points: Array.from({ length: corners }, (_, k) => {
+        const a = (k / corners) * Math.PI * 2;
+        return { x: 4096 + 2200 * Math.cos(a), y: 4096 + 2200 * Math.sin(a) };
+      }),
+      closed: true,
+    };
+    const out = await run(layoutRidgeNode, {
+      ctx: c2,
+      inputs: { shapes: shapeSet([ring]) },
+      params: { height: 400, width: 600, crestNoise: 0, breakup: 0 },
+    });
+    const offset = out.offset as Field;
+    // Walk the rim between the corners, including across the join at angle 0.
+    for (let k = 0; k < 360; k += 3) {
+      const a = (k / 180) * Math.PI;
+      const h = atWorld(offset, c2, 4096 + 2200 * Math.cos(a), 4096 + 2200 * Math.sin(a));
+      expect(h, `the rim is missing at ${k} degrees`).toBeGreaterThan(300);
+    }
+    // It is a rim, not a dome: the middle is untouched.
+    expect(atWorld(offset, c2, 4096, 4096)).toBe(0);
+  });
+
   it('is deterministic: the same seed builds the same mountain', async () => {
     const params = { height: 400, width: 900, crestNoise: 120, breakup: 200 };
     const a = (await run(layoutRidgeNode, { ctx: c, inputs: { shapes: spine() }, params })).out as Field;
@@ -573,13 +797,13 @@ describe('layout.radial', () => {
   it('spaces evenly around the circle when no symmetry is asked for', async () => {
     const pts = await positions({ count: 4, symmetry: 'none', radius: 2000, form: 'points', startAngle: 0 });
     const angles = pts.map((p) => Math.round((Math.atan2(p.y - 4096, p.x - 4096) * 180) / Math.PI));
-    expect(angles.sort((a, b) => a - b)).toEqual([-180, -90, 0, 90]);
+    expect(angles.sort((a, b) => a - b)).toEqual([-90, 0, 90, 180]);
   });
 
   it('sizes build pads up to whole build squares so a factory fits', async () => {
     const out = await run(layoutRadialNode, {
       ctx: c,
-      params: { count: 2, symmetry: 'rotate180', form: 'pads', size: 500, value: 80 },
+      params: { count: 2, symmetry: 'rotate180', form: 'pads', size: 500, setHeight: true, value: 80 },
     });
     const pad = (out.shapes as LayoutShapeSet).shapes[0];
     const width = Math.max(...pad.points.map((p) => p.x)) - Math.min(...pad.points.map((p) => p.x));
@@ -615,6 +839,96 @@ describe('layout.radial', () => {
     for (let i = 1; i < angles.length; i++) expect(angles[i]).toBeGreaterThan(angles[i - 1]);
   });
 
+  it('gives its shapes no height until it is asked for one', async () => {
+    // Zero is not "no opinion" — it is the water line. A pad stamped with it
+    // digs itself down to sea level wherever it lands, and a spoke stamped with
+    // it overrides the Ridge node's own Height with nothing at all.
+    for (const form of ['pads', 'points', 'spokes', 'ring']) {
+      const out = await run(layoutRadialNode, { ctx: c, params: { form } });
+      for (const s of (out.shapes as LayoutShapeSet).shapes) {
+        expect(s.value, `${form} carries a height`).toBeUndefined();
+      }
+    }
+    const asked = await run(layoutRadialNode, { ctx: c, params: { form: 'pads', setHeight: true, value: 240 } });
+    expect((asked.shapes as LayoutShapeSet).shapes[0].value).toBe(240);
+  });
+
+  it('lays pads that level to the ground instead of dropping to the water line', async () => {
+    // A hillside at a steady 2.9 degrees, so the only thing that can make a
+    // steep edge is the pad itself.
+    const c2 = ctx(256);
+    const cell = cellSize(c2);
+    const terrain = createField(c2.width, c2.height);
+    for (let iz = 0; iz < c2.height; iz++) {
+      for (let ix = 0; ix < c2.width; ix++) terrain.data[iz * c2.width + ix] = 200 + ix * cell * 0.05;
+    }
+    const worstSlope = async (params: Record<string, unknown>): Promise<Field> => {
+      const shapes = (await run(layoutRadialNode, { ctx: c2, params: { form: 'pads', radius: 2400, ...params } }))
+        .shapes as PortValue;
+      return (await run(layoutFlattenNode, { ctx: c2, inputs: { terrain, shapes } })).out as Field;
+    };
+    const levelled = await worstSlope({});
+    // The pad due east comes out at the height of the ground it covers, not at
+    // the water line, and nothing on the map is too steep for a vehicle.
+    expect(atWorld(levelled, c2, 4096 + 2400, 4096)).toBeCloseTo(atWorld(terrain, c2, 4096 + 2400, 4096), -1);
+    const slope = slopeDegreesField(levelled, { cellSize: cell });
+    let worst = 0;
+    for (const v of slope.data) if (v > worst) worst = v;
+    expect(worst).toBeLessThan(27);
+
+    // What the old default did: every pad pinned to an absolute zero, which on
+    // this hillside is a 500-elmo pit with an unclimbable rim.
+    const pinned = await worstSlope({ setHeight: true, value: 0 });
+    expect(atWorld(pinned, c2, 4096 + 2400, 4096)).toBeCloseTo(0, 0);
+  });
+
+  it('lets the Ridge node decide how tall its spokes are', async () => {
+    const c2 = ctx(256);
+    const shapes = (await run(layoutRadialNode, { ctx: c2, params: { form: 'spokes', radius: 3000, innerRadius: 800 } }))
+      .shapes as PortValue;
+    const out = await run(layoutRidgeNode, {
+      ctx: c2,
+      inputs: { shapes },
+      params: { height: 500, width: 700, crestNoise: 0, breakup: 0 },
+    });
+    let max = 0;
+    for (const v of (out.offset as Field).data) if (v > max) max = v;
+    expect(max).toBeCloseTo(500, 0);
+  });
+
+  it('refuses to hand back two features standing in the same spot', async () => {
+    // A mirror-symmetric arrangement turned onto its own mirror line pairs
+    // every feature with itself. Four start positions silently become two
+    // places with two commanders each, which is a map that ships broken.
+    await expect(
+      run(layoutRadialNode, { ctx: c, params: { symmetry: 'mirrorZ', startAngle: 90, count: 4, form: 'points' } }),
+    ).rejects.toThrow(/mirror line/);
+    await expect(
+      run(layoutRadialNode, { ctx: c, params: { symmetry: 'mirrorX', startAngle: 90, count: 2, form: 'pads' } }),
+    ).rejects.toThrow(/mirror line/);
+    // A radius of nothing stacks every feature in the middle, for the same
+    // reason, and blaming the rotation for that would send the author to the
+    // wrong slider.
+    await expect(
+      run(layoutRadialNode, { ctx: c, params: { symmetry: 'rotate180', radius: 0, count: 4, form: 'points' } }),
+    ).rejects.toThrow(/distance from centre of 0 elmos stacks all 4 features/);
+    await expect(
+      run(layoutRadialNode, { ctx: c, params: { symmetry: 'rotate180', radius: 3, count: 2, form: 'points' } }),
+    ).rejects.toThrow(/distance from centre of 3 elmos/);
+    // A turn a mirror can take is still allowed, and still delivers the count.
+    const ok = await run(layoutRadialNode, {
+      ctx: c,
+      params: { symmetry: 'mirrorZ', startAngle: 30, count: 4, form: 'points' },
+    });
+    expect((ok.shapes as LayoutShapeSet).shapes).toHaveLength(4);
+  });
+
+  it('says what to do when a ring has too few corners to be an area', async () => {
+    await expect(
+      run(layoutRadialNode, { ctx: c, params: { form: 'ring', count: 1, symmetry: 'rotate180' } }),
+    ).rejects.toThrow(/at least 3 corners/);
+  });
+
   it('refuses a quarter-turn arrangement on a map that is not square', async () => {
     await expect(
       run(layoutRadialNode, {
@@ -622,6 +936,49 @@ describe('layout.radial', () => {
         params: { symmetry: 'rotate90' },
       }),
     ).rejects.toThrow(/square map/);
+  });
+});
+
+describe('degenerate layouts', () => {
+  const c = ctx(64);
+  const flat = (): Field => {
+    const f = createField(c.width, c.height);
+    f.data.fill(120);
+    return f;
+  };
+
+  it('passes the terrain through when the name filter matches nothing', async () => {
+    // An author typing a name that matches nothing should get their terrain
+    // back untouched, not a crash and not a flattened map.
+    const shapes = shapeSet([square('pad', 4104, 4104, 1024)]);
+    const params = { only: 'no-such-shape' };
+    const terrain = flat();
+
+    const flattened = (await run(layoutFlattenNode, { ctx: c, inputs: { terrain, shapes }, params })).out as Field;
+    const carved = (await run(layoutRiverNode, { ctx: c, inputs: { terrain, shapes }, params })).out as Field;
+    const ridged = await run(layoutRidgeNode, { ctx: c, inputs: { terrain, shapes }, params });
+    for (let i = 0; i < terrain.data.length; i++) {
+      expect(flattened.data[i]).toBe(terrain.data[i]);
+      expect(carved.data[i]).toBe(terrain.data[i]);
+      expect((ridged.out as Field).data[i]).toBe(terrain.data[i]);
+      expect((ridged.offset as Field).data[i]).toBe(0);
+    }
+    const mask = (await run(layoutMaskNode, { ctx: c, inputs: { shapes }, params })).out as Field;
+    for (const v of mask.data) expect(v).toBe(0);
+  });
+
+  it('measures out to the limit when the layout holds nothing at all', async () => {
+    const empty = shapeSet([]);
+    const out = (await run(layoutDistanceNode, { ctx: c, inputs: { shapes: empty }, params: { maxDistance: 1024 } }))
+      .out as Field;
+    for (const v of out.data) expect(v).toBe(1024);
+  });
+
+  it('says which input is missing rather than throwing from inside the maths', async () => {
+    await expect(run(layoutMaskNode, { ctx: c, inputs: {} })).rejects.toThrow(/needs a layout connected/);
+    await expect(
+      run(layoutFlattenNode, { ctx: c, inputs: { shapes: shapeSet([]) } }),
+    ).rejects.toThrow(/needs a terrain or mask connected/);
   });
 });
 
@@ -656,16 +1013,21 @@ describe('resolution independence', () => {
   });
 
   it('flattens to the same heights at 128 and at 512', async () => {
+    // Both shapes carry a height. The one gesture that cannot be exact is a
+    // shape with no height of its own, which levels to the average of the
+    // ground it covers — a mean over a coarse grid and a mean over a fine one
+    // are estimates of the same number, not the same number.
+    const shapes = shapeSet(layout().shapes.map((s) => ({ ...s, value: s.value ?? 180 })));
     const a = (
       await run(layoutFlattenNode, {
         ctx: coarse,
-        inputs: { terrain: analyticTerrain(coarse), shapes: layout() },
+        inputs: { terrain: analyticTerrain(coarse), shapes },
       })
     ).out as Field;
     const b = (
       await run(layoutFlattenNode, {
         ctx: fine,
-        inputs: { terrain: analyticTerrain(fine), shapes: layout() },
+        inputs: { terrain: analyticTerrain(fine), shapes },
       })
     ).out as Field;
     compareResolutions(a, b, 1e-3);

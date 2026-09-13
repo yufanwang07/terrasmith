@@ -17,21 +17,24 @@
  *
  * So these nodes do what `simulate.ts` does for erosion: they choose their own
  * grid from the world size, run the analysis there, and lift the answer back
- * onto whatever grid the graph is working on. The grid is capped by quality
- * (`planSimulationGrid`), so cost depends on the map's size in elmos and not on
- * the resolution the graph happens to be evaluating at.
+ * onto whatever grid the graph is working on. That grid is a function of the
+ * map's size in elmos and of nothing else — not of the graph's resolution, and
+ * deliberately not of `ctx.quality` either. A cap that moved with quality would
+ * put the preview and the build on different grids, which is the same lie as
+ * measuring in graph cells, just harder to notice.
  *
- * Above the cap the analysis reads a smoothed copy of the terrain, so it can
- * miss detail finer than one analysis square — it is an author's overlay, not
- * the pre-publish validator. `validateMap` in `@terrasmith/core` is the one
- * that runs on the exported heightmap at full resolution.
+ * Above {@link MAX_ANALYSIS_SQUARES} the analysis reads a smoothed copy of the
+ * terrain, so it can miss detail finer than one analysis square — it is an
+ * author's overlay, not the pre-publish validator. `validateMap` in
+ * `@terrasmith/core` is the one that runs on the exported heightmap at full
+ * resolution.
  */
 
 import {
-  BAR_EXTRACTOR_RADIUS,
   BUILDINGS,
   DEFAULT_SPOT_INCOME,
   ELMOS_PER_SQUARE,
+  METAL_MAP_SQUARE_SIZE,
   SLOPE_CELL_ELMOS,
   SQUARES_PER_FOOTPRINT,
   SYMMETRY_KINDS,
@@ -53,9 +56,10 @@ import {
   resampleField,
   resampleShape,
   sampleBilinear,
+  squareCentreHeights,
   suggestMetalSpots,
   symmetryErrorField,
-  type BarMoveDef,
+  symmetryImages,
   type Field,
   type MetalSpot,
   type Shape as WorldShape,
@@ -73,10 +77,8 @@ import {
   type PortValue,
   type Shape as GraphShape,
 } from '../types.js';
-import { planSimulationGrid } from './simulate.js';
 import {
   applyMask,
-  bool,
   choice,
   degrees,
   elmos,
@@ -97,9 +99,11 @@ import {
  * An SMF-shaped grid to run BAR's rules on, chosen from the map's world size.
  *
  * `mapx`/`mapy` are square counts and are always even, because the slope map is
- * `mapx / 2` wide and the corner heightmap is `mapx + 1`. At build resolution
- * `squareElmos` is BAR's own 8; above the quality cap it is larger and the
- * analysis reads a correspondingly smoother terrain.
+ * `mapx / 2` wide and the corner heightmap is `mapx + 1`. `squareElmos` is BAR's
+ * own 8 for every map up to {@link MAX_ANALYSIS_SQUARES} squares across; on a
+ * larger map it is a multiple of that and the analysis reads a correspondingly
+ * smoother terrain. It is never *smaller* than 8: the engine's slope map is a
+ * fixed 16 elmos a cell, so a finer grid would report tilts it never reads.
  */
 export interface AnalysisGrid {
   readonly mapx: number;
@@ -117,25 +121,33 @@ function evenSquares(n: number): number {
 }
 
 /**
+ * Squares per axis the analysis will not go past, whatever the map's size.
+ *
+ * 1024 is a 16x16 map — BAR's most common size by a wide margin — at BAR's own
+ * 8 elmos a square, so every map up to that is analysed on exactly the grid the
+ * engine will use, and a 32x32 gets 16-elmo squares. Resampling and analysing a
+ * 1025x1025 corner grid costs around 100 ms, which is what an overlay that
+ * redraws while a slider moves can afford; the next step up is four times that.
+ *
+ * The value is a constant on purpose. Deriving it from `ctx.quality` would make
+ * the preview and the build disagree about which ground is drivable — on a
+ * 16x16 map, by several percent of the whole map — and the point of running on
+ * a world-derived grid at all is that they cannot.
+ */
+const MAX_ANALYSIS_SQUARES = 1024;
+
+/**
  * Pick the grid the BAR rules should run on for this evaluation.
  *
- * The target square size is `ELMOS_PER_SQUARE`, i.e. the real thing; the
- * clamping inside `planSimulationGrid` is what keeps a 32x32 map's 2048-square
- * analysis from running on every slider move.
+ * Reads only the map's world size: the same map analyses identically at a
+ * 192-sample preview and at a 1025-sample build, which is what lets an author
+ * trust an overlay they are looking at before they press Build.
  */
 export function planAnalysisGrid(ctx: EvalContext): AnalysisGrid {
-  const plan = planSimulationGrid(
-    ctx.width,
-    ctx.height,
-    ctx.worldWidth,
-    ctx.worldHeight,
-    ELMOS_PER_SQUARE,
-    ctx.quality,
-  );
-  const mapx = evenSquares(plan.width);
+  const mapx = evenSquares(Math.min(MAX_ANALYSIS_SQUARES, ctx.worldWidth / ELMOS_PER_SQUARE));
   const squareElmos = ctx.worldWidth / mapx;
-  // Derived from the x spacing rather than from the plan's own height, so the
-  // squares stay square: the engine's normals assume they are.
+  // Derived from the x spacing rather than from the world height directly, so
+  // the squares stay square: the engine's normals assume they are.
   const mapy = evenSquares(ctx.worldHeight / squareElmos);
   return { mapx, mapy, squareElmos, slopeCellElmos: 2 * squareElmos };
 }
@@ -210,7 +222,7 @@ const MOVE_CLASS_OPTIONS: EnumOption[] = [
   {
     value: 'HTANK7',
     label: 'Thor',
-    description: 'Climbs to 33 degrees and is 104 elmos wide — the widest ground unit in the game.',
+    description: 'Climbs to 33 degrees and is 104 elmos wide, which with the Juggernaut is the widest anything drives on the ground.',
   },
   {
     value: 'BOT2',
@@ -245,19 +257,27 @@ const MOVE_CLASS_OPTIONS: EnumOption[] = [
   {
     value: 'BOAT4',
     label: 'Ship — Destroyer',
-    description: 'Needs at least 20 elmos of water under it. Ships never look at slope at all.',
+    description: 'Needs at least 8 elmos of water under it. Ships never look at slope at all.',
   },
   {
     value: 'BOAT9',
     label: 'Capital ship — Battleship',
-    description: 'Needs 60 elmos of water. A shallow bay that a destroyer enters can still shut this out.',
+    description:
+      'Needs 15 elmos of water, so a bay a destroyer sails into at 8 elmos deep can still shut this out.',
   },
 ];
 
-/** Turn the chosen enum value into a move class, falling back to the common vehicle. */
-function chosenMoveClass(id: unknown): BarMoveDef {
-  return moveDef(typeof id === 'string' && id in BUILDINGS === false ? id : 'TANK3');
-}
+/**
+ * The subset of {@link MOVE_CLASS_OPTIONS} a ramp can be cut for.
+ *
+ * Spiders and ships have no slope limit, so there is no grade to cut down to and
+ * the carve would do nothing at all. Offering a choice that silently changes
+ * nothing is worse than not offering it, so they are left out of the menu; the
+ * node still guards against one arriving from an older saved project.
+ */
+const RAMP_MOVE_CLASS_OPTIONS: EnumOption[] = MOVE_CLASS_OPTIONS.filter(
+  (o) => !moveDef(o.value).ignoresSlope,
+);
 
 /**
  * The buildings whose terrain demands decide whether a base site works, written
@@ -364,6 +384,41 @@ interface SymmetryParams {
 }
 
 /**
+ * A glide's slide period as an even number of grid samples, or `undefined` for a
+ * kind that does not slide.
+ *
+ * A glide reflection always translates *parallel* to its mirror line, so the
+ * left-right mirror slides along z and the top-bottom one along x, and the
+ * period is measured on that axis.
+ *
+ * Two constraints are grid constraints rather than world ones, which is why this
+ * has to convert rather than pass elmos through. Half a period has to land on a
+ * sample — at an odd count the map is symmetric at no sample at all — so the
+ * count is even. And a period longer than the axis slides every sample clean off
+ * the far edge, which compares nothing and then scores a field of pure noise as
+ * perfectly symmetric, so it is clamped to the axis. Both snaps go downward, so
+ * the world period an author asked for is honoured to within one sample at any
+ * resolution, and the default (0, "the whole map") always produces a workable
+ * period instead of failing on a grid that happens to have an odd number of rows.
+ */
+function glidePeriodSamples(
+  kind: SymmetryKind,
+  terrain: Field,
+  ctx: EvalContext,
+  periodElmos: number,
+): { x: number; z: number } | undefined {
+  if (kind !== 'glideX' && kind !== 'glideZ') return undefined;
+  const alongZ = kind === 'glideX';
+  const extent = alongZ ? terrain.height : terrain.width;
+  const sampleElmos = alongZ ? ctx.worldHeight / ctx.height : ctx.worldWidth / ctx.width;
+  const wanted = periodElmos > 0 && sampleElmos > 0 ? periodElmos / sampleElmos : extent;
+  const samples = Math.max(2, 2 * Math.floor(Math.min(wanted, extent) / 2));
+  // `symmetryTransforms` reads only the axis the kind slides along, so the same
+  // count on both is unambiguous.
+  return { x: samples, z: samples };
+}
+
+/**
  * Make the map fair.
  *
  * Seven maps in ten in BAR's curated pool are half-turn symmetric and almost all
@@ -453,25 +508,23 @@ export const symmetryNode: NodeDefinition<SymmetryParams> = {
       tier: 'advanced',
       visibleWhen: (p) => p.kind === 'glideX' || p.kind === 'glideZ',
       description:
-        'How far along the map a glide slides before it repeats. 0 uses the whole map. Only a map whose ' +
-        'seam is open water or a tiling texture can use a glide at all.',
+        'How far along the map a glide slides before it repeats. 0 uses the whole map, and anything longer ' +
+        'than the map is treated as the whole map. Only a map whose seam is open water or a tiling texture ' +
+        'can use a glide at all.',
     }),
   ],
   evaluate({ inputs, params, ctx }) {
     const terrain = requireField(inputs.terrain, 'Terrain');
     const kind = params.kind as SymmetryKind;
+    const period = glidePeriodSamples(kind, terrain, ctx, params.period);
 
-    // Glide periods are grid samples, and half of an odd one lands between
-    // samples — a map that is symmetric nowhere rather than at half-sample
-    // offsets. Round to even, and let 0 mean "the whole axis".
-    const samples = params.period > 0 ? evenSquares(params.period / cellSize(ctx)) : 0;
-    const period = samples > 0 ? { x: samples, z: samples } : undefined;
-
+    // With the period snapped to something workable, the only way a kind can
+    // still fail is the one an author can act on: it needs a square map.
     if (!isSymmetryApplicable(kind, terrain.width, terrain.height, period)) {
       throw new Error(
-        `${SYMMETRY_LABELS[kind]} does not fit a ${ctx.worldWidth}x${ctx.worldHeight} elmo map. ` +
-          'Quarter turns, third turns and the diagonals need a square map; a glide needs a period that ' +
-          'divides the axis it slides along.',
+        `${SYMMETRY_LABELS[kind]} needs a square map, and this one is ${ctx.worldWidth} by ` +
+          `${ctx.worldHeight} elmos. Use a half turn or a mirror, or make the map square in the ` +
+          'project settings.',
       );
     }
 
@@ -538,8 +591,11 @@ function pickPadSites(
         }
       }
       if (found < 0) continue;
-      const ax = found % anchors.width;
-      const az = (found / anchors.width) | 0;
+      // The pad is padSize across, which is wider than the building that found
+      // the anchor, so pull it back inside the grid rather than letting the
+      // spread scan run off the end of a row.
+      const ax = Math.min(found % anchors.width, anchors.width - sqX);
+      const az = Math.min((found / anchors.width) | 0, anchors.height - sqZ);
       let lo = Infinity;
       let hi = -Infinity;
       for (let z = az; z < az + sqZ; z++) {
@@ -571,6 +627,46 @@ function pickPadSites(
   return taken;
 }
 
+/** The buildability answer for one terrain, on the analysis grid. */
+interface BuildFit {
+  /** The terrain on the analysis grid's corner heightmap. */
+  readonly corner: Field;
+  /** 1 where a footprint anchored at that square fits. */
+  readonly anchors: Field;
+  /** The same answer moved to the footprint's centre, which is how an author reads it. */
+  readonly centred: Field;
+}
+
+/**
+ * Run the engine's build test and re-anchor the result.
+ *
+ * `buildabilityMap` answers at the footprint's *minimum corner*, because that is
+ * what a placement loop wants. An author reads a mask as "where I can put it",
+ * which is the footprint's centre, so the answer is shifted by half a footprint
+ * on the way out.
+ */
+function buildFit(
+  terrain: Field,
+  grid: AnalysisGrid,
+  options: Parameters<typeof buildabilityMap>[1],
+  sqX: number,
+  sqZ: number,
+): BuildFit {
+  const corner = analysisHeights(terrain, grid);
+  const anchors = buildabilityMap(corner, options);
+  const centred = createField(anchors.width, anchors.height);
+  const ox = sqX >> 1;
+  const oz = sqZ >> 1;
+  for (let z = 0; z + oz < anchors.height; z++) {
+    for (let x = 0; x + ox < anchors.width; x++) {
+      if (anchors.data[z * anchors.width + x] > 0) {
+        centred.data[(z + oz) * centred.width + (x + ox)] = 1;
+      }
+    }
+  }
+  return { corner, anchors, centred };
+}
+
 /**
  * Where a building fits, and somewhere to put one when it does not.
  *
@@ -591,15 +687,17 @@ export const buildablePadsNode: NodeDefinition<BuildablePadsParams> = {
     'Shows where a chosen building actually fits, using the flatness rule the engine uses rather than ' +
     'slope, and can level the best near-misses into platforms so there is somewhere to build.',
   keywords: ['buildable', 'flat', 'pad', 'base', 'factory', 'lab', 'platform', 'level', 'mex'],
-  inputs: [
-    terrainIn(),
-    maskIn(),
-  ],
+  // Three passes of the engine's build test over the analysis grid, plus a
+  // resample onto it before and after the levelling: a quarter of a second on a
+  // 16x16 map, which is worth memoising rather than redoing on every keystroke.
+  expensive: true,
+  inputs: [terrainIn(), maskIn()],
   outputs: [
     MASK_OUT(
       'mask',
       'Fits here',
-      'Marks the ground the building can be placed on, centred where you would click to place it.',
+      'Marks the ground the building can be placed on in the terrain this node outputs, centred where ' +
+        'you would click to place it.',
     ),
     terrainOut('out', 'Terrain'),
   ],
@@ -652,7 +750,6 @@ export const buildablePadsNode: NodeDefinition<BuildablePadsParams> = {
   evaluate({ inputs, params, ctx }) {
     const terrain = requireField(inputs.terrain, 'Terrain');
     const grid = planAnalysisGrid(ctx);
-    const corner = analysisHeights(terrain, grid);
     const spec = barBuilding(params.building);
 
     // The footprint has to be counted in *this grid's* squares, not in BAR's
@@ -669,35 +766,21 @@ export const buildablePadsNode: NodeDefinition<BuildablePadsParams> = {
       waterLevel: 0,
       maxWaterDepth: params.maxWaterDepth,
     };
-    const anchors = buildabilityMap(corner, options);
-
-    // `buildabilityMap` answers at the footprint's *minimum corner*; an author
-    // reads a mask as "where I can put it", which is its centre.
-    const centred = createField(anchors.width, anchors.height);
-    const ox = sqX >> 1;
-    const oz = sqZ >> 1;
-    for (let z = 0; z + oz < anchors.height; z++) {
-      for (let x = 0; x + ox < anchors.width; x++) {
-        if (anchors.data[z * anchors.width + x] > 0) {
-          centred.data[(z + oz) * centred.width + (x + ox)] = 1;
-        }
-      }
-    }
-    const mask = liftMask(centred, ctx);
-    if (params.padCount <= 0) return { mask, out: terrain };
+    const fit = buildFit(terrain, grid, options, sqX, sqZ);
+    if (params.padCount <= 0) return { mask: liftMask(fit.centred, ctx), out: terrain };
 
     // Square-centre heights are what the engine's build test reads, so the
     // spread that ranks a site is measured on the same samples it will be
     // judged by.
-    const centreHeights = resampleField(corner, grid.mapx, grid.mapy);
-    const relaxed = buildabilityMap(corner, {
+    const centreHeights = squareCentreHeights(fit.corner);
+    const relaxed = buildabilityMap(fit.corner, {
       ...options,
       maxHeightDif: spec.maxHeightDif * params.searchTolerance,
     });
     const padSquaresX = Math.max(sqX, Math.round(params.padSize / grid.squareElmos));
     const padSquaresZ = Math.max(sqZ, Math.round(params.padSize / grid.squareElmos));
     const sites = pickPadSites(relaxed, centreHeights, padSquaresX, padSquaresZ, grid, params.padCount);
-    if (sites.length === 0) return { mask, out: terrain };
+    if (sites.length === 0) return { mask: liftMask(fit.centred, ctx), out: terrain };
 
     const pads: WorldShape[] = sites.map((s, i) =>
       // No `value`: each pad levels to the mean of its own core, which is the
@@ -709,7 +792,11 @@ export const buildablePadsNode: NodeDefinition<BuildablePadsParams> = {
       cellSize: cellSize(ctx),
       blendMode: 'smoothSet',
     });
-    return { mask, out: applyMask(terrain, levelled, inputs.mask) };
+    const out = applyMask(terrain, levelled, inputs.mask);
+    // Re-tested against the terrain that leaves this node, so the overlay
+    // describes the map the author is now holding rather than the one they
+    // handed in. The platforms they just asked for have to show up in it.
+    return { mask: liftMask(buildFit(out, grid, options, sqX, sqZ).centred, ctx), out };
   },
 };
 
@@ -826,7 +913,18 @@ export const passabilityNode: NodeDefinition<PassabilityParams> = {
     for (let i = 0; i < cutOff.data.length; i++) {
       if (stranded.has(regions.labels[i])) cutOff.data[i] = 1;
     }
-    return { mask: liftMask(passable, ctx), cutOff: liftMask(cutOff, ctx) };
+
+    // Both masks are lifted through the same bicubic, whose negative lobes can
+    // carry a cut-off cell over the half-way cut in a place where the passable
+    // mask around it falls under — which paints ground as stranded that the
+    // other output says nothing can stand on. Intersecting keeps the promise the
+    // two make together: everything cut off is ground this class could occupy.
+    const mask = liftMask(passable, ctx);
+    const lifted = liftMask(cutOff, ctx);
+    for (let i = 0; i < lifted.data.length; i++) {
+      if (mask.data[i] <= 0) lifted.data[i] = 0;
+    }
+    return { mask, cutOff: lifted };
   },
 };
 
@@ -925,7 +1023,8 @@ export const metalSpotsNode: NodeDefinition<MetalSpotsParams> = {
     MASK_OUT(
       'metal',
       'Metal density',
-      'The 0–1 density to wire into the Metal output. One value per 16x16 elmos, as the map file stores it.',
+      'The 0–1 density to wire into the Metal output. The blobs are laid out on the map’s own ' +
+        '16-elmo metal grid, whatever resolution the graph is running at.',
     ),
     {
       id: 'spots',
@@ -942,25 +1041,22 @@ export const metalSpotsNode: NodeDefinition<MetalSpotsParams> = {
     }),
     choice(
       'startPlacement',
-      'Starts sit on the',
+      'Where the starts go',
       'west',
       [
-        { value: 'west', label: 'Left and right edges', description: 'Players face each other across the short way.' },
+        { value: 'west', label: 'Left and right edges', description: 'Players face each other across the map, left to right.' },
         { value: 'north', label: 'Top and bottom edges' },
         { value: 'corner', label: 'Corners' },
       ],
-      {
-        visibleWhen: (p) => !p.startsConnected,
-        description: 'Only used when nothing is connected to the Start positions input.',
-      },
+      { description: 'Only used when nothing is connected to the Start positions input.' },
     ),
     elmos('startInset', 'Starts in from the edge', 700, {
       min: 128,
       max: 8192,
       softMax: 2048,
       description:
-        'A base needs its own ring of metal before the first expansion, which is about 600 elmos across, ' +
-        'so a start much closer to the edge than this has nowhere to grow.',
+        'A base claims the metal within 600 elmos of the start before it expands, so a start much closer ' +
+        'to the edge than that has nowhere to grow.',
     }),
     int('baseSpots', 'Base spots per start', 3, {
       min: 0,
@@ -1054,7 +1150,12 @@ export const metalSpotsNode: NodeDefinition<MetalSpotsParams> = {
     const starts =
       connected.length > 0
         ? connected
-        : symmetryStarts(seedStart(params.startPlacement, params.startInset, worldW, worldH), worldW, worldH, symmetry);
+        : symmetryImages(
+            seedStart(params.startPlacement, params.startInset, worldW, worldH),
+            worldW,
+            worldH,
+            symmetry,
+          );
 
     const spots: MetalSpot[] = suggestMetalSpots(corner, {
       startPositions: starts,
@@ -1067,7 +1168,7 @@ export const metalSpotsNode: NodeDefinition<MetalSpotsParams> = {
       minSeparation: params.minSeparation,
       edgeMargin: params.edgeMargin,
       waterLevel: 0,
-      seed,
+      seed: (seed + params.seed) | 0,
     });
 
     const metalMap = createMetalMap(mapx, mapy);
@@ -1079,7 +1180,7 @@ export const metalSpotsNode: NodeDefinition<MetalSpotsParams> = {
           maxMetal: params.maxMetal,
           extractsMetal: T1_EXTRACTS_METAL,
           shape: params.blobShape as 'bar' | 'disc' | 'square',
-          radiusCells: Math.max(1, Math.round(params.blobRadius / (ELMOS_PER_SQUARE * 2))),
+          radiusCells: Math.max(1, Math.round(params.blobRadius / METAL_MAP_SQUARE_SIZE)),
         },
       );
     }
@@ -1106,46 +1207,6 @@ export const metalSpotsNode: NodeDefinition<MetalSpotsParams> = {
   },
 };
 
-/** Start positions as one symmetry orbit, which is what makes them equal by construction. */
-function symmetryStarts(
-  first: WorldPos,
-  worldW: number,
-  worldH: number,
-  kind: SymmetryKind,
-): WorldPos[] {
-  switch (kind) {
-    case 'rotate180':
-      return [first, { x: worldW - first.x, z: worldH - first.z }];
-    case 'mirrorX':
-      return [first, { x: worldW - first.x, z: first.z }];
-    case 'mirrorZ':
-      return [first, { x: first.x, z: worldH - first.z }];
-    case 'mirrorXZ':
-      return [
-        first,
-        { x: worldW - first.x, z: first.z },
-        { x: first.x, z: worldH - first.z },
-        { x: worldW - first.x, z: worldH - first.z },
-      ];
-    case 'rotate90': {
-      const cx = worldW / 2;
-      const cz = worldH / 2;
-      const out: WorldPos[] = [first];
-      let x = first.x - cx;
-      let z = first.z - cz;
-      for (let i = 0; i < 3; i++) {
-        const nx = -z;
-        z = x;
-        x = nx;
-        out.push({ x: cx + x, z: cz + z });
-      }
-      return out;
-    }
-    default:
-      return [first];
-  }
-}
-
 // ---------------------------------------------------------------------------
 // gameplay.rampCarve
 // ---------------------------------------------------------------------------
@@ -1159,8 +1220,17 @@ interface RampCarveParams {
   end: [number, number];
 }
 
-/** Stations along a route, every 16 elmos — one slope cell, the finest scale that decides pathing. */
-const RAMP_STATION_ELMOS = SLOPE_CELL_ELMOS;
+/**
+ * Spacing of the stations the bed profile is computed at, in elmos.
+ *
+ * One heightmap square — the finest thing the engine itself ever looks at, and a
+ * world distance rather than a cell count, so the same route produces the same
+ * ramp at preview and at build. Coarser stations leave a short remnant of the
+ * original cliff at the toe of the ramp: the bed is only guaranteed to sit under
+ * the ground *at* a station, and between two of them the ground can still climb
+ * out over the straight line joining them.
+ */
+const RAMP_STATION_ELMOS = ELMOS_PER_SQUARE;
 
 /**
  * The highest profile along a route that never exceeds `grade` and never rises
@@ -1218,8 +1288,8 @@ export const rampCarveNode: NodeDefinition<RampCarveParams> = {
       type: 'shapes',
       label: 'Route',
       description:
-        'Optional. One line per ramp, in elmos, running from the low end to the high end. Without it the ' +
-        'two positions below are used.',
+        'Optional. One line per ramp, in elmos, drawn across the edge you want a way up. Either direction ' +
+        'gives the same ramp. Without it the two positions below are used.',
       optional: true,
     },
     maskIn(),
@@ -1233,7 +1303,7 @@ export const rampCarveNode: NodeDefinition<RampCarveParams> = {
     ),
   ],
   params: [
-    choice('moveClass', 'Passable by', 'TANK3', MOVE_CLASS_OPTIONS, {
+    choice('moveClass', 'Passable by', 'TANK3', RAMP_MOVE_CLASS_OPTIONS, {
       description:
         'Sets the grade. 27 degrees for vehicles, 54 for bots — cutting a bot-only ramp onto a plateau is ' +
         'a deliberate and very effective way to shape where a fight happens.',
@@ -1291,9 +1361,10 @@ export const rampCarveNode: NodeDefinition<RampCarveParams> = {
     }
 
     const ramp = createField(ctx.width, ctx.height);
-    // A class with no slope limit has nothing to cut down to, and a 90-degree
-    // grade is an infinite tangent rather than a very steep ramp.
-    if (limitDegrees <= 0 || limitDegrees >= 89) return { out: terrain, ramp };
+    // A spider or a ship has no slope limit to satisfy, so there is nothing to
+    // cut down to; a 90-degree grade is an infinite tangent rather than a very
+    // steep ramp.
+    if (move.ignoresSlope || limitDegrees <= 0 || limitDegrees >= 89) return { out: terrain, ramp };
 
     const cs = cellSize(ctx);
     const grade = Math.tan((limitDegrees * Math.PI) / 180);
@@ -1301,9 +1372,15 @@ export const rampCarveNode: NodeDefinition<RampCarveParams> = {
     const shoulder = Math.max(0, params.shoulder);
     const reach = half + shoulder;
 
-    // The cut surface is collected first and applied once, so two routes that
-    // cross produce the same terrain whichever order they were drawn in.
-    const surface = new Float32Array(ctx.width * ctx.height).fill(Infinity);
+    // Each cell takes its bed from the *nearest* point of the nearest route, and
+    // the whole cut is applied at the end. Keeping the nearest point rather than
+    // the lowest one in range matters more than it looks: a cell 196 elmos back
+    // down the hill is still within reach of the corridor, and taking the lowest
+    // bed in range would shift the entire ramp one corridor-width downhill and
+    // leave the original cliff standing at its top.
+    const cells = ctx.width * ctx.height;
+    const surface = new Float32Array(cells);
+    const nearest = new Float32Array(cells).fill(Infinity);
 
     for (const route of routes) {
       const stations = resampleShape(
@@ -1334,6 +1411,7 @@ export const rampCarveNode: NodeDefinition<RampCarveParams> = {
         const lenSq = dx * dx + dz * dz;
         if (lenSq === 0) continue;
 
+        const reachSq = reach * reach;
         const x0 = Math.max(0, Math.floor((Math.min(ax, bx) - reach) / cs));
         const x1 = Math.min(ctx.width - 1, Math.ceil((Math.max(ax, bx) + reach) / cs));
         const z0 = Math.max(0, Math.floor((Math.min(az, bz) - reach) / cs));
@@ -1347,18 +1425,23 @@ export const rampCarveNode: NodeDefinition<RampCarveParams> = {
             // has round caps rather than square ones.
             let t = ((wx - ax) * dx + (wz - az) * dz) / lenSq;
             t = t < 0 ? 0 : t > 1 ? 1 : t;
-            const d = Math.hypot(wx - (ax + dx * t), wz - (az + dz * t));
-            if (d > reach) continue;
+            const ox = wx - (ax + dx * t);
+            const oz = wz - (az + dz * t);
+            // Squared first: this is the innermost loop of the whole node, and
+            // `Math.hypot` is an order of magnitude slower than a multiply for
+            // the majority of cells, which are rejected here anyway.
+            const dSq = ox * ox + oz * oz;
+            if (dSq > reachSq) continue;
+            const d = Math.sqrt(dSq);
 
-            const w = d <= half ? 1 : shoulder > 0 ? 1 - smoothstep01((d - half) / shoulder) : 0;
-            if (w <= 0) continue;
             const idx = iz * ctx.width + ix;
+            if (d >= nearest[idx]) continue;
+            nearest[idx] = d;
             // The corridor floor is flat across its width: a ramp that is
             // cambered reads steeper at the edges than along the middle, and the
             // engine measures the steepest triangle in each cell.
-            const here = bed[i] + (bed[i + 1] - bed[i]) * t;
-            if (here < surface[idx]) surface[idx] = here;
-            if (w > ramp.data[idx]) ramp.data[idx] = w;
+            surface[idx] = bed[i] + (bed[i + 1] - bed[i]) * t;
+            ramp.data[idx] = d <= half ? 1 : shoulder > 0 ? 1 - smoothstep01((d - half) / shoulder) : 0;
           }
         }
       }

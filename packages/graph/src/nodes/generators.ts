@@ -11,14 +11,16 @@ import {
   createField,
   filledField,
   fractalNoise2D,
+  importHeightmapImage,
   planWarp,
+  resampleField,
   resolveNoiseParams,
   warpedNoise2D,
   type Field,
   type FractalType,
   type NoiseType,
 } from '@terrasmith/core';
-import type { NodeDefinition } from '../types.js';
+import type { NodeDefinition, ParamDef } from '../types.js';
 import { bool, choice, elmos, int, num, seedParam, terrainOut } from './helpers.js';
 
 /**
@@ -473,4 +475,163 @@ class SmallRng {
   }
 }
 
-export const generatorNodes = [noiseNode, constantNode, gradientNode, plateausNode] as const;
+interface ImportParams {
+  image: string;
+  minHeight: number;
+  maxHeight: number;
+  rawWidth: number;
+  flipZ: boolean;
+}
+
+/**
+ * Bring in a heightmap made somewhere else.
+ *
+ * The reason this matters is interoperability: BAR mappers already have
+ * heightfields in World Machine, Gaea, L3DT and Blender, and a tool that cannot
+ * accept one is a tool they have to abandon their work to try. A 16-bit PNG or
+ * a headerless r16 covers everything in that workflow.
+ *
+ * The image lives in the project file as a data URL rather than as a path,
+ * so a project is one file you can send someone and they see the same map. It
+ * costs a third more bytes than the binary, which for a 1025-square heightmap
+ * is about five megabytes — acceptable for something you open once and edit for
+ * hours.
+ */
+export const importHeightmapNode: NodeDefinition<ImportParams> = {
+  type: 'generator.importHeightmap',
+  label: 'Import heightmap',
+  category: 'generator',
+  description:
+    'Uses a heightmap from another tool. Accepts a 16-bit PNG or a headerless r16, which is what ' +
+    'World Machine, Gaea, L3DT and Blender all export. The image only carries brightness, so you ' +
+    'have to say what its black and white points mean in elmos.',
+  keywords: ['load', 'open', 'png', 'r16', 'raw', 'world machine', 'gaea', 'l3dt', 'external'],
+  inputs: [],
+  outputs: [terrainOut()],
+  params: [
+    {
+      id: 'image',
+      label: 'Heightmap file',
+      type: 'image',
+      default: '',
+      description:
+        'A 16-bit greyscale PNG, or a headerless r16. An 8-bit image works but arrives with only ' +
+        '256 distinct heights, which terraces the whole map.',
+      tier: 'basic',
+    } satisfies ParamDef,
+    num('minHeight', 'Black is', 0, {
+      unit: 'elmos',
+      min: -10000,
+      max: 10000,
+      softMin: -500,
+      softMax: 500,
+      description:
+        'A heightmap image carries no units — only brightness — so these two say what its darkest ' +
+        'and brightest points mean. Getting them wrong is the most common way an imported map comes ' +
+        'out squashed or flooded.',
+    }),
+    num('maxHeight', 'White is', 500, {
+      unit: 'elmos',
+      min: -10000,
+      max: 10000,
+      softMin: 0,
+      softMax: 2000,
+    }),
+    int('rawWidth', 'Width of the r16', 0, {
+      min: 0,
+      max: 16384,
+      tier: 'advanced',
+      description:
+        'Only needed for a headerless r16 that is not square: the file has no header to say. ' +
+        'Leave at 0 and a square image is assumed.',
+    }),
+    bool('flipZ', 'Flip north to south', false, {
+      tier: 'advanced',
+      description:
+        'Some tools write the first row as the south edge. Turn this on if the map comes out ' +
+        'mirrored against the image you exported.',
+    }),
+  ],
+  evaluate({ params, ctx }) {
+    if (!params.image) {
+      // An empty node is a normal state — it is what you see before choosing a
+      // file — so produce flat ground rather than failing the whole graph.
+      return { out: createField(ctx.width, ctx.height) };
+    }
+
+    const bytes = decodeDataUrl(params.image);
+    const imported = importHeightmapImage(bytes, {
+      width: params.rawWidth > 0 ? params.rawWidth : undefined,
+      minHeight: params.minHeight,
+      maxHeight: params.maxHeight,
+    });
+
+    let field = imported.field;
+    if (params.flipZ) field = flipVertically(field);
+    return { out: resampleField(field, ctx.width, ctx.height) };
+  },
+};
+
+/**
+ * Decode a `data:` URL to bytes.
+ *
+ * Written out rather than using `atob` because this runs in a worker, in Node
+ * and in a browser, and only one of those three is guaranteed to have it.
+ */
+function decodeDataUrl(url: string): Uint8Array {
+  const comma = url.indexOf(',');
+  if (comma < 0) throw new Error('the heightmap is not a data URL');
+  const meta = url.slice(0, comma);
+  const payload = url.slice(comma + 1);
+  if (!meta.includes(';base64')) {
+    throw new Error('only base64 data URLs are supported for heightmaps');
+  }
+  return decodeBase64(payload);
+}
+
+const BASE64_CHARS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+const BASE64_LOOKUP = (() => {
+  const table = new Int16Array(128).fill(-1);
+  for (let i = 0; i < BASE64_CHARS.length; i++) table[BASE64_CHARS.charCodeAt(i)] = i;
+  return table;
+})();
+
+function decodeBase64(text: string): Uint8Array {
+  let length = text.length;
+  while (length > 0 && text.charCodeAt(length - 1) === 61) length--; // trailing '='
+  const out = new Uint8Array(Math.floor((length * 3) / 4));
+  let bits = 0;
+  let accumulated = 0;
+  let at = 0;
+  for (let i = 0; i < length; i++) {
+    const code = text.charCodeAt(i);
+    const value = code < 128 ? BASE64_LOOKUP[code] : -1;
+    // Line breaks inside a data URL are legal and common; skip anything that is
+    // not part of the alphabet rather than producing silent garbage.
+    if (value < 0) continue;
+    accumulated = (accumulated << 6) | value;
+    bits += 6;
+    if (bits >= 8) {
+      bits -= 8;
+      out[at++] = (accumulated >> bits) & 0xff;
+    }
+  }
+  return at === out.length ? out : out.subarray(0, at);
+}
+
+function flipVertically(field: Field): Field {
+  const out = createField(field.width, field.height);
+  for (let y = 0; y < field.height; y++) {
+    const src = (field.height - 1 - y) * field.width;
+    out.data.set(field.data.subarray(src, src + field.width), y * field.width);
+  }
+  return out;
+}
+
+export const generatorNodes = [
+  noiseNode,
+  constantNode,
+  gradientNode,
+  plateausNode,
+  importHeightmapNode,
+] as const;

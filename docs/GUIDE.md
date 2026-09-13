@@ -4,8 +4,10 @@ This guide assumes you play Beyond All Reason and have never opened a terrain to
 you will actually need things: get something on screen, learn to read it, then make it a map someone would
 want to play.
 
-Every number here comes from BAR's game data, the Recoil engine source, or a measurement across the 225
-maps in BAR's curated pool. The workings are in [research/bar-gameplay.md](research/bar-gameplay.md) and
+Every number here comes from BAR's game data, the Recoil engine source, or a measurement across BAR's
+curated map pool — 225 maps in the lobby's list, 50 archives where a figure needed the map file itself,
+202 for the symmetry shares BAR's own generator carries. The workings are in
+[research/bar-gameplay.md](research/bar-gameplay.md) and
 [research/map-archive.md](research/map-archive.md) if you want to check one.
 
 **One unit of measurement to learn first.** BAR measures distance in *elmos*. A map is sized in 512-elmo
@@ -25,7 +27,7 @@ much better first hour than building one from nothing.
 | Rolling hills | 16x16 | 2–12 | Broad hills, wide flat valleys, a few lakes. Almost all of it drivable. |
 | Mountain range | 16x16 | 2–10 | High ground worth fighting for, with passes between. |
 | Island cluster | 20x20 | 4–16 | Naval, with contested shallows between the islands. |
-| Canyon lanes | 20x16 | 4–16 | Plateaus split by deep channels — a lane map. |
+| Canyon lanes | 20x16 | 8–16 | Plateaus split by deep channels — a lane map. |
 | Highland basin | 20x20 | 8–16 | A ring of high ground around an open middle. |
 | Almost flat | 12x12 | 2–8 | A blank slate. The one to learn the controls on. |
 | Volcanic shelf | 16x16 | 4–12 | Black rock, steep sides, a flooded caldera. |
@@ -71,15 +73,24 @@ every commander and every amphibious unit, including the amphibious vehicles lik
 - A ramp at **30 degrees** shuts standard vehicles out while bots, hovers, Thor and amphibians still climb
   it. This is a deliberate and very effective design tool: it gives one half of the tech tree ground the
   other half cannot follow onto, without building a wall.
-- A cliff at **56 degrees** is impassable to everything on the ground except spiders, which is intended —
-  spiders have no slope limit at all.
+- A cliff at **56 degrees** stops every bot, tank, hover and commander. What still walks up it is the
+  handful of move classes BAR gives no slope limit at all: spiders, Vanguard and Karganeth, Korgoth, and
+  the T4 all-terrain units. That is intended, so do not expect a cliff to be a wall against those.
 
-Two details that will otherwise confuse you. First, the engine measures slope over a **16x16 elmo cell**,
-blending the steepest of the eight triangles in that cell with their average — deliberately, so that "small
-holes don't block huge tanks". A single sharp spike in your heightmap will not block anything; a
-consistently steep 100-elmo face will. The viewport overlay measures slope per heightmap sample, which is
-close but a little more pessimistic than the engine's cell value; when you need the definitive answer, run
-the validator, which reconstructs the engine's slope map exactly and reports unreachable ground. Second, if
+Two details that will otherwise confuse you. First, the engine does not measure slope the way you would
+guess. It works on **16x16 elmo cells**, and for each cell it blends the steepest of the eight triangles in
+that cell with their average — but the blend is weighted by how steep that steepest triangle is, so the
+steeper it gets the less the average pulls it back. The engine's source comment says the blend is there
+"so that small holes don't block huge tanks", and that is true of a shallow dimple, but it is **not** a
+licence to leave spikes in. Measured against Terrasmith's exact reproduction of the engine's slope map: a
+single heightmap corner raised **20 elmos** above otherwise perfectly flat ground makes its whole 16-elmo
+cell read as **66 degrees** — past the 54-degree gate, so nothing but a spider crosses it. Keep per-square
+height differences under about 6 elmos anywhere you want vehicles to drive, and smooth before you export.
+
+Second, the viewport overlay is not the engine. It takes a per-sample gradient, which is quick and looks
+right but reads systematically **flatter** than the engine does — most visibly on spiky ground and on cliff
+tops, where the engine reads steep and a gradient reads level. When you need the definitive answer, run the
+validator: it reconstructs the engine's slope map exactly and reports what is actually unreachable. Second, if
 you ever read BAR's `movedefs.lua` directly you will see `maxslope = 18` where this guide says 27 degrees.
 The engine multiplies by 1.5 on load and BAR pre-divides to compensate. The real angles are the ones in the
 table.
@@ -150,8 +161,13 @@ expand across the whole map alone.
 **Non-square is normal.** 20x16, 24x16, 20x12 and 18x12 are all common, and a rectangle is the natural
 shape for a lane map where two teams face each other across the short axis.
 
-Changing the size in Terrasmith does not require rewiring anything: every generator works in world
-coordinates, so the same graph at 16x16 and at 24x24 gives you the same landscape at the appropriate scale.
+Changing the size in Terrasmith does not require rewiring anything, but be clear about what it does.
+Generators are anchored in world coordinates, so growing a 16x16 map to 24x24 **does not zoom the
+landscape out — it keeps the terrain you already have and extends it**. The pattern is anchored to the
+map's origin corner, so the terrain near that corner stays put and the extra ground appears beyond the old
+edges (measured: under 3 elmos of drift at the same world point, on a map 400 elmos tall). A 2048-elmo
+hill is still 2048 elmos wide; you just have 12288 elmos of map instead of 8192 to put hills in. Decide
+the size early, because the half of the map you were happy with will not rearrange itself to fit a new one.
 
 ---
 
@@ -206,8 +222,9 @@ spot's position is the centre of that group's bounding box, and its worth is the
 
 That is why **a spot is a blob, not a pixel**. A single painted cell is a legal spot but a bad one: it gives
 the extractor-snapping logic almost nothing to work with. Real BAR spots are **4x4 metal cells, about 64x64
-elmos** — measured across Altair Crossing, Ravaged, Tabula and Tundra, and matching BAR's own spot-placer
-gadget, which paints a 5x5 block minus its corners.
+elmos** — measured across Altair Crossing, Ravaged, Tabula and Tundra. BAR's own spot-placer gadget is a
+little more generous, painting a 5x5 block minus its four corners, which is 80x80 elmos. Anywhere in that
+range is a normal spot.
 
 Three sizes to stay inside:
 
@@ -261,13 +278,14 @@ until the player has naval tech** — a real balance lever, and one that is easy
 
 ### Use 180-degree rotation
 
-Across BAR's curated maps, symmetry breaks down like this:
+BAR's own map generator weights its symmetry choices from a scan of 202 shipped maps
+(`newmap_archetypes.lua`), and the shares are lopsided:
 
-| Symmetry | Share |
+| Symmetry | Share of the 202 scanned maps |
 | --- | --- |
-| **Rotational 180°** | **71%** |
-| Mirror across X | 14% |
-| Mirror across Z | 12% |
+| **Rotational 180°** | **70.9%** |
+| Mirror across X | 13.6% |
+| Mirror across Z | 11.8% |
 | Rotational 90° | 3.6% |
 
 Rot180 dominates for a concrete reason: it makes distance to the contested middle automatically equal for
@@ -289,9 +307,11 @@ declared, which is the quickest way to catch a layer you forgot.
    asymmetric type map is a classic imbalance bug.
 3. **A buildable pad inside the start box.** At least 96x96 elmos within ±10.7 — BAR's pregame build UI
    assumes the commander can place a lab straight away.
-4. **Distance from the other bases.** At least **1400 elmos** between bases, so a T2 Annihilator (range
-   1400) built at the edge of one base cannot cover another. For 1v1, 2500 or more, so an early Big Bertha
-   (range 4650) is a commitment rather than a free win.
+4. **Distance from the other bases.** At least **1400 elmos** between start positions on a team map, and
+   **2500** on a 1v1 — the thresholds BAR's own map checklist uses. 1400 is not arbitrary: it is the range
+   of a T2 Annihilator, so anything closer means one player's static defence already covers their
+   neighbour's base. Note that this is a floor, not safety: a Big Bertha reaches 4650 elmos, and no
+   sensible base spacing puts a map out of its range.
 5. **One or two ramps per base.** Zero ramps is unplayable; four or more is undefendable. Make each ramp
    generously wide — around 150 elmos is a reasonable default — or units will conga-line into it and die.
 6. **A ridge that breaks line of sight**, so a base is not visible from the front without scouting, and a
@@ -329,9 +349,9 @@ Depth is just negative height, and every naval rule keys off specific depths:
 | deeper than −20 | Ships, submarines, hovers, amphibians and air only. |
 
 So the shape of your shoreline decides what kind of fight happens there. A coast that drops from 0 to −25
-inside one 16-elmo cell is a hard land/sea boundary with nothing in between. A coast that spends 100 or more
-elmos between −4 and −20 is a wide amphibious contest zone where hovers and wading bots have a distinct
-role. Both are valid. Pick one deliberately.
+inside one 8-elmo heightmap square is a hard land/sea boundary with nothing in between. A coast that
+spends 100 or more elmos between −4 and −20 is a wide amphibious contest zone where hovers and wading bots
+have a distinct role. Both are valid. Pick one deliberately.
 
 ### Channels
 
@@ -381,10 +401,12 @@ and it is also how a mapper who sets it to 5000 "for flavour" silently deletes a
 
 ## 8. Moving to the node graph
 
-The guided form is a curated set of controls over a real node graph. When you run out of form, switching to
-the graph shows you exactly what the form was driving — the same nodes that are in the palette, wired the
-way a person would wire them. Open a template's graph early, even if you do not intend to edit it; the
-templates are the clearest documentation the catalog has.
+The guided form is a curated set of controls over a real node graph, not a separate simple engine. It walks
+four steps — **Landform**, **Weathering**, **Shaping**, **Height and water** — and each control in them is
+one parameter of one node the template already placed. When you run out of form, switching to the graph
+shows you exactly what the form was driving: the same nodes that are in the palette, wired the way a person
+would wire them. Open a template's graph early, even if you do not intend to edit it; the templates are the
+clearest documentation the catalog has.
 
 Every node's reference page is in [NODES.md](NODES.md). The categories:
 
@@ -416,9 +438,10 @@ for detail, joined with `Combine → Add`. Swap the operation to `Maximum` and y
 and very useful: a mountain range dropped into rolling hills without flattening either one, because Maximum
 keeps whichever terrain is higher at each point.
 
-**3. A selector into a Mask input.** Every filter has an optional Mask input, and every selector outputs
-exactly the kind of field a mask wants — so any selection can drive any effect. This is the connection that
-turns a graph from "one shape" into a map:
+**3. A selector into a Mask input.** Every filter that changes heights has an optional Mask input, and
+every selector outputs exactly the kind of field a mask wants — so any selection can drive any effect.
+(The two exceptions are Transform and Sea level, which move the whole terrain and have nothing sensible to
+do with a partial mask.) This is the connection that turns a graph from "one shape" into a map:
 
 - `Select by slope (0° to 10°) → Flatten.Mask` — make the nearly-flat ground properly flat.
 - `Select by height → Smooth.Mask` — soften only the lowlands, leave the peaks sharp.
@@ -475,6 +498,9 @@ have.
 MyMap.sd7
   maps/MyMap.smf                  heightmap, type map, metal map, minimap, tile indices, features
   maps/MyMap.smt                  the deduplicated DXT1 tiles the texture is made of
+  maps/MyMap_specular.dds         the specular map; its presence turns on the engine's advanced shading
+  maps/*_dnts.dds                 four tiling detail normals the shader blends over the diffuse
+  maps/MyMap_splat.dds            the four-channel splat weights, when a Splat output is connected
   mapinfo.lua                     name, version, height range, water, wind, tidal, metal, start positions
   maphelper/mapinfo.lua           a one-line back-compat shim every shipped BAR map still includes
   mapconfig/map_metal_layout.lua  the metal spot list, when the project has spots
@@ -489,8 +515,10 @@ Three naming rules the engine enforces, all handled for you but worth knowing wh
   expect, that is where it came from.
 - `mapinfo.mapfile` must point at the actual `.smf`, and the `.smt` name stored inside the `.smf` must
   match the actual file in `maps/`. Renaming anything after a build is how you get a pink map.
-- **The archive must not be solid.** A solid `.sd7` makes the map invisible to the engine with no error
-  message at all, and BAR's CI rejects it outright.
+- **The archive must not be solid.** A solid `.sd7` still loads today — the engine's own rejection of it is
+  dormant on current Recoil master, and all you lose is that `mapinfo.lua` costs a full decompression — but
+  BAR's CI checks solidity independently and the whitelist is empty, so a solid archive simply will not get
+  into the map pool. Terrasmith always writes non-solid.
 
 Do not ship your source files. World Machine `.tmd` projects and source PNGs inside the archive are pure
 weight — several shipped BAR maps carry megabytes of them by accident, and BAR's own upload form has a

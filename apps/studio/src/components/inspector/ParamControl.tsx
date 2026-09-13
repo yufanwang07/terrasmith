@@ -36,6 +36,8 @@ export function ParamControl({ def, value, onChange, params }: Props) {
       return <EnumControl def={def} value={String(value ?? '')} onChange={onChange} />;
     case 'string':
       return <StringControl def={def} value={String(value ?? '')} onChange={onChange} />;
+    case 'image':
+      return <ImageControl def={def} value={String(value ?? '')} onChange={onChange} />;
     case 'seed':
       return <SeedControl def={def} value={Number(value ?? 0)} onChange={onChange} />;
     case 'curve':
@@ -213,6 +215,80 @@ function StringControl({
     <div className="field">
       <Label def={def} />
       <input type="text" value={value} onChange={(e) => onChange(e.target.value)} />
+      <Help def={def} />
+    </div>
+  );
+}
+
+/**
+ * A file picker that stores the file in the project.
+ *
+ * The file becomes a base64 data URL rather than a path, so a project is one
+ * thing you can send someone and they open the same map. Big files are the
+ * price — a 1025-square 16-bit heightmap is about five megabytes once encoded —
+ * which is why the control says how large the one you picked is.
+ */
+function ImageControl({
+  def,
+  value,
+  onChange,
+}: {
+  def: ParamDef;
+  value: string;
+  onChange(v: string): void;
+}) {
+  const input = useRef<HTMLInputElement>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const load = async (file: File) => {
+    setError(null);
+    try {
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      // Chunked: String.fromCharCode with a few million arguments overflows
+      // the call stack.
+      let binary = '';
+      const CHUNK = 0x8000;
+      for (let i = 0; i < bytes.length; i += CHUNK) {
+        binary += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
+      }
+      onChange(`data:application/octet-stream;base64,${btoa(binary)}`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const bytes = value ? Math.floor(((value.length - value.indexOf(',') - 1) * 3) / 4) : 0;
+
+  return (
+    <div className="field">
+      <Label def={def} />
+      <div className="row" style={{ gap: 6 }}>
+        <button className="btn" onClick={() => input.current?.click()}>
+          {value ? 'Replace\u2026' : 'Choose a file\u2026'}
+        </button>
+        {value && (
+          <button className="btn ghost" onClick={() => onChange('')}>
+            Clear
+          </button>
+        )}
+      </div>
+      <input
+        ref={input}
+        type="file"
+        accept=".png,.r16,.raw,image/png,application/octet-stream"
+        style={{ display: 'none' }}
+        onChange={(e) => {
+          const file = e.target.files?.[0];
+          if (file) void load(file);
+          e.target.value = '';
+        }}
+      />
+      {value && (
+        <div className="field-help" style={{ fontFamily: 'var(--mono)' }}>
+          {(bytes / 1024 / 1024).toFixed(1)} MB stored in the project
+        </div>
+      )}
+      {error && <div className="field-help" style={{ color: 'var(--bad)' }}>{error}</div>}
       <Help def={def} />
     </div>
   );

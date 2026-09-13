@@ -88,7 +88,13 @@ export type ParamType =
   | 'rgba'
   | 'curve'
   | 'vec2'
-  | 'seed';
+  | 'seed'
+  /**
+   * A file the user picks, stored in the project as a base64 data URL. Kept in
+   * the project rather than referenced by path so a project is one file that
+   * opens the same way on someone else's machine.
+   */
+  | 'image';
 
 export interface EnumOption {
   value: string;
