@@ -1,0 +1,30 @@
+{
+  "name": "terrasmith-monorepo",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "license": "MIT",
+  "description": "Node-based terrain and map builder for Beyond All Reason",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "dev": "npm run dev --workspace apps/studio",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --build --force",
+    "lint": "eslint .",
+    "format": "prettier --write ."
+  },
+  "devDependencies": {
+    "@types/node": "^26.5.1",
+    "typescript": "~5.9.3",
+    "vitest": "^5.0.0",
+    "vite": "^8.3.0"
+  }
+}
