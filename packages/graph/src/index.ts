@@ -8,3 +8,4 @@ export * from './registry.js';
 export * from './evaluator.js';
 export * from './project.js';
 export * from './nodes/index.js';
+export * from './templates/index.js';

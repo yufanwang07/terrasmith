@@ -452,6 +452,95 @@ export const flattenNode: NodeDefinition<FlattenParams> = {
   },
 };
 
+interface SeaLevelParams {
+  mode: string;
+  coverage: number;
+  level: number;
+}
+
+/**
+ * Place the shoreline.
+ *
+ * Setting a water line by typing a height is guesswork: you have to already
+ * know the terrain's distribution to know what "0" will flood. This asks the
+ * question the other way round — how much of the map should be underwater — and
+ * finds the height that answers it, then shifts the terrain so that height
+ * lands on 0, which is where BAR's water surface is.
+ *
+ * The answer is a quantile of the height distribution, so it is exact and it
+ * does not move when the preview resolution changes.
+ */
+export const seaLevelNode: NodeDefinition<SeaLevelParams> = {
+  type: 'filter.seaLevel',
+  label: 'Sea level',
+  category: 'filter',
+  description:
+    'Decides how much of the map is underwater. Water sits at height 0 in BAR, so this finds the ' +
+    'height that floods the fraction you asked for and shifts the terrain to put it there.',
+  keywords: ['water', 'sea', 'ocean', 'shore', 'coast', 'flood', 'level', 'island'],
+  inputs: [terrainIn()],
+  outputs: [
+    terrainOut(),
+    {
+      id: 'land',
+      type: 'field',
+      label: 'Land',
+      description: 'A 0–1 mask of everything above the water line.',
+    },
+  ],
+  params: [
+    choice('mode', 'Set by', 'coverage', [
+      {
+        value: 'coverage',
+        label: 'How much is underwater',
+        description: 'Pick a fraction and the height follows. Almost always what you want.',
+      },
+      { value: 'height', label: 'A fixed height', description: 'Shift the terrain by a set amount.' },
+    ]),
+    num('coverage', 'Underwater', 0.2, {
+      min: 0,
+      max: 0.95,
+      step: 0.01,
+      visibleWhen: (p) => p.mode === 'coverage',
+      description: '0 leaves the map dry; 0.5 makes half of it sea. Islands live around 0.55 to 0.7.',
+    }),
+    num('level', 'Water height', 0, {
+      unit: 'elmos',
+      min: -10000,
+      max: 10000,
+      softMin: -500,
+      softMax: 500,
+      visibleWhen: (p) => p.mode === 'height',
+      description: 'The height that becomes the shoreline. Everything below it floods.',
+    }),
+  ],
+  evaluate({ inputs, params }) {
+    const terrain = requireField(inputs.terrain, 'Terrain');
+    const shoreline =
+      params.mode === 'height' ? params.level : heightQuantile(terrain, params.coverage);
+
+    const out = mapField(terrain, (v) => v - shoreline);
+    const land = mapField(out, (v) => (v >= 0 ? 1 : 0));
+    return { out, land };
+  },
+};
+
+/**
+ * The height below which `fraction` of the map lies.
+ *
+ * Sorted on a copy rather than a histogram: a heightfield is at most a few
+ * million samples, sorting it takes well under a second even at build
+ * resolution, and it is exact — a histogram would quantise the shoreline to its
+ * bin width, which is visible as a stepped coast on a shallow beach.
+ */
+function heightQuantile(field: Field, fraction: number): number {
+  const n = field.data.length;
+  if (n === 0) return 0;
+  const sorted = Float32Array.from(field.data).sort();
+  const index = Math.min(n - 1, Math.max(0, Math.round(fraction * (n - 1))));
+  return sorted[index];
+}
+
 export const filterNodes = [
   smoothNode,
   sharpenNode,
@@ -462,4 +551,5 @@ export const filterNodes = [
   transformNode,
   warpNode,
   flattenNode,
+  seaLevelNode,
 ] as const;

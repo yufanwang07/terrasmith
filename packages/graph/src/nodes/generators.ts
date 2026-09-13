@@ -117,22 +117,24 @@ export const noiseNode: NodeDefinition<NoiseParams> = {
         'How much each detail level contributes relative to the one before. Below 0.5 gives smooth ' +
         'terrain; above 0.6 gives jagged, noisy terrain.',
     }),
-    num('lacunarity', 'Detail spacing', 2, {
+    num('lacunarity', 'Detail spacing', 2.02, {
       min: 1.2,
       max: 4,
-      step: 0.05,
+      step: 0.01,
       tier: 'advanced',
       description:
-        'How much smaller each detail level is than the last. Exactly 2 can make repeating patterns ' +
-        'visible; 2.03 or 1.93 breaks them up.',
+        'How much smaller each detail level is than the last. Exactly 2 lines every level up on the ' +
+        'same grid and the alignment shows as faint straight creases, which is why the default is ' +
+        'just off it.',
     }),
     num('sharpness', 'Ridge sharpness', 1, {
       min: 0.25,
       max: 3,
       step: 0.05,
-      tier: 'advanced',
-      visibleWhen: (p) => p.fractal === 'ridged' || p.fractal === 'hybrid',
-      description: 'How knife-edged the ridges are.',
+      visibleWhen: (p) => p.fractal === 'ridged',
+      description:
+        'How narrow the crests are. Low values give broad rounded whalebacks, high values give ' +
+        'knife edges with wide valleys between them.',
     }),
     choice(
       'type',

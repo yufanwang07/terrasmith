@@ -46,7 +46,10 @@ const DEFAULTS: Required<Omit<NoiseParams, 'worleyMetric'>> & { worleyMetric: Wo
   fractal: 'fbm',
   octaves: 6,
   frequency: 1,
-  lacunarity: 2,
+  // Not exactly 2: at a whole ratio every octave lands on the same lattice and
+  // the alignment shows up as faint straight creases running through the
+  // terrain. An irrational-ish ratio costs nothing and removes them.
+  lacunarity: 2.02,
   gain: 0.5,
   seed: 0,
   worleyMetric: 'f1',
@@ -299,6 +302,8 @@ export function fractalNoise2D(x: number, y: number, params: NoiseParams = {}): 
   let amp = 1;
   let sum = 0;
   let norm = 0;
+  // Carries the previous octave's strength into the next one for the
+  // multifractal modes. Starts at 1 so the first octave is unattenuated.
   let weight = 1;
 
   for (let o = 0; o < p.octaves; o++) {
@@ -312,26 +317,54 @@ export function fractalNoise2D(x: number, y: number, params: NoiseParams = {}): 
         sum += n * amp;
         norm += amp;
         break;
+
       case 'ridged': {
-        const r = Math.pow(1 - Math.abs(n), p.sharpness * 2);
-        sum += r * amp;
+        // Musgrave's ridged multifractal, with one correction that matters
+        // more than the rest of it.
+        //
+        // The textbook form is `(1 - |n|)^2`. That assumes `n` is spread
+        // fairly evenly over -1..1, but gradient noise is not: it clusters
+        // near zero, so `1 - |n|` sits near 1 across most of the domain and
+        // what you get is a broad plateau with occasional narrow creases —
+        // rounded smoke, not ridges. Stretching `|n|` before rectifying pulls
+        // the crest back down to a line, and `sharpness` is exactly how hard
+        // to stretch.
+        const rectified = Math.min(1, Math.abs(n) * (0.5 + p.sharpness * 1.6));
+        const ridge = (1 - rectified) * (1 - rectified);
+        const signal = ridge * weight;
+        sum += signal * amp;
         norm += amp;
+        // Each octave is scaled by how high the previous one was, so detail
+        // piles up along the crests and dies away in the valleys. This is the
+        // part that makes a range look like rock rather than like noise.
+        weight = Math.min(1, Math.max(0, ridge * (1 + p.gain * 2)));
         break;
       }
+
       case 'billow': {
-        sum += Math.abs(n) * amp;
+        // |n| leaves everything in 0..1 with a hard crease at zero, which is
+        // the dune look. Recentring it keeps the result comparable with fbm.
+        sum += (Math.abs(n) * 2 - 1) * amp;
         norm += amp;
         break;
       }
+
       case 'hybrid': {
-        // Hybrid multifractal: high ground gets more detail than low ground,
-        // which is what makes eroded ranges read as rock rather than fuzz.
-        const r = Math.pow(1 - Math.abs(n), p.sharpness * 2);
-        sum += r * amp * weight;
+        // Hybrid multifractal: the terrain is its own weight, so high ground
+        // collects detail and lowland stays smooth. It does not rectify, so
+        // valleys keep fbm's rolling character and only the highlands get
+        // rough — the pattern real eroded landscapes actually show.
+        //
+        // The weight is clamped to a floor rather than allowed to reach zero:
+        // at zero every remaining octave contributes nothing, and large parts
+        // of the map come out perfectly, artificially flat.
+        const signal = (n + 1) * 0.5;
+        sum += signal * amp * weight;
         norm += amp * weight;
-        weight = Math.min(1, Math.max(0, r * 2));
+        weight = Math.min(1, Math.max(0.15, weight * signal * 2));
         break;
       }
+
       case 'multiply': {
         if (o === 0) {
           sum = n;

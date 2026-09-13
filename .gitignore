@@ -35,3 +35,6 @@ scratch/
 .env
 .env.*
 !.env.example
+
+# rendered previews used for eyeballing changes
+/samples/renders/

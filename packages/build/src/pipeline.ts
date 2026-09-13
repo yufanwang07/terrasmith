@@ -18,9 +18,11 @@ import {
   ambientOcclusion,
   createMetalMap,
   curvatureField,
+  enforceSlopeBands,
   findPalettePreset,
   normalizeCurvature,
   paintMetalSpot,
+  rescalePaletteHeights,
   slopeDegreesField,
   TEMPERATE,
   type Field,
@@ -149,7 +151,7 @@ export async function buildMapFiles(
   // which would mean holding the finished texture.
   const minimapSource = createImage(MINIMAP_SIZE_PX, MINIMAP_SIZE_PX);
 
-  const palette = resolvePalette(project, options);
+  const palette = resolvePalette(project, options, height.minHeight, height.maxHeight);
   const shader = createPaletteShader({
     palette,
     occlusionStrength: project.texture.bakedOcclusion,
@@ -456,10 +458,29 @@ function accumulateMinimap(
   }
 }
 
-function resolvePalette(project: Project, options: BuildOptions): MaterialPalette {
-  if (options.palette) return options.palette;
-  const preset = findPalettePreset(project.texture.palette);
-  return preset?.palette ?? TEMPERATE;
+/**
+ * Pick the palette and fit it to this map.
+ *
+ * Palettes are authored against a reference elevation range, so a map that runs
+ * -40 to 180 elmos would otherwise get an alpine palette whose snow line sits
+ * fifty elmos above its highest peak — and paint nothing at all. Rescaling
+ * moves the height bands onto the terrain that actually exists. Slope bands are
+ * deliberately left alone: 27 degrees is 27 degrees on every map.
+ */
+function resolvePalette(
+  project: Project,
+  options: BuildOptions,
+  minHeight: number,
+  maxHeight: number,
+): MaterialPalette {
+  const base = options.palette ?? findPalettePreset(project.texture.palette)?.palette ?? TEMPERATE;
+  let palette = rescalePaletteHeights(base, { min: minHeight, max: maxHeight });
+  if (project.texture.markSlopeBands) {
+    // BAR's own map checklist asks that the texture make the three move-class
+    // bands visually distinct, so a player can see where vehicles stop.
+    palette = enforceSlopeBands(palette);
+  }
+  return palette;
 }
 
 /**

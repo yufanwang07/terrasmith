@@ -8,9 +8,14 @@
  */
 
 import { useEffect, useRef, useState } from 'react';
-import { Evaluator, type EvalContext } from '@terrasmith/graph';
+import {
+  Evaluator,
+  TEMPLATES,
+  projectFromTemplate,
+  type EvalContext,
+  type Template,
+} from '@terrasmith/graph';
 import { registry, useEditor } from '../../state/store.js';
-import { TEMPLATES, projectFromTemplate, type Template } from '../../templates/index.js';
 
 /** Thumbnail resolution. Small enough to evaluate seven of them without a wait. */
 const THUMB_SIZE = 72;
