@@ -25,7 +25,12 @@ import { ExportDialog } from './components/dialogs/ExportDialog.js';
 import { IssuesDialog } from './components/dialogs/IssuesDialog.js';
 import { useKeyboardShortcuts } from './state/shortcuts.js';
 import { useValidation } from './state/validation.js';
-import { MapObjectsPanel, useMapMarkers, type PlacementMode } from './components/MapObjects.js';
+import {
+  GEO_VENT,
+  MapObjectsPanel,
+  useMapMarkers,
+  type PlacementMode,
+} from './components/MapObjects.js';
 
 export function App() {
   const project = useEditor((s) => s.project);
@@ -81,6 +86,10 @@ export function App() {
           ...store.project.metalSpots,
           { id, x: Math.round(x), z: Math.round(z), income: 2 },
         ]);
+      } else if (placement === 'geo') {
+        store.apply('Add geothermal vent', 'cosmetic', (draft) => {
+          draft.features.push({ id, name: GEO_VENT, x: Math.round(x), z: Math.round(z), rotation: 0 });
+        });
       } else {
         store.setStartPositions([
           ...store.project.startPositions,
@@ -102,6 +111,14 @@ export function App() {
         setStartPositions(
           store.project.startPositions.map((s) => (s.id === id ? { ...s, x: rx, z: rz } : s)),
         );
+      } else if (store.project.features.some((f) => f.id === id)) {
+        store.apply('Move feature', 'cosmetic', (draft) => {
+          const feature = draft.features.find((f) => f.id === id);
+          if (feature) {
+            feature.x = rx;
+            feature.z = rz;
+          }
+        });
       }
     },
     [setMetalSpots, setStartPositions],

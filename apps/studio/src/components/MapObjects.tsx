@@ -11,12 +11,26 @@
 
 import { useMemo } from 'react';
 import { BAR_EXTRACTOR_RADIUS, symmetryImages } from '@terrasmith/core';
-import { mapDimensionsOf, type MetalSpot, type StartPosition } from '@terrasmith/graph';
+import {
+  mapDimensionsOf,
+  type MetalSpot,
+  type PlacedFeature,
+  type StartPosition,
+} from '@terrasmith/graph';
 import { useEditor } from '../state/store.js';
 import type { Marker } from './Markers.js';
 
 /** What clicking the terrain does. */
-export type PlacementMode = 'none' | 'metal' | 'start';
+export type PlacementMode = 'none' | 'metal' | 'start' | 'geo';
+
+/**
+ * Feature names the engine treats specially.
+ *
+ * `GeoVent` is matched by substring in the map's feature-name table and turned
+ * into a geothermal vent rather than a model, which is why the name has to be
+ * exactly this and why a vent needs no asset shipped with the map.
+ */
+export const GEO_VENT = 'GeoVent';
 
 let counter = 0;
 function nextId(prefix: string): string {
@@ -76,7 +90,13 @@ export function MapObjectsPanel({ mode, onMode, selected, onSelect }: Props) {
   const project = useEditor((s) => s.project);
   const setMetalSpots = useEditor((s) => s.setMetalSpots);
   const setStartPositions = useEditor((s) => s.setStartPositions);
+  const apply = useEditor((s) => s.apply);
   const dims = mapDimensionsOf(project.settings);
+
+  const setFeatures = (features: PlacedFeature[]) =>
+    apply('Edit features', 'cosmetic', (draft) => {
+      draft.features = features;
+    });
 
   const mirror = (items: { x: number; z: number }[]) =>
     items.flatMap((item) =>
@@ -116,6 +136,7 @@ export function MapObjectsPanel({ mode, onMode, selected, onSelect }: Props) {
     if (!selected) return;
     setMetalSpots(project.metalSpots.filter((s) => s.id !== selected));
     setStartPositions(project.startPositions.filter((s) => s.id !== selected));
+    setFeatures(project.features.filter((f) => f.id !== selected));
     onSelect(null);
   };
 
@@ -142,6 +163,9 @@ export function MapObjectsPanel({ mode, onMode, selected, onSelect }: Props) {
             <button aria-pressed={mode === 'start'} onClick={() => onMode('start')}>
               Start
             </button>
+            <button aria-pressed={mode === 'geo'} onClick={() => onMode('geo')}>
+              Geo
+            </button>
           </div>
 
           <div className="row" style={{ marginTop: 10, gap: 6, flexWrap: 'wrap' }}>
@@ -151,10 +175,29 @@ export function MapObjectsPanel({ mode, onMode, selected, onSelect }: Props) {
             <button className="btn" onClick={addSymmetricStart}>
               Add mirrored start
             </button>
+            <button
+              className="btn"
+              onClick={() => {
+                const centre = { x: dims.worldWidth * 0.5, z: dims.worldHeight * 0.34 };
+                setFeatures([
+                  ...project.features,
+                  ...mirror([centre]).map((p) => ({
+                    id: nextId('geo'),
+                    name: GEO_VENT,
+                    x: Math.round(p.x),
+                    z: Math.round(p.z),
+                    rotation: 0,
+                  })),
+                ]);
+              }}
+            >
+              Add mirrored geo
+            </button>
           </div>
           <div className="field-help">
             Adds one spot per player, placed by the map&rsquo;s symmetry so every side gets the same
-            thing in the same place.
+            thing in the same place. A geothermal vent is a fixed second income that does not need a
+            metal spot, so a map usually has a handful in contested places.
           </div>
         </div>
 
@@ -259,6 +302,18 @@ export function MapObjectsPanel({ mode, onMode, selected, onSelect }: Props) {
           selected={selected}
           onSelect={onSelect}
           empty="Without these the engine places players wherever it likes."
+        />
+
+        <ObjectList
+          title={`Features (${project.features.length})`}
+          items={project.features.map((f) => ({
+            id: f.id,
+            primary: f.name === GEO_VENT ? 'Geothermal vent' : f.name,
+            secondary: `${Math.round(f.x)}, ${Math.round(f.z)}`,
+          }))}
+          selected={selected}
+          onSelect={onSelect}
+          empty="Geothermal vents and scenery go here."
         />
       </div>
     </div>
