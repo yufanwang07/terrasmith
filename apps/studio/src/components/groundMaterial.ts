@@ -75,6 +75,15 @@ export interface GroundLighting {
   shadowDensity: number;
 }
 
+export interface GroundWater {
+  /** `water.baseColor`: what shallow water multiplies the sea bed by. */
+  base: readonly number[];
+  /** `water.minColor`: the floor absorption cannot go below. */
+  min: readonly number[];
+  /** `water.absorb`: per-channel absorption per elmo of depth. */
+  absorb: readonly number[];
+}
+
 export interface GroundFog {
   /** `atmosphere.fogColor`. */
   color: readonly number[];
@@ -87,6 +96,7 @@ export interface GroundFog {
 export interface GroundMaterialOptions {
   lighting: GroundLighting;
   fog: GroundFog;
+  water: GroundWater;
 }
 
 /**
@@ -103,7 +113,7 @@ export interface GroundMaterialUniforms {
 }
 
 export function createGroundMaterial(options: GroundMaterialOptions): THREE.ShaderMaterial {
-  const { lighting, fog } = options;
+  const { lighting, fog, water } = options;
 
   const material = new THREE.ShaderMaterial({
     lights: true,
@@ -131,6 +141,13 @@ export function createGroundMaterial(options: GroundMaterialOptions): THREE.Shad
         diffuseColor: { value: new THREE.Vector3(0.9, 0.9, 0.85) },
         shadowDensity: { value: 0.85 },
         intensityMult: { value: SMF_INTENSITY_MULT },
+        waterBaseColor: { value: new THREE.Vector3(0.3, 0.5, 0.5) },
+        waterMinColor: { value: new THREE.Vector3(0.0, 0.3, 0.3) },
+        waterAbsorbColor: { value: new THREE.Vector3(0.05, 0.005, 0.001) },
+        /** 1 when the map has ground below sea level at all. */
+        hasWater: { value: 0 },
+        /** Drawn height over true height, so the sea bed reads its real depth. */
+        exaggeration: { value: 1 },
         fogColorEngine: { value: new THREE.Vector3(0.7, 0.7, 0.8) },
         fogStart: { value: 2000 },
         fogEnd: { value: 20000 },
@@ -156,7 +173,27 @@ export function createGroundMaterial(options: GroundMaterialOptions): THREE.Shad
   // ones the material ends up holding. Set the live ones here.
   setGroundLighting(material, lighting);
   setGroundFog(material, fog);
+  setGroundWater(material, water);
   return material;
+}
+
+/**
+ * The `water` block, which the *ground* shader reads.
+ *
+ * Worth saying plainly because it surprised this project: the sea bed's colour
+ * is not the water surface's doing. `SMF_WATER_ABSORPTION` replaces the ground's
+ * shading term with a water one over the first ten elmos of depth, so by the
+ * time a unit is properly submerged the satmap is being multiplied by
+ * `max(minColor, baseColor - absorb x depth)` and nothing else. The translucent
+ * sheet drawn on top contributes reflections and specular, not depth.
+ */
+export function setGroundWater(material: THREE.ShaderMaterial, water: GroundWater): void {
+  const u = material.uniforms;
+  (u.waterBaseColor.value as THREE.Vector3).set(...(water.base.slice(0, 3) as [number, number, number]));
+  (u.waterMinColor.value as THREE.Vector3).set(...(water.min.slice(0, 3) as [number, number, number]));
+  (u.waterAbsorbColor.value as THREE.Vector3).set(
+    ...(water.absorb.slice(0, 3) as [number, number, number]),
+  );
 }
 
 export function setGroundLighting(material: THREE.ShaderMaterial, lighting: GroundLighting): void {
@@ -274,6 +311,11 @@ const FRAGMENT = /* glsl */ `
   uniform vec3 diffuseColor;
   uniform float shadowDensity;
   uniform float intensityMult;
+  uniform vec3 waterBaseColor;
+  uniform vec3 waterMinColor;
+  uniform vec3 waterAbsorbColor;
+  uniform float hasWater;
+  uniform float exaggeration;
   uniform vec3 fogColorEngine;
   uniform float fogStart;
   uniform float fogEnd;
@@ -285,6 +327,9 @@ const FRAGMENT = /* glsl */ `
   varying vec2 vUv;
   varying vec3 vNormalWorld;
   varying vec3 vWorld;
+
+  /** SMF_SHALLOW_WATER_DEPTH: how deep the water tint takes to come fully on. */
+  const float SHALLOW_WATER_DEPTH = 10.0;
 
   /**
    * How flat a detail tile has to be pulled at this distance.
@@ -360,13 +405,27 @@ const FRAGMENT = /* glsl */ `
       mix(flat3, s2.xyz, fade.z) * cofac.z +
       mix(flat3, s3.xyz, fade.w) * cofac.w;
 
+    // The engine clamps the accumulated tile normal's second component before
+    // it is rotated into place, and that component is world south. So a detail
+    // normal can tilt east, west and south but never north: on half the texels
+    // on the map the sampled value is replaced by +0.01. It reads like a
+    // leftover from a Y-up convention rather than an intention, and it is not a
+    // small bias — a texel whose green channel said -0.5 gets +0.01, which
+    // flips how it catches the light. Reproduced because it is what the game
+    // draws, and because it halves the effect of every DNTS tile the exporter
+    // writes, which is worth knowing before tuning their relief.
+    tangentNormal.y = max(tangentNormal.y, 0.01);
+
     if (strength > 0.001 && length(tangentNormal) > 1e-4) {
-      // The heightfield has no twist, so its tangent frame is the world's: the
-      // tile's +X runs east and its +Y runs south, exactly as the engine
-      // samples them on world XZ.
-      vec3 T = normalize(cross(N, vec3(0.0, 0.0, 1.0)));
-      vec3 B = cross(T, N);
-      vec3 perturbed = normalize(T * tangentNormal.x + B * tangentNormal.y + N * tangentNormal.z);
+      // The engine's own frame, built the same way: SMFFragProg.glsl takes
+      // tTangent = normalize(cross(normal, vec3(-1, 0, 0))), sTangent =
+      // cross(normal, tTangent) and multiplies by mat3(sTangent, tTangent,
+      // normal) — columns, so the tile's x runs along sTangent, its y along
+      // tTangent and its z along the surface normal. On flat ground that is
+      // east, south and up, which is exactly how the exporter writes them.
+      vec3 T = normalize(cross(N, vec3(-1.0, 0.0, 0.0)));
+      vec3 S = cross(N, T);
+      vec3 perturbed = normalize(S * tangentNormal.x + T * tangentNormal.y + N * tangentNormal.z);
       // A mix toward the perturbed normal, capped at 1 — it can never tilt the
       // surface further than the tile itself is tilted.
       N = normalize(mix(N, perturbed, strength));
@@ -391,6 +450,35 @@ const FRAGMENT = /* glsl */ `
 
     // Not clamped, and the ambient is never shadowed.
     vec3 shade = (ambientColor + diffuseColor * (NdotL * Sh)) * intensityMult;
+
+    // --- Under water -------------------------------------------------------
+    // SMF_WATER_ABSORPTION, and the thing this preview was most wrong about:
+    // the engine does not tint the sea bed with the water sheet drawn over it,
+    // it *replaces the sea bed's shading term* with a water one. Over the first
+    // ten elmos of depth the ground's own shade is mixed out, and below that
+    // the albedo is multiplied by max(minColor, baseColor - absorb x depth)
+    // and nothing else — so a deep sea bed's colour is a property of the
+    // water block, not of the palette that painted it.
+    //
+    // Two smaller things fall out of the same block and are easy to miss: the
+    // diffuse term saturates fast under water (min(2 N.L + 0.4, 1), so
+    // anything past about 18 degrees of sun is fully lit), and shadows are
+    // almost absent down there — a density of 0.2 to 0.3 against the 0.85 the
+    // dry ground gets.
+    float trueY = vWorld.y / max(0.0001, exaggeration);
+    if (hasWater > 0.5 && trueY < 0.0) {
+      float depth = -trueY;
+      float waterAlpha = min(1.0, depth * 0.1 + step(SHALLOW_WATER_DEPTH, depth));
+      float waterDecay = 0.2 + (depth * 0.1) * 0.1;
+      float waterLight = min(NdotL * 2.0 + 0.4, 1.0);
+
+      vec3 waterShade = waterBaseColor - waterAbsorbColor * min(1023.0, depth);
+      waterShade = max(waterMinColor, waterShade);
+      waterShade *= intensityMult * waterLight;
+      waterShade *= 1.0 - waterDecay * (1.0 - Sh);
+      shade = mix(shade, waterShade, waterAlpha);
+    }
+
     vec3 colour = (albedo + vec3(detailOffset)) * shade;
 
     // --- Specular ----------------------------------------------------------

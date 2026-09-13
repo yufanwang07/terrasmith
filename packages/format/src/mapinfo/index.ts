@@ -4,6 +4,7 @@ export { writeMapInfoLua, collectMapInfoProblems, MAPHELPER_MAPINFO_LUA } from '
 export {
   createMapInfo,
   DEFAULT_SUN_DIR,
+  DEFAULT_WATER,
   DEFAULT_GROUND_AMBIENT,
   DEFAULT_GROUND_DIFFUSE,
   DEFAULT_GROUND_SPECULAR,

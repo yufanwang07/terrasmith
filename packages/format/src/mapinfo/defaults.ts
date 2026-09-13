@@ -8,7 +8,7 @@
  * something that looks like a real map" is the whole point.
  */
 
-import type { MapInfo, TerrainType } from './types.js';
+import type { MapInfo, MapInfoWater, TerrainType } from './types.js';
 
 /** Terrain type 0: ordinary buildable ground. */
 export const TERRAIN_TYPE_GROUND: TerrainType = {
@@ -103,6 +103,52 @@ export const DEFAULT_FOG_COLOR: readonly [number, number, number] = [0.7, 0.7, 0
  */
 export const DEFAULT_FOG_START = 0.1;
 export const DEFAULT_FOG_END = 1.0;
+
+/**
+ * The `water` block a generated map declares.
+ *
+ * Clearer and less reflective than the engine's own defaults, which is how BAR's
+ * own maps look: `surfaceAlpha` 0.02 against the engine's 0.55, and a Fresnel
+ * curve that only turns reflective at a very grazing angle. The result is that
+ * what you see through the surface is the sea bed, tinted by `absorb` over
+ * depth — and that tint is applied by the *ground* shader, not by anything
+ * drawn on the surface. See `SMF_WATER_ABSORPTION`.
+ */
+export const DEFAULT_WATER: MapInfoWater = {
+    damage: 0,
+    repeatX: 10.0,
+    repeatY: 10.0,
+    absorb: [0.05, 0.005, 0.001],
+    baseColor: [0.3, 0.5, 0.5],
+    minColor: [0.0, 0.3, 0.3],
+    ambientFactor: 1.0,
+    diffuseFactor: 1.0,
+    specularFactor: 1.4,
+    specularPower: 40.0,
+    surfaceColor: [0.67, 0.8, 1.0],
+    surfaceAlpha: 0.02,
+    diffuseColor: [0.0, 0.0, 0.0],
+    specularColor: [0.5, 0.5, 0.5],
+    fresnelMin: 0.08,
+    fresnelMax: 0.5,
+    fresnelPower: 8.0,
+    reflectionDistortion: 1.0,
+    blurBase: 2.1,
+    blurExponent: 1.5,
+    perlinStartFreq: 8.0,
+    perlinLacunarity: 3.0,
+    perlinAmplitude: 0.85,
+    windSpeed: 0.5,
+    waveOffsetFactor: 0.3,
+    waveLength: 0.37,
+    waveFoamDistortion: 0.1,
+    waveFoamIntensity: 1.0,
+    causticsResolution: 100.0,
+    causticsStrength: 0.16,
+    shoreWaves: true,
+    forceRendering: false,
+    numTiles: 4,
+};
 
 export function createMapInfo(options: {
   name: string;
@@ -211,41 +257,7 @@ export function createMapInfo(options: {
       specularExponent: DEFAULT_SPECULAR_EXPONENT,
     },
 
-    water: {
-      damage: 0,
-      repeatX: 10.0,
-      repeatY: 10.0,
-      absorb: [0.05, 0.005, 0.001],
-      baseColor: [0.3, 0.5, 0.5],
-      minColor: [0.0, 0.3, 0.3],
-      ambientFactor: 1.0,
-      diffuseFactor: 1.0,
-      specularFactor: 1.4,
-      specularPower: 40.0,
-      surfaceColor: [0.67, 0.8, 1.0],
-      surfaceAlpha: 0.02,
-      diffuseColor: [0.0, 0.0, 0.0],
-      specularColor: [0.5, 0.5, 0.5],
-      fresnelMin: 0.08,
-      fresnelMax: 0.5,
-      fresnelPower: 8.0,
-      reflectionDistortion: 1.0,
-      blurBase: 2.1,
-      blurExponent: 1.5,
-      perlinStartFreq: 8.0,
-      perlinLacunarity: 3.0,
-      perlinAmplitude: 0.85,
-      windSpeed: 0.5,
-      waveOffsetFactor: 0.3,
-      waveLength: 0.37,
-      waveFoamDistortion: 0.1,
-      waveFoamIntensity: 1.0,
-      causticsResolution: 100.0,
-      causticsStrength: 0.16,
-      shoreWaves: true,
-      forceRendering: false,
-      numTiles: 4,
-    },
+    water: { ...DEFAULT_WATER },
 
     teams: options.teams,
     terrainTypes: options.terrainTypes ?? DEFAULT_TERRAIN_TYPES,

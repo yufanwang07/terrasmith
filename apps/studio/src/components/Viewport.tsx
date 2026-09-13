@@ -26,6 +26,7 @@ import {
   DEFAULT_GROUND_DIFFUSE,
   DEFAULT_GROUND_SHADOW_DENSITY,
   DEFAULT_SUN_DIR,
+  DEFAULT_WATER,
 } from '@terrasmith/format';
 import { FeatureLayer, type DrawnFeature } from './Features.js';
 import { MarkerLayer, type Marker } from './Markers.js';
@@ -37,6 +38,11 @@ import {
   setGroundFog,
   setGroundTexture,
 } from './groundMaterial.js';
+import {
+  createWaterMaterial,
+  setWaterFog,
+  setWaterTiling,
+} from './waterMaterial.js';
 import type { SurfaceImage } from '../state/surface.js';
 
 interface Props {
@@ -111,9 +117,17 @@ function engineRgb(color: readonly number[]): [number, number, number] {
   return [color[0] ?? 0, color[1] ?? 0, color[2] ?? 0];
 }
 
-const WATER_SHALLOW = new THREE.Color(0x3f7f92);
-const WATER_DEEP = new THREE.Color(0x152c42);
-const WATER_OPAQUE_DEPTH = 220;
+/**
+ * The sky the water reflects, and the sky the sky dome draws.
+ *
+ * One pair of numbers for both, because a sea that reflects a colour the sky
+ * does not have is the single most reliable way to make a render look wrong.
+ */
+const SKY_ZENITH: readonly [number, number, number] = [0.11, 0.21, 0.31];
+const SKY_GROUND = new THREE.Color(0x14171c);
+
+/** How many cells the water sheet fades over at its own boundary. */
+const EDGE_FADE_CELLS = 3;
 
 export function Viewport({
   preview,
@@ -315,6 +329,11 @@ function createViewport(mount: HTMLElement, handlers: ViewportHandlers): Viewpor
       shadowDensity: DEFAULT_GROUND_SHADOW_DENSITY,
     },
     fog: { color: DEFAULT_FOG_COLOR, start: 2000, end: 20000 },
+    water: {
+      base: DEFAULT_WATER.baseColor ?? [0, 0, 0],
+      min: DEFAULT_WATER.minColor ?? [0, 0, 0],
+      absorb: DEFAULT_WATER.absorb ?? [0, 0, 0],
+    },
   });
   // Close-range detail.
   //
@@ -351,38 +370,52 @@ function createViewport(mount: HTMLElement, handlers: ViewportHandlers): Viewpor
    */
   let lastTerrain: Parameters<ViewportInternals['setTerrain']> | null = null;
 
+  // The sea surface. Almost clear, and visible because of what moves on it:
+  // the depth reading comes from the ground shader's absorption, exactly as it
+  // does in the engine.
+  const waterMaterial = createWaterMaterial({
+    appearance: {
+      surfaceColor: DEFAULT_WATER.surfaceColor ?? [0.67, 0.8, 1],
+      surfaceAlpha: DEFAULT_WATER.surfaceAlpha ?? 0.02,
+      specularColor: DEFAULT_WATER.specularColor ?? [0.5, 0.5, 0.5],
+      specularFactor: DEFAULT_WATER.specularFactor ?? 1.4,
+      specularPower: DEFAULT_WATER.specularPower ?? 40,
+      fresnelMin: DEFAULT_WATER.fresnelMin ?? 0.08,
+      fresnelMax: DEFAULT_WATER.fresnelMax ?? 0.5,
+      fresnelPower: DEFAULT_WATER.fresnelPower ?? 8,
+      repeatX: DEFAULT_WATER.repeatX || 10,
+      repeatY: DEFAULT_WATER.repeatY || 10,
+      windSpeed: DEFAULT_WATER.windSpeed ?? 0.5,
+      foamIntensity: DEFAULT_WATER.waveFoamIntensity ?? 1,
+      sunDir: DEFAULT_SUN_DIR,
+      skyColor: SKY_ZENITH,
+      horizonColor: DEFAULT_FOG_COLOR,
+    },
+    fogColor: DEFAULT_FOG_COLOR,
+  });
+  const water = new THREE.Mesh(new THREE.BufferGeometry(), waterMaterial);
+  water.visible = false;
+  // A flat sheet has no silhouette to cast and every shadow it would throw is
+  // already on ground the absorption has darkened.
+  water.castShadow = false;
+  scene.add(water);
+
   // The sea beyond the map's own edges, so a coastal map does not end in space.
-  const ocean = new THREE.Mesh(
-    new THREE.PlaneGeometry(1, 1),
-    new THREE.MeshStandardMaterial({
-      color: WATER_DEEP,
-      transparent: true,
-      opacity: 0.86,
-      roughness: 0.18,
-      metalness: 0.1,
-    }),
+  // Shares the map's own water material, with a depth attribute that says it is
+  // deep everywhere — the off-map plane has no bed to be shallow over.
+  const oceanGeometry = new THREE.PlaneGeometry(1, 1);
+  oceanGeometry.setAttribute(
+    'depth',
+    new THREE.Float32BufferAttribute(new Float32Array(4).fill(10000), 1),
   );
+  oceanGeometry.setAttribute(
+    'inland',
+    new THREE.Float32BufferAttribute(new Float32Array(4).fill(1), 1),
+  );
+  const ocean = new THREE.Mesh(oceanGeometry, waterMaterial);
   ocean.rotation.x = -Math.PI / 2;
   ocean.visible = false;
   scene.add(ocean);
-
-  // The water over the map itself, graded by what is underneath it.
-  const water = new THREE.Mesh(
-    new THREE.BufferGeometry(),
-    new THREE.MeshStandardMaterial({
-      vertexColors: true,
-      transparent: true,
-      roughness: 0.16,
-      metalness: 0.1,
-      side: THREE.DoubleSide,
-      // Water is drawn after the terrain and must not stop the terrain behind
-      // it from drawing: writing depth from a transparent surface leaves holes
-      // wherever the far bank shows through.
-      depthWrite: false,
-    }),
-  );
-  water.visible = false;
-  scene.add(water);
 
   const markerLayer = new MarkerLayer({ worldWidth: 1, worldHeight: 1 });
   scene.add(markerLayer.group);
@@ -493,6 +526,7 @@ function createViewport(mount: HTMLElement, handlers: ViewportHandlers): Viewpor
     Math.min(32768, Math.max(8000, orbit.distance * 2.5));
 
   let running = true;
+  const started = performance.now();
   const frame = () => {
     if (!running) return;
     orbit.update();
@@ -504,10 +538,16 @@ function createViewport(mount: HTMLElement, handlers: ViewportHandlers): Viewpor
     const fogNear = range * DEFAULT_FOG_START;
     const fogFar = range * DEFAULT_FOG_END;
     setGroundFog(terrainMaterial, { color: DEFAULT_FOG_COLOR, start: fogNear, end: fogFar });
+    setWaterFog(waterMaterial, DEFAULT_FOG_COLOR, fogNear, fogFar);
     const fog = scene.fog as THREE.Fog;
     fog.near = fogNear;
     fog.far = fogFar;
     (terrainMaterial.uniforms.cameraPos.value as THREE.Vector3).copy(camera.position);
+    (waterMaterial.uniforms.cameraPos.value as THREE.Vector3).copy(camera.position);
+    // The sea is the one thing in this scene that moves on its own. Seconds
+    // rather than frames, so it runs at the same speed whatever the display
+    // does, and it is why the viewport keeps drawing when nothing has changed.
+    waterMaterial.uniforms.time.value = (performance.now() - started) / 1000;
 
     renderer.render(scene, camera);
     requestAnimationFrame(frame);
@@ -567,6 +607,18 @@ function createViewport(mount: HTMLElement, handlers: ViewportHandlers): Viewpor
       sun.position.set(0.8, 1.0, -0.7).normalize().multiplyScalar(diagonal);
       sun.target.position.set(0, 0, 0);
       sun.target.updateMatrixWorld();
+      // The sea bed's depth is read from the drawn height, so the shader has to
+      // be told what that height was multiplied by or a 3x view floods the map.
+      terrainMaterial.uniforms.exaggeration.value = exaggeration;
+      terrainMaterial.uniforms.hasWater.value = result.min < 0 ? 1 : 0;
+      setWaterTiling(
+        waterMaterial,
+        worldWidth,
+        worldHeight,
+        DEFAULT_WATER.repeatX || 10,
+        DEFAULT_WATER.repeatY || 10,
+      );
+
       renderer.shadowMap.needsUpdate = true;
       // Fog is not scaled to the map. The engine scales it to the camera's far
       // plane, which is a property of how far back the player has pulled and
@@ -672,12 +724,13 @@ function createViewport(mount: HTMLElement, handlers: ViewportHandlers): Viewpor
       (sky.material as THREE.Material).dispose();
       for (const texture of surfaceTextures) texture.dispose();
       for (const tile of detailTiles) tile.texture.dispose();
+      (waterMaterial.uniforms.waveMap.value as THREE.Texture | null)?.dispose();
       terrain.geometry.dispose();
       (terrain.material as THREE.Material).dispose();
       water.geometry.dispose();
-      (water.material as THREE.Material).dispose();
       ocean.geometry.dispose();
-      (ocean.material as THREE.Material).dispose();
+      // One material for both sheets, so it is disposed once.
+      waterMaterial.dispose();
       renderer.dispose();
       mount.removeChild(renderer.domElement);
     },
@@ -1065,12 +1118,22 @@ class PickController {
  * Flat at y = 0, which is where BAR's sea level is, and built only over the
  * cells that are actually under it — a quad is emitted where all four of its
  * corners are wet, so the sheet stops one cell short of the shoreline rather
- * than climbing the beach. The gap that leaves is why the shallow colour is
- * nearly transparent: the last visible water has to fade out rather than end.
+ * than climbing the beach.
  *
- * Colour and opacity come from the depth under each vertex, which is the whole
- * point. A puddle in a hollow and a thousand-elmo trench are the same sheet of
- * blue-grey without it.
+ * Each vertex carries two numbers: the depth of the bed beneath it, and whether
+ * it sits on the sheet's own boundary.
+ *
+ * The depth used to be a colour and an opacity graded by it, which is the
+ * engine's job and not this sheet's: `SMF_WATER_ABSORPTION` tints the *ground*
+ * under water, so a preview that also tinted the surface was darkening the sea
+ * twice and hiding the bed the palette had painted. What the depth is for here
+ * is foam — how close the water is to running out.
+ *
+ * The boundary flag is what stops the sheet ending in a staircase. Its outline
+ * follows cell corners, so the silhouette is a flight of steps one cell high,
+ * and that was invisible while the shallow water was nearly transparent and
+ * unmissable the moment surf landed on it. Fading the surface out over its own
+ * last row costs one float a vertex and turns the staircase into a shoreline.
  */
 function buildWaterGeometry(
   heights: Float32Array,
@@ -1086,25 +1149,48 @@ function buildWaterGeometry(
   const halfZ = worldHeight / 2;
 
   const positions: number[] = [];
-  const colors: number[] = [];
+  const depths: number[] = [];
+  const inland: number[] = [];
   const indices: number[] = [];
   // Maps a grid index to its vertex in the output, or -1 for a dry corner.
   const vertexOf = new Int32Array(width * height).fill(-1);
-  const color = new THREE.Color();
+
+  /**
+   * 0 on the sheet's own edge, rising to 1 three cells in.
+   *
+   * One cell of fade is not a fade — the sheet's outline follows cell corners,
+   * so a single step still reads as the staircase it is. Three is enough to
+   * dissolve it and short enough that it never eats into water anyone is
+   * looking at.
+   */
+  const inlandAt = (x: number, z: number): number => {
+    let nearest = EDGE_FADE_CELLS;
+    for (let dz = -EDGE_FADE_CELLS; dz <= EDGE_FADE_CELLS; dz++) {
+      for (let dx = -EDGE_FADE_CELLS; dx <= EDGE_FADE_CELLS; dx++) {
+        const nx = x + dx;
+        const nz = z + dz;
+        const dry =
+          nx < 0 || nz < 0 || nx >= width || nz >= height || heights[nz * width + nx] >= 0;
+        if (!dry) continue;
+        const d = Math.max(Math.abs(dx), Math.abs(dz));
+        if (d < nearest) nearest = d;
+      }
+    }
+    // `nearest - 1`, because the outermost row of the sheet is *adjacent* to
+    // dry land rather than on it: without the offset the edge never reaches
+    // zero, the surf keeps a third of its opacity right on the boundary, and
+    // the staircase stays exactly as visible as it was.
+    return Math.max(0, nearest - 1) / EDGE_FADE_CELLS;
+  };
 
   const addVertex = (x: number, z: number): number => {
     const i = z * width + x;
     const existing = vertexOf[i];
     if (existing >= 0) return existing;
-    const depth = -heights[i];
-    const t = Math.min(1, Math.max(0, depth / WATER_OPAQUE_DEPTH));
-    color.copy(WATER_SHALLOW).lerp(WATER_DEEP, t);
     const index = positions.length / 3;
     positions.push(x * cellX - halfX, 0, z * cellZ - halfZ);
-    // Alpha rides in the fourth component; three.js reads a 4-wide colour
-    // attribute as RGBA. Never fully opaque, so even deep water keeps a hint
-    // of the bed and the map does not turn into a hole.
-    colors.push(color.r, color.g, color.b, 0.34 + t * 0.55);
+    depths.push(-heights[i]);
+    inland.push(inlandAt(x, z));
     vertexOf[i] = index;
     return index;
   };
@@ -1127,13 +1213,9 @@ function buildWaterGeometry(
   const geometry = new THREE.BufferGeometry();
   if (positions.length === 0) return geometry;
   geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
-  geometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 4));
+  geometry.setAttribute('depth', new THREE.Float32BufferAttribute(depths, 1));
+  geometry.setAttribute('inland', new THREE.Float32BufferAttribute(inland, 1));
   geometry.setIndex(indices);
-  // Flat and horizontal, so every normal is up; computing them would walk the
-  // whole surface to arrive at the same answer.
-  const normals = new Float32Array(positions.length);
-  for (let i = 1; i < normals.length; i += 3) normals[i] = 1;
-  geometry.setAttribute('normal', new THREE.BufferAttribute(normals, 3));
   geometry.computeBoundingSphere();
   // The exaggeration applies to the terrain's drawn height, so the water has to
   // ride at the same scale or a 3x view puts the sea under the sea bed.
@@ -1193,7 +1275,12 @@ function buildSky(fogColor: readonly number[]): THREE.Mesh {
   const geometry = new THREE.SphereGeometry(1, 24, 16);
   const position = geometry.attributes.position;
   const colors = new Float32Array(position.count * 3);
-  const zenith = new THREE.Color(0x1d3550);
+  const zenith = new THREE.Color().setRGB(
+    SKY_ZENITH[0],
+    SKY_ZENITH[1],
+    SKY_ZENITH[2],
+    THREE.SRGBColorSpace,
+  );
   // The horizon is the colour the terrain fades to, because that is what a
   // horizon is. Driving it from anywhere else leaves the ground dissolving into
   // a colour the sky does not have, which reads as a rendering fault rather
@@ -1204,7 +1291,7 @@ function buildSky(fogColor: readonly number[]): THREE.Mesh {
     fogColor[2] ?? 0.8,
     THREE.SRGBColorSpace,
   );
-  const ground = new THREE.Color(0x14171c);
+  const ground = SKY_GROUND;
   const color = new THREE.Color();
 
   for (let i = 0; i < position.count; i++) {
