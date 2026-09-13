@@ -71,6 +71,7 @@ export async function assembleArchive(
   const entries: ArchiveEntry[] = [
     { path: `maps/${base}.smf`, data: artifacts.smf },
     { path: `maps/${artifacts.smtFileName}`, data: artifacts.smt },
+    ...artifacts.textureEntries,
     { path: 'mapinfo.lua', data: encoder.encode(mapInfoLua) },
     // Engines at or below 0.82 looked for the map's info here. Harmless today,
     // and every shipped BAR map still includes it.
@@ -137,6 +138,8 @@ export function buildMapInfo(
     // the two in agreement no matter which one a tool reads.
     minHeight: artifacts.minHeight,
     maxHeight: artifacts.maxHeight,
+    resources: artifacts.resources,
+    splats: artifacts.splats,
     maxMetal: project.settings.maxMetal,
     extractorRadius: project.settings.extractorRadius,
     tidalStrength: project.settings.tidalStrength,

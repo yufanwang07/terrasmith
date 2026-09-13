@@ -20,6 +20,7 @@ import {
   curvatureField,
   enforceSlopeBands,
   findPalettePreset,
+  generateSplatWeights,
   normalizeCurvature,
   paintMetalSpot,
   rescalePaletteHeights,
@@ -36,7 +37,10 @@ import {
   createImage,
   quantizeHeightmap,
   writeSmf,
+  type ArchiveEntry,
   type MapFeature,
+  type MapInfoResources,
+  type MapInfoSplats,
   type Rgba8Image,
   type SmfData,
 } from '@terrasmith/format';
@@ -46,6 +50,7 @@ import { prepareHeightfield } from './heightfield.js';
 import { planBuild, type BuildPlan, type BuildQuality, type PlanOptions } from './plan.js';
 import { createPaletteShader } from './shader.js';
 import { bakeTexture, type TextureAnalysis } from './texture.js';
+import { buildExtraTextures, type ExtraTextureOptions } from './textures.js';
 import {
   deriveGrassMap,
   deriveTypeMap,
@@ -72,6 +77,13 @@ export interface BuildOptions extends PlanOptions {
    * texture settings.
    */
   palette?: MaterialPalette;
+  /**
+   * Emit the specular, splat and detail-normal textures that switch the engine
+   * onto its advanced shading path. Without them a map renders with flat
+   * lighting however good its heightfield is.
+   * @default true
+   */
+  extraTextures?: boolean | ExtraTextureOptions;
 }
 
 export interface BuildStats {
@@ -98,6 +110,11 @@ export interface BuildStats {
 export interface BuildArtifacts {
   smf: Uint8Array;
   smt: Uint8Array;
+  /** The override textures, ready to drop into the archive. */
+  textureEntries: ArchiveEntry[];
+  /** `mapinfo.lua` blocks describing those textures. */
+  resources: MapInfoResources;
+  splats?: MapInfoSplats;
   /** Bare `.smt` filename as referenced from the `.smf`. */
   smtFileName: string;
   /** The heightfield actually written, in elmos. */
@@ -180,8 +197,46 @@ export async function buildMapFiles(
   );
   throwIfAborted(options.signal);
 
-  report('Compressing tiles', 0.76);
+  report('Compressing tiles', 0.74);
   const smt = smtBuilder.build();
+
+  // Splat weights come from the same palette that painted the diffuse, so the
+  // detail textures blend along the same boundaries the colour does. Generated
+  // at graph resolution and resampled up by the texture writer: they are smooth
+  // weights, and computing them at the splat map's own resolution would cost
+  // sixteen times as much for no visible difference.
+  const splatWeights = outputs.splat
+    ? colorFieldToImage(outputs.splat)
+    : colorFieldToImage(
+        generateSplatWeights(
+          {
+            height: analysis.height,
+            slopeDegrees: analysis.slopeDegrees,
+            curvature: analysis.curvature,
+            occlusion: analysis.occlusion,
+          },
+          palette,
+          { cellSize: plan.worldWidth / analysis.height.width, waterLevel: 0 },
+        ),
+      );
+
+  report('Writing map textures', 0.76);
+  const extraOptions: ExtraTextureOptions =
+    typeof options.extraTextures === 'object' ? options.extraTextures : {};
+  const extras =
+    options.extraTextures === false
+      ? { entries: [], resources: { detailTex: 'detailtexblurred.bmp' }, splats: undefined }
+      : buildExtraTextures(
+          archiveBaseName(project),
+          plan,
+          {
+            height: height.field,
+            slopeDegrees: analysis.slopeDegrees,
+            occlusion: analysis.occlusion,
+            splatWeights: splatWeights ?? undefined,
+          },
+          { seed: project.settings.seed, ...extraOptions },
+        );
 
   report('Building minimap', 0.8);
   const minimap = buildMinimap(minimapSource);
@@ -216,6 +271,9 @@ export async function buildMapFiles(
   return {
     smf,
     smt,
+    textureEntries: extras.entries,
+    resources: extras.resources,
+    splats: extras.splats,
     smtFileName,
     heightfield: height.field,
     minHeight: height.minHeight,
@@ -467,6 +525,21 @@ function accumulateMinimap(
  * moves the height bands onto the terrain that actually exists. Slope bands are
  * deliberately left alone: 27 degrees is 27 degrees on every map.
  */
+/**
+ * Convert a float colour field to bytes.
+ *
+ * No sRGB encoding: these are weights and normals, not pictures, and passing a
+ * weight through a display transfer curve silently biases every blend.
+ */
+function colorFieldToImage(field: { width: number; height: number; data: Float32Array }): Rgba8Image {
+  const out = createImage(field.width, field.height);
+  for (let i = 0; i < out.data.length; i++) {
+    const v = Math.round(field.data[i] * 255);
+    out.data[i] = v < 0 ? 0 : v > 255 ? 255 : v;
+  }
+  return out;
+}
+
 function resolvePalette(
   project: Project,
   options: BuildOptions,

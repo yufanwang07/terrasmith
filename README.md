@@ -1,52 +1,172 @@
 # Terrasmith
 
-A node-based terrain and map builder for [Beyond All Reason](https://www.beyondallreason.info/).
+Terrasmith is a node-based terrain builder that targets [Beyond All Reason](https://www.beyondallreason.info/)
+directly: you shape a landscape, and it writes a `.sd7` the engine loads, with the heightmap, textures,
+metal map, `mapinfo.lua` and lobby metadata already correct. It is for people who want to make a BAR map
+and would rather spend that time on the map than on the toolchain.
 
-World Machine-class terrain generation, a beginner-friendly editor, and a one-click
-export straight to a `.sd7` map the engine can load.
+The difference from a general terrain tool is that Terrasmith knows what the terrain is *for*. It can tell
+you that the ramp you just cut is 31 degrees, so vehicles cannot use it but bots can; that the pad in your
+main base is 80 elmos across and a bot lab needs 96; that the metal blob you painted is 190 elmos wide and
+no single extractor can capture it.
 
-> Status: **early development.** The format layer is complete and tested; the
-> terrain engine and editor are in progress.
+<!--
+  SCREENSHOT GOES HERE.
+  Drop a PNG at docs/images/studio.png (editor window, terrain viewport with the
+  "who can go here" overlay on, node graph visible) and replace this comment with:
+  ![The Terrasmith editor](docs/images/studio.png)
+-->
 
-## Why
+## Why this exists
 
-Making a BAR map today means stitching together World Machine or L3DT, an image
-editor, `pymapconv`, and a pile of undocumented conventions about metal spots,
-start positions and archive layout. Terrasmith replaces that chain with one tool
-that understands the target: it knows what a mex spot is, which slopes a bot can
-climb, and what BAR's engine will accept.
+Making a BAR map today means driving five unrelated programs and knowing a pile of conventions none of them
+document. The workflow, reconstructed from BAR's own guides and from the `pymapconv` source, is in
+[docs/research/toolchain.md](docs/research/toolchain.md) §7. The short version of what hurts:
+
+- **The resolutions do not line up.** World Machine's canvas is a power of two; the `.smf` heightmap is
+  `64N+1` samples. The community workaround is to export at eight times the resolution and let
+  `pymapconv --highresheightmapfilter nearest` sample texel centres, because otherwise resizing 2048 to
+  1281 in Photoshop smears every cliff edge relative to the texture that is supposed to sit on it.
+- **You type the height range in by hand.** `pymapconv -n`/`-x` take the minimum and maximum height as
+  numbers you guess. Guess wrong and the whole map is squashed or clipped, and you recompile.
+- **Six more images, at five resolutions, with three channel conventions.** Normals at `512N`, specular at
+  `256N`, splat at a power of two, metalmap and typemap at `32N` as 8-bit *RGB* BMPs (greyscale silently
+  produces a broken map), grass at `16N`, features at `64N`. Every DDS has to be vertically flipped, by
+  drag-and-drop `.bat` file. None of them regenerate when you change the heightmap.
+- **The texture has to agree with the slope map, and nothing checks that it does.** BAR's map checklist
+  asks for vehicle-flat ground, bot-only ground and all-terrain ground to be visually distinct. That is a
+  correspondence between two files maintained by hand.
+- **Nothing tells you whether the map is playable until you play it.** The current method for finding
+  unreachable pockets and unclimbable ramps is to load the map in SpringBoard and drive `armpw`, `armstump`,
+  `armch` and `armbats` around looking for trouble. Manual, slow, and not reproducible.
+- **Then you hand-write ~200 lines of `mapinfo.lua`** — lighting, fog, water, `tidalStrength`, splat
+  scales, team start positions — usually by copying another map's and tuning by trial and error, restarting
+  the engine each time.
+- **And the failures are silent.** Pack the archive solid and the map is invisible with no error. Rename
+  anything after compiling and the map loads pink.
+
+The number that matters: **the realistic loop time for a one-pixel terrain change is 10 to 40 minutes.**
+That is the thing to beat, and it is why Terrasmith is one program that owns the whole chain rather than
+another heightmap exporter.
+
+## Getting started
+
+Requires Node 22.12 or newer.
+
+```bash
+git clone https://github.com/<your-fork>/terrasmith
+cd terrasmith
+npm install
+npm run build
+```
+
+Run the editor:
+
+```bash
+npm run dev          # vite dev server; open the URL it prints
+```
+
+Or build a project file from the command line:
+
+```bash
+npx terrasmith build my-map.terrasmith            # writes MyMap.sd7 beside the project
+npx terrasmith build my-map.terrasmith --quality final -o dist/MyMap_v2.sd7
+npx terrasmith inspect my-map.terrasmith          # size, seed, symmetry, node counts
+npx terrasmith nodes                              # the node catalog, by category
+```
+
+To play the result, copy the `.sd7` into the `maps/` folder of your BAR data directory — the same folder
+the client downloads maps into — and start BAR. The map appears in the map list under the name in its
+`mapinfo.lua`, not under its filename. If you would rather skip the archive while iterating, an unpacked
+`MyMap.sdd/` directory with the same contents works just as well.
+
+To see what the shipped templates look like without opening the editor:
+
+```bash
+node tools/render-templates.mjs
+```
+
+It writes hillshaded and flat-albedo PNGs to `samples/renders/` and prints, per template, the height range
+and the percentage of the map that is drivable, impassable and underwater.
 
 ## Packages
 
-| Package | What it does |
+| Package | What it is for |
 | --- | --- |
-| `@terrasmith/format` | Engine-accurate readers and writers for `.smf`, `.smt`, `mapinfo.lua` and map archives. No DOM, no Node built-ins — runs in a browser tab, a worker, or a CLI. |
+| `@terrasmith/format` | Reading and writing the Spring/Recoil binary formats: `.smf`, `.smt`, DXT1/DDS, `mapinfo.lua`, and `.sd7`/`.sdz` archives. Written against the engine source, not against folklore. |
+| `@terrasmith/core` | The terrain maths. Fields, noise, erosion, slope/curvature/flow/occlusion analysis, symmetry, texturing — plus the BAR rules module: move classes, pathing, metal spot detection, and map validation. |
+| `@terrasmith/graph` | The node graph: the type system, the evaluator, the project document, the node catalog and the starter templates. |
+| `@terrasmith/build` | Project in, map archive out. Evaluates the graph, quantises the heightfield, bakes and dedupes tiles, derives the type/metal/grass maps, and assembles the archive. |
+| `@terrasmith/cli` | `terrasmith build`, `inspect` and `nodes`, for batch builds and CI. |
+| `apps/studio` | The editor: React, a terrain viewport, the node graph, overlays and a guided mode. |
 
-More to come as the terrain engine and editor land.
+Nothing below `apps/studio` touches the DOM, and `format`, `core` and `graph` use no Node built-ins, so
+every layer runs in a browser tab, in a worker, in Node and in CI.
 
-## Format notes
+## What works today
 
-The format layer is written against the Recoil engine source rather than
-folklore. A few details that commonly get miscopied:
+- **The format layer.** `.smf` and `.smt` writers and readers, a BC1 encoder that stays in the opaque
+  four-colour mode the engine requires, DDS, the 699048-byte minimap block, `mapinfo.lua` generation, and
+  both archive containers. Covered by tests in `packages/format/test/`.
+- **The terrain engine.** Resolution-independent noise, droplet and pipe hydraulic erosion, thermal
+  slumping, and the analysis fields the selectors and overlays are built on.
+- **The BAR rules.** BAR's move classes with their real slope and depth limits, the buildability rule
+  (which is a height-difference test, not a slope test), a faithful port of BAR's metal spot finder, and a
+  validator that checks size, height range, slope bands, reachability, start positions, build pads, metal,
+  water and symmetry.
+- **The node graph.** 37 node types across generators, filters, combiners, selectors, natural processes,
+  outputs and utilities, with a pull-based evaluator memoised on content hashes. Run `npx terrasmith nodes`
+  for the live list, and see [docs/NODES.md](docs/NODES.md) for the reference.
+- **Seven templates** that are complete, buildable maps rather than empty graphs.
+- **The build pipeline and CLI.** A project file becomes a loadable `.sd7` containing the `.smf`, the
+  deduplicated `.smt`, a generated `mapinfo.lua`, the `maphelper` shim, a `maps-metadata` record and a
+  metal layout Lua file.
 
-- Heights decode as `minHeight + raw * (maxHeight - minHeight) / 65536` — the
-  divisor is **65536, not 65535** (`SMFReadMap.cpp`).
-- `mapx` and `mapy` count map *squares* and must be multiples of 128, because
-  terrain is drawn in 128x128-square patches.
-- Each `.smt` tile is 680 bytes: DXT1 at 32x32, 16x16, 8x8 and 4x4.
-- The minimap block is always 699048 bytes — 1024x1024 DXT1 down to 4x4 —
-  regardless of map size.
-- Map tiles must use the opaque 4-colour BC1 mode (`color0 > color1`); the
-  punch-through mode renders those texels transparent in game.
+## What does not work yet
 
-## Development
+Being concrete about this is more useful than a roadmap.
+
+- **The editor is not finished.** The viewport, toolbar, overlays and evaluation workers exist; the node
+  palette, inspector, guided-mode form and dialogs are under construction, so `npm run dev` is not yet a
+  usable application. The CLI path is the one that works end to end.
+- **Everything runs on the CPU.** The WebGPU acceleration the architecture describes does not exist. A
+  full-resolution erosion pass on a 24x24 map is minutes, not seconds.
+- **There are no gameplay, layout or texture nodes.** Metal spots, start positions, start boxes and
+  features are project data that the exporter reads; they are not yet nodes you can wire into a graph, and
+  nothing places them for you.
+- **No feature placement.** Trees, rocks and geothermal vents are in the project model and in the archive
+  writer, but nothing generates or edits them.
+- **The automatic texturing is rough.** It produces a plausible diffuse from the terrain and the material
+  palette, but the high-frequency detail reads as mottling rather than as ground at map scale. Look at
+  `samples/renders/` and judge for yourself; this is the most visible thing still to fix.
+- **The advanced-shading texture set is generated but not packed.** The build produces the specular, splat
+  and detail-normal DDS files, and they are not yet added to the archive or referenced from the generated
+  `mapinfo.lua`, so exported maps use the basic shading path.
+- **No importer.** You cannot open an existing `.sd7` and edit it, even though the format layer can read one.
+
+## Contributing
+
+The repository is an npm workspaces monorepo.
 
 ```bash
-npm install
-npm test
-npm run typecheck
+npm test          # vitest
+npm run typecheck # tsc --build across every package
+npm run lint
 ```
 
-## License
+Two things to know before writing code here:
 
-MIT
+1. **`docs/research/` is the reference, not your memory.** Those documents are written against the Recoil
+   engine source, BAR's game data and real shipped map archives, with file and line citations and a
+   verification log. If a constant in the code disagrees with one of them, one of the two is a bug.
+2. **Comments explain why.** The constraint, the engine rule, the numerical trap, the reason a constant has
+   that value. `packages/core/src/analysis.ts` and `packages/graph/src/nodes/filters.ts` are the house
+   style.
+
+If you are adding a node, its label, description and parameter help are read by people who have never
+opened a terrain tool. Write them for that reader, and where a BAR number matters — 27 degrees stops
+vehicles, water is at height 0 — say so.
+
+## Licence
+
+MIT. See [LICENSE](LICENSE).

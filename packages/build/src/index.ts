@@ -16,6 +16,14 @@ export {
   TYPE_SAND,
   TYPE_WATER,
 } from './derived.js';
+export {
+  buildExtraTextures,
+  generateDetailNormal,
+  DEFAULT_DETAIL_LAYERS,
+  type DetailLayer,
+  type ExtraTextureOptions,
+  type ExtraTextures,
+} from './textures.js';
 export { bakeTexture, type BlockInputs, type BlockShader, type TextureAnalysis } from './texture.js';
 export { createPaletteShader, createFlatShader, type PaletteShaderOptions } from './shader.js';
 export {
