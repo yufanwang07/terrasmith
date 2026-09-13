@@ -58,14 +58,18 @@ export function createPaletteShader(options: PaletteShaderOptions): BlockShader 
 
   return (block: BlockInputs): Float32Array => {
     const { width, height, fields } = block;
+    // Every channel is supplied, so generateSatmap derives nothing. That is
+    // what makes a block's colour depend only on where it is and not on how the
+    // texture happened to be cut up.
     const inputs = {
       height: asField(fields.height, width, height),
       slopeDegrees: asField(fields.slopeDegrees, width, height),
-      flow: fields.flow ? asField(fields.flow, width, height) : undefined,
-      deposition: fields.deposition ? asField(fields.deposition, width, height) : undefined,
-      wear: fields.wear ? asField(fields.wear, width, height) : undefined,
-      curvature: fields.curvature ? asField(fields.curvature, width, height) : undefined,
-      occlusion: fields.occlusion ? asField(fields.occlusion, width, height) : undefined,
+      flow: asField(fields.flow, width, height),
+      deposition: asField(fields.deposition, width, height),
+      wear: asField(fields.wear, width, height),
+      curvature: asField(fields.curvature, width, height),
+      occlusion: asField(fields.occlusion, width, height),
+      wetness: asField(fields.wetness, width, height),
     };
 
     let color: ColorField;
@@ -94,7 +98,7 @@ export function createPaletteShader(options: PaletteShaderOptions): BlockShader 
 }
 
 /**
- * Multiply a block by a value-noise grain, sampled in full-texture coordinates.
+ * Multiply a strip by a value-noise grain, sampled in full-texture coordinates.
  *
  * Grain earns its place twice over here. It stops large smooth areas reading as
  * plastic, and it gives the DXT1 encoder something to work with: BC1's 5:6:5

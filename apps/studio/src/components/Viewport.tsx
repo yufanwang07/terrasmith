@@ -16,6 +16,7 @@ import * as THREE from 'three';
 import type { PreviewState } from '../state/preview.js';
 import type { OverlayKind } from '../state/store.js';
 import { overlayColorFor } from './overlays.js';
+import { MarkerLayer, type Marker } from './Markers.js';
 
 interface Props {
   preview: PreviewState;
@@ -30,6 +31,19 @@ interface Props {
    * the passability overlay assume; anything higher is a viewing aid only.
    */
   exaggeration: number;
+  /** Metal spots, start positions and features to draw on the terrain. */
+  markers?: Marker[];
+  /** Which marker is selected, if any. */
+  selectedMarker?: string | null;
+  /**
+   * When set, a click on the terrain reports the world position instead of
+   * doing nothing. This is what "place a metal spot" is made of.
+   */
+  onPlace?: (x: number, z: number) => void;
+  /** A click on an existing marker. */
+  onSelectMarker?: (id: string | null) => void;
+  /** A marker dragged to a new world position. */
+  onMoveMarker?: (id: string, x: number, z: number) => void;
 }
 
 /** Colour of the water plane. Matches the mapinfo defaults closely enough to judge a coastline. */
@@ -42,14 +56,23 @@ export function Viewport({
   worldHeight,
   showWater,
   exaggeration,
+  markers,
+  selectedMarker,
+  onPlace,
+  onSelectMarker,
+  onMoveMarker,
 }: Props) {
   const mountRef = useRef<HTMLDivElement>(null);
   const stateRef = useRef<ViewportInternals | null>(null);
+  // The handlers change on every render; keeping them in a ref means the
+  // renderer can call the current one without being torn down and rebuilt.
+  const handlers = useRef({ onPlace, onSelectMarker, onMoveMarker });
+  handlers.current = { onPlace, onSelectMarker, onMoveMarker };
 
   useEffect(() => {
     const mount = mountRef.current;
     if (!mount) return;
-    const internals = createViewport(mount);
+    const internals = createViewport(mount, handlers);
     stateRef.current = internals;
     return () => {
       internals.dispose();
@@ -70,6 +93,18 @@ export function Viewport({
     if (preview.result.kind !== 'field') return;
     internals.setTerrain(preview.result, worldWidth, worldHeight, overlay, exaggeration);
   }, [preview.result, worldWidth, worldHeight, overlay, exaggeration]);
+
+  useEffect(() => {
+    stateRef.current?.setMarkers(markers ?? [], worldWidth, worldHeight);
+  }, [markers, worldWidth, worldHeight, preview.result, exaggeration]);
+
+  useEffect(() => {
+    stateRef.current?.setSelectedMarker(selectedMarker ?? null);
+  }, [selectedMarker]);
+
+  useEffect(() => {
+    stateRef.current?.setPlacing(Boolean(onPlace));
+  }, [onPlace]);
 
   return (
     <div className="viewport" ref={mountRef}>
@@ -95,12 +130,24 @@ interface ViewportInternals {
     exaggeration: number,
   ): void;
   setWater(show: boolean, worldWidth: number, worldHeight: number): void;
+  setMarkers(markers: Marker[], worldWidth: number, worldHeight: number): void;
+  setSelectedMarker(id: string | null): void;
+  /** Whether a click on empty terrain places something. */
+  setPlacing(placing: boolean): void;
   /** Point the camera at the map before any terrain has arrived. */
   frameIfUnframed(worldWidth: number, worldHeight: number): void;
   dispose(): void;
 }
 
-function createViewport(mount: HTMLElement): ViewportInternals {
+interface ViewportHandlers {
+  current: {
+    onPlace?: (x: number, z: number) => void;
+    onSelectMarker?: (id: string | null) => void;
+    onMoveMarker?: (id: string, x: number, z: number) => void;
+  };
+}
+
+function createViewport(mount: HTMLElement, handlers: ViewportHandlers): ViewportInternals {
   const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
   renderer.setClearColor(0x0a0c0f);
@@ -143,7 +190,39 @@ function createViewport(mount: HTMLElement): ViewportInternals {
   water.visible = false;
   scene.add(water);
 
+  const markerLayer = new MarkerLayer({ worldWidth: 1, worldHeight: 1 });
+  scene.add(markerLayer.group);
+
+  // The heightfield the markers stand on, kept so a marker can be dropped onto
+  // the ground without ray-casting the mesh every frame.
+  let heightField: {
+    width: number;
+    height: number;
+    data: Float32Array;
+    worldWidth: number;
+    worldHeight: number;
+    exaggeration: number;
+  } | null = null;
+
+  /** Drawn height at a world position, including the current exaggeration. */
+  const heightAt = (x: number, z: number): number => {
+    if (!heightField) return 0;
+    const u = (x / heightField.worldWidth) * (heightField.width - 1);
+    const v = (z / heightField.worldHeight) * (heightField.height - 1);
+    const cx = Math.round(Math.max(0, Math.min(heightField.width - 1, u)));
+    const cz = Math.round(Math.max(0, Math.min(heightField.height - 1, v)));
+    return heightField.data[cz * heightField.width + cx] * heightField.exaggeration;
+  };
+
   const orbit = new OrbitController(camera, renderer.domElement);
+  const picking = new PickController(
+    camera,
+    renderer.domElement,
+    terrain,
+    markerLayer,
+    handlers,
+    () => heightField,
+  );
 
   const resize = () => {
     const width = mount.clientWidth;
@@ -173,11 +252,34 @@ function createViewport(mount: HTMLElement): ViewportInternals {
       const geometry = buildTerrainGeometry(result, worldWidth, worldHeight, overlay, exaggeration);
       terrain.geometry.dispose();
       terrain.geometry = geometry;
+      heightField = {
+        width: result.width,
+        height: result.height,
+        data: result.data,
+        worldWidth,
+        worldHeight,
+        exaggeration,
+      };
+      markerLayer.reground(heightAt);
 
       if (!framed) {
         orbit.frame(worldWidth, worldHeight, result.max - result.min);
         framed = true;
       }
+    },
+
+    setMarkers(markers, worldWidth, worldHeight) {
+      markerLayer.setWorld(worldWidth, worldHeight);
+      markerLayer.set(markers, heightAt);
+    },
+
+    setSelectedMarker(id) {
+      markerLayer.setSelected(id);
+    },
+
+    setPlacing(placing) {
+      picking.setPlacing(placing);
+      renderer.domElement.style.cursor = placing ? 'crosshair' : '';
     },
 
     setWater(show, worldWidth, worldHeight) {
@@ -195,6 +297,8 @@ function createViewport(mount: HTMLElement): ViewportInternals {
       running = false;
       observer.disconnect();
       orbit.dispose();
+      picking.dispose();
+      markerLayer.dispose();
       terrain.geometry.dispose();
       (terrain.material as THREE.Material).dispose();
       water.geometry.dispose();
@@ -387,5 +491,124 @@ class OrbitController {
     this.element.removeEventListener('pointerup', this.onPointerUp);
     this.element.removeEventListener('wheel', this.onWheel);
     this.element.removeEventListener('contextmenu', this.onContextMenu);
+  }
+}
+
+/**
+ * Turning clicks into map edits.
+ *
+ * Three interactions share one pointer: orbiting the camera, selecting or
+ * dragging a marker, and placing a new one. They are separated by what is under
+ * the pointer at press time and by how far it moved — a press that moves more
+ * than a few pixels was a camera drag, not a click, and treating it as a click
+ * makes the viewport feel like it is fighting you.
+ */
+class PickController {
+  private placing = false;
+  private dragging: string | null = null;
+  private pressX = 0;
+  private pressY = 0;
+  private moved = 0;
+  private readonly raycaster = new THREE.Raycaster();
+  private readonly pointer = new THREE.Vector2();
+  private readonly onDown: (e: PointerEvent) => void;
+  private readonly onMove: (e: PointerEvent) => void;
+  private readonly onUp: (e: PointerEvent) => void;
+
+  /** A press that travels further than this was a drag, not a click. */
+  private static readonly CLICK_SLOP_PX = 4;
+
+  constructor(
+    private readonly camera: THREE.PerspectiveCamera,
+    private readonly element: HTMLElement,
+    private readonly terrain: THREE.Mesh,
+    private readonly markers: MarkerLayer,
+    private readonly handlers: ViewportHandlers,
+    private readonly getHeightField: () => {
+      worldWidth: number;
+      worldHeight: number;
+    } | null,
+  ) {
+    this.onDown = (e) => {
+      if (e.button !== 0) return;
+      this.pressX = e.clientX;
+      this.pressY = e.clientY;
+      this.moved = 0;
+      const hit = this.markers.pick(this.castTo(e));
+      // Grabbing a marker suppresses the orbit for this gesture; the orbit
+      // controller sees the same event, so stop it there rather than here.
+      if (hit) {
+        this.dragging = hit;
+        e.stopPropagation();
+        this.handlers.current.onSelectMarker?.(hit);
+      }
+    };
+
+    this.onMove = (e) => {
+      this.moved = Math.max(
+        this.moved,
+        Math.abs(e.clientX - this.pressX) + Math.abs(e.clientY - this.pressY),
+      );
+      if (!this.dragging) return;
+      const point = this.terrainPoint(e);
+      if (point) this.handlers.current.onMoveMarker?.(this.dragging, point.x, point.z);
+    };
+
+    this.onUp = (e) => {
+      const wasDragging = this.dragging;
+      this.dragging = null;
+      if (this.moved > PickController.CLICK_SLOP_PX) return;
+      if (wasDragging) return;
+
+      const hit = this.markers.pick(this.castTo(e));
+      if (hit) {
+        this.handlers.current.onSelectMarker?.(hit);
+        return;
+      }
+      if (this.placing) {
+        const point = this.terrainPoint(e);
+        if (point) this.handlers.current.onPlace?.(point.x, point.z);
+        return;
+      }
+      // A click on empty ground clears the selection, which is what every
+      // editor does and what people reach for without thinking.
+      this.handlers.current.onSelectMarker?.(null);
+    };
+
+    // Capture phase: the orbit controller is listening on the same element and
+    // a marker grab has to win.
+    element.addEventListener('pointerdown', this.onDown, true);
+    element.addEventListener('pointermove', this.onMove);
+    element.addEventListener('pointerup', this.onUp);
+  }
+
+  setPlacing(placing: boolean): void {
+    this.placing = placing;
+  }
+
+  dispose(): void {
+    this.element.removeEventListener('pointerdown', this.onDown, true);
+    this.element.removeEventListener('pointermove', this.onMove);
+    this.element.removeEventListener('pointerup', this.onUp);
+  }
+
+  private castTo(e: PointerEvent): THREE.Raycaster {
+    const rect = this.element.getBoundingClientRect();
+    this.pointer.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+    this.pointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+    this.raycaster.setFromCamera(this.pointer, this.camera);
+    return this.raycaster;
+  }
+
+  /** Where the pointer meets the terrain, in world elmos. */
+  private terrainPoint(e: PointerEvent): { x: number; z: number } | null {
+    const field = this.getHeightField();
+    if (!field) return null;
+    const hits = this.castTo(e).intersectObject(this.terrain, false);
+    if (hits.length === 0) return null;
+    const p = hits[0].point;
+    // The mesh is centred on the origin; map positions are measured from the
+    // map's corner.
+    return { x: p.x + field.worldWidth / 2, z: p.z + field.worldHeight / 2 };
   }
 }

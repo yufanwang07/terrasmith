@@ -130,6 +130,27 @@ export interface MaterialRule {
   readonly wetness?: Influence;
   /** Ambient occlusion, 0..1, where 1 is open sky and 0 is a deep crevice. */
   readonly occlusion?: Influence;
+  /**
+   * The most of a texel this material may claim, 0..1, measured against the
+   * materials that carry no cap.
+   *
+   * Weights are relative, so a material whose conditions are met outranks every
+   * uncapped layer below it and takes the texel outright. That is right for a
+   * cliff face and wrong for an accent: a stream deposit, a lichen wash or a
+   * salt crust is something lying *on* the ground, and if it can replace the
+   * ground entirely then wherever its mask is noisy it draws a web of pale
+   * lines across the map instead of picking out a feature.
+   *
+   * A cap of 0.5 means "at most half the mix is this material", which is the
+   * difference between a stain and a stencil. Leave it undefined for the
+   * materials that make up the terrain itself.
+   *
+   * The limit is computed against the uncapped total alone, so several capped
+   * accents overlapping share the space rather than each claiming their full
+   * fraction. Where nothing uncapped applies at all the cap is ignored — better
+   * a lone accent than a hole.
+   */
+  readonly cap?: number;
 }
 
 /** One entry of a palette. */
@@ -303,6 +324,31 @@ export const GREYSCALE_GRADIENT: Gradient = [
  */
 export const PALETTE_REFERENCE_HEIGHTS = { min: -120, max: 400 } as const;
 
+// Every shipped palette runs least-specific first: two depth zones, two
+// shoreline zones, the dominant ground, an upland variant of that ground, two
+// slope materials, and last the accents. Later entries outrank earlier ones, so
+// the order is also the answer to "what wins on a steep high shore".
+//
+// A map has to read from a thousand feet up, and what carries that is the
+// lightness ladder rather than the hue: dark water, pale shore, mid ground,
+// lighter upland, dark cliff. All seven walk the same ladder and change only
+// the colours it is walked in, which is why one terrain is legible in any
+// of them.
+//
+// The sea bed is ground, not a hole. BAR draws water as a translucent blue
+// layer over whatever the texture put there, so an underwater material is seen
+// darkened and blue-shifted on top of any occlusion baked into it. Nothing
+// below the water line here is darker than about 0.2, or it reads in game as an
+// absence of map rather than as a sea floor.
+//
+// The upland band is a gradient, not a line: it is keyed to a height well up
+// the map with a feather as wide as the band itself, so on a mountain it
+// becomes a treeline and on gentle ground it becomes a slow drying-out toward
+// the high country. Either way the eye gets an elevation cue on terrain too
+// flat to produce any slope contrast at all.
+//
+// Accents are capped — see `MaterialRule.cap`.
+
 /**
  * Temperate maritime: cool olive grass, grey-brown soil, pale quartz sand.
  *
@@ -311,104 +357,125 @@ export const PALETTE_REFERENCE_HEIGHTS = { min: -120, max: 400 } as const;
  * is the single most common tell of a generated BAR map. Rock is warm-neutral
  * so it separates from the grass by hue as well as value, which survives the
  * 5:6:5 endpoints of DXT1 better than a value-only separation.
+ *
+ * The meadow covers most of a temperate map on its own, so the pale dry upland
+ * above it is doing most of the work of making the landforms visible; the
+ * two are 15 points of lightness apart and share a hue, which reads as the same
+ * grass drying out with altitude rather than as a second biome.
  */
 export const TEMPERATE: MaterialPalette = [
   {
     material: {
       id: 'temperate-seabed',
-      label: 'Silt seabed',
-      color: [0.118, 0.145, 0.133],
+      label: 'Deep silt',
+      color: [0.216, 0.239, 0.224],
       roughness: 0.45,
       splatChannel: SPLAT_CHANNELS.sediment,
       detailScale: 60,
     },
-    rule: { weight: 1, height: { max: 0, blend: 20 } },
+    rule: { weight: 1, height: { max: -6, blend: 40 } },
+  },
+  {
+    material: {
+      id: 'temperate-shallows',
+      label: 'Sand bar',
+      color: [0.361, 0.373, 0.325],
+      roughness: 0.55,
+      splatChannel: SPLAT_CHANNELS.sediment,
+      detailScale: 44,
+    },
+    rule: { weight: 1.1, height: { min: -70, max: 1, blend: 26 } },
   },
   {
     material: {
       id: 'temperate-shore',
       label: 'Wet shore sand',
-      color: [0.4, 0.38, 0.314],
+      color: [0.443, 0.42, 0.353],
       roughness: 0.6,
       splatChannel: SPLAT_CHANNELS.sediment,
       detailScale: 30,
     },
-    rule: { weight: 1.1, height: { min: -16, max: 6, blend: 12 }, slope: { max: 26, blend: 10 } },
+    rule: { weight: 1.15, height: { min: -12, max: 8, blend: 12 }, slope: { max: 26, blend: 10 } },
   },
   {
     material: {
       id: 'temperate-sand',
       label: 'Dry beach',
-      color: [0.588, 0.553, 0.443],
+      color: [0.643, 0.604, 0.482],
       roughness: 0.85,
       splatChannel: SPLAT_CHANNELS.sediment,
       detailScale: 28,
     },
-    rule: { weight: 1, height: { min: 2, max: 20, blend: 14 }, slope: { max: 22, blend: 10 } },
+    rule: { weight: 1.1, height: { min: 3, max: 26, blend: 16 }, slope: { max: 22, blend: 10 } },
   },
   {
     material: {
       id: 'temperate-grass',
       label: 'Meadow',
-      color: [0.302, 0.341, 0.235],
+      color: [0.325, 0.361, 0.243],
       roughness: 0.8,
       splatChannel: SPLAT_CHANNELS.ground,
       detailScale: 50,
     },
     rule: {
-      weight: 1.2,
-      height: { min: 8, blend: 26 },
-      slope: { max: 28, blend: 14 },
-      wetness: { from: 0.05, to: 0.45, amount: 0.35 },
+      weight: 1.25,
+      height: { min: 12, blend: 26 },
+      slope: { max: 30, blend: 14 },
+      wetness: { from: 0.15, to: 0.55, amount: 0.3 },
     },
+  },
+  {
+    material: {
+      id: 'temperate-highland',
+      label: 'Dry upland grass',
+      color: [0.494, 0.478, 0.376],
+      roughness: 0.78,
+      splatChannel: SPLAT_CHANNELS.ground,
+      detailScale: 66,
+    },
+    rule: { weight: 1.15, height: { min: 250, blend: 230 }, slope: { max: 34, blend: 16 } },
   },
   {
     material: {
       id: 'temperate-soil',
       label: 'Exposed soil',
-      color: [0.404, 0.365, 0.302],
+      color: [0.447, 0.4, 0.314],
       roughness: 0.78,
       splatChannel: SPLAT_CHANNELS.rock,
       detailScale: 70,
     },
-    rule: { weight: 1.1, slope: { min: 24, blend: 14 }, curvature: { from: 0.35, to: 0.7, amount: 0.4 } },
+    rule: {
+      weight: 1.2,
+      slope: { min: 24, blend: 14 },
+      curvature: { from: 0.35, to: 0.75, amount: 0.3 },
+    },
   },
   {
     material: {
       id: 'temperate-cliff',
       label: 'Cliff rock',
-      color: [0.345, 0.341, 0.329],
+      color: [0.325, 0.329, 0.325],
       roughness: 0.55,
       splatChannel: SPLAT_CHANNELS.rock,
       detailScale: 100,
     },
-    rule: { weight: 1.3, slope: { min: 45, blend: 12 } },
-  },
-  {
-    material: {
-      id: 'temperate-highland',
-      label: 'Highland scree',
-      color: [0.51, 0.502, 0.467],
-      roughness: 0.7,
-      splatChannel: SPLAT_CHANNELS.accent,
-      detailScale: 80,
-    },
-    rule: { weight: 1, height: { min: 290, blend: 110 }, occlusion: { from: 0.5, to: 0.9, amount: 0.4 } },
+    rule: { weight: 1.4, slope: { min: 45, blend: 12 } },
   },
   {
     material: {
       id: 'temperate-sediment',
       label: 'Stream sediment',
-      color: [0.447, 0.427, 0.353],
+      color: [0.42, 0.404, 0.337],
       roughness: 0.7,
       splatChannel: SPLAT_CHANNELS.accent,
       detailScale: 36,
     },
     rule: {
-      weight: 0.9,
-      slope: { max: 24, blend: 12 },
-      flow: { from: 0.35, to: 0.75 },
-      deposition: { from: 0.2, to: 0.7, amount: 0.5 },
+      weight: 1.1,
+      cap: 0.5,
+      slope: { max: 22, blend: 12 },
+      flow: { from: 0.25, to: 0.7 },
+      deposition: { from: 0.25, to: 0.7, amount: 0.4 },
     },
   },
 ];
@@ -1052,12 +1119,51 @@ export function findPalettePreset(id: string): PalettePreset | undefined {
 
 // --- Palette transforms ----------------------------------------------------
 
-function rescaleBand(band: Band | undefined, offset: number, scale: number): Band | undefined {
+/**
+ * The narrowest feather a rescaled band is allowed to keep, in elmos.
+ *
+ * Squeezing a palette onto a map with two elmos of water would otherwise shrink
+ * a 20-elmo shoreline feather to 0.3 elmos, and a feather that narrow is a hard
+ * cut: it draws a contour line along the water's edge, which is the single
+ * failure this module exists to avoid. Four elmos is half a heightmap square —
+ * below the resolution of the terrain itself, so it costs nothing, and above
+ * the resolution of the texture, so it still reads as a blend.
+ */
+const MIN_RESCALED_BLEND = 4;
+
+/**
+ * Rescale one band about the water line, which sits at 0 in both frames.
+ *
+ * Each edge is scaled by whichever side of the water it is on. A band's feather
+ * gets the mean of the scales its own edges used: it is one number describing
+ * two edges, and a band that straddles the shoreline (wet sand, say) has one
+ * edge under water and one above.
+ */
+function rescaleBand(
+  band: Band | undefined,
+  below: number,
+  above: number,
+): Band | undefined {
   if (band === undefined) return undefined;
   const out: { min?: number; max?: number; blend?: number } = {};
-  if (band.min !== undefined) out.min = offset + band.min * scale;
-  if (band.max !== undefined) out.max = offset + band.max * scale;
-  if (band.blend !== undefined) out.blend = band.blend * scale;
+  let scaleSum = 0;
+  let scaleCount = 0;
+  if (band.min !== undefined) {
+    const s = band.min < 0 ? below : above;
+    out.min = band.min * s;
+    scaleSum += s;
+    scaleCount++;
+  }
+  if (band.max !== undefined) {
+    const s = band.max < 0 ? below : above;
+    out.max = band.max * s;
+    scaleSum += s;
+    scaleCount++;
+  }
+  if (band.blend !== undefined) {
+    const s = scaleCount === 0 ? above : scaleSum / scaleCount;
+    out.blend = Math.max(band.blend * s, Math.min(band.blend, MIN_RESCALED_BLEND));
+  }
   return out;
 }
 
@@ -1067,6 +1173,26 @@ function rescaleBand(band: Band | undefined, offset: number, scale: number): Ban
  * Palettes are authored against {@link PALETTE_REFERENCE_HEIGHTS}; a real map
  * might span -40..180 elmos, in which case an unmapped ALPINE_SNOW would put
  * its snow line 50 elmos above the highest peak and paint nothing.
+ *
+ * **The water line is fixed, not scaled.** Sea level is 0 elmos in BAR and 0
+ * elmos in the reference frame, so the two sides of it are scaled separately
+ * and zero always maps to zero. A single linear fit through the whole range
+ * cannot do that: on a map spanning -19..461 it lands the reference frame's
+ * water line at +92 elmos, so the seabed material paints the first 92 elmos of
+ * dry land and the beach paints a contour partway up the hillside. That is the
+ * most visible texturing error there is, because the shoreline is the one edge
+ * on a map that every player can place from memory.
+ *
+ * Scaling the sides independently also matches what the two halves mean. Below
+ * water the bands describe depth zones — a reef shelf, a silt basin — which
+ * should stretch to fill however deep the map's water is. Above it they
+ * describe the beach, the ground and the high country, which should stretch to
+ * fill however tall the terrain is. A map with a deep sea and low hills wants
+ * both, and one ratio cannot give them.
+ *
+ * A side with no terrain on it (a map that never goes below zero) borrows the
+ * other side's scale, so bands that dip just past the water line keep sensible
+ * proportions instead of collapsing onto it.
  *
  * Slope bands are deliberately **not** rescaled: 30 degrees is 30 degrees on
  * any map, and it is the angle, not the elevation, that BAR's pathing reads.
@@ -1089,11 +1215,23 @@ export function rescalePaletteHeights(
     );
   }
   if (refSpan === 0) return palette;
-  const scale = targetSpan / refSpan;
-  const offset = target.min - reference.min * scale;
+
+  const refBelow = Math.max(-reference.min, 0);
+  const refAbove = Math.max(reference.max, 0);
+  const targetBelow = Math.max(-target.min, 0);
+  const targetAbove = Math.max(target.max, 0);
+  let below = refBelow > 0 ? targetBelow / refBelow : 0;
+  let above = refAbove > 0 ? targetAbove / refAbove : 0;
+  // A map entirely above or entirely below water still has bands on the empty
+  // side; give them the scale of the side that exists rather than zero, which
+  // would pile every one of them onto the water line.
+  if (below <= 0) below = above;
+  if (above <= 0) above = below;
+  if (below <= 0 && above <= 0) return palette;
+
   return palette.map((layer) => ({
     material: layer.material,
-    rule: { ...layer.rule, height: rescaleBand(layer.rule.height, offset, scale) },
+    rule: { ...layer.rule, height: rescaleBand(layer.rule.height, below, above) },
   }));
 }
 

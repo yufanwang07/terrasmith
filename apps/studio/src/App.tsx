@@ -11,6 +11,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { mapDimensionsOf } from '@terrasmith/graph';
 import { useEditor } from './state/store.js';
+import type { Marker } from './components/Markers.js';
 import { usePreview } from './state/preview.js';
 import { Toolbar } from './components/Toolbar.js';
 import { StatusBar } from './components/StatusBar.js';
@@ -24,6 +25,7 @@ import { ExportDialog } from './components/dialogs/ExportDialog.js';
 import { IssuesDialog } from './components/dialogs/IssuesDialog.js';
 import { useKeyboardShortcuts } from './state/shortcuts.js';
 import { useValidation } from './state/validation.js';
+import { MapObjectsPanel, useMapMarkers, type PlacementMode } from './components/MapObjects.js';
 
 export function App() {
   const project = useEditor((s) => s.project);
@@ -41,6 +43,9 @@ export function App() {
   // True scale by default: the slope overlay and the "can a tank drive here"
   // answer are only honest if the terrain is drawn the shape it really is.
   const [exaggeration, setExaggeration] = useState(1);
+  const [placement, setPlacement] = useState<PlacementMode>('none');
+  const [selectedMarker, setSelectedMarker] = useState<string | null>(null);
+  const [rightPanel, setRightPanel] = useState<'settings' | 'objects'>('settings');
 
   // Preview the node the user asked for, or the height output by default.
   const targetNodeId = useMemo(() => {
@@ -62,6 +67,45 @@ export function App() {
   }, [preview.error]);
 
   const validation = useValidation(project, preview);
+  const markers = useMapMarkers();
+  const setMetalSpots = useEditor((s) => s.setMetalSpots);
+  const setStartPositions = useEditor((s) => s.setStartPositions);
+
+  const placeObject = useMemo(() => {
+    if (placement === 'none') return undefined;
+    return (x: number, z: number) => {
+      const store = useEditor.getState();
+      const id = `${placement}-${Math.floor(performance.now()).toString(36)}`;
+      if (placement === 'metal') {
+        store.setMetalSpots([
+          ...store.project.metalSpots,
+          { id, x: Math.round(x), z: Math.round(z), income: 2 },
+        ]);
+      } else {
+        store.setStartPositions([
+          ...store.project.startPositions,
+          { id, x: Math.round(x), z: Math.round(z), team: store.project.startPositions.length },
+        ]);
+      }
+      setSelectedMarker(id);
+    };
+  }, [placement]);
+
+  const moveMarker = useCallback(
+    (id: string, x: number, z: number) => {
+      const store = useEditor.getState();
+      const rx = Math.round(x);
+      const rz = Math.round(z);
+      if (store.project.metalSpots.some((s) => s.id === id)) {
+        setMetalSpots(store.project.metalSpots.map((s) => (s.id === id ? { ...s, x: rx, z: rz } : s)));
+      } else if (store.project.startPositions.some((s) => s.id === id)) {
+        setStartPositions(
+          store.project.startPositions.map((s) => (s.id === id ? { ...s, x: rx, z: rz } : s)),
+        );
+      }
+    },
+    [setMetalSpots, setStartPositions],
+  );
 
   const onSplitterDrag = useSplitter(setGraphHeight);
 
@@ -92,6 +136,11 @@ export function App() {
                 dims={dims}
                 exaggeration={exaggeration}
                 onExaggeration={setExaggeration}
+                markers={markers}
+                selectedMarker={selectedMarker}
+                onPlace={placeObject}
+                onSelectMarker={setSelectedMarker}
+                onMoveMarker={moveMarker}
               />
               <div className="splitter" onPointerDown={onSplitterDrag} />
               <GraphEditor errors={nodeErrors} />
@@ -103,13 +152,49 @@ export function App() {
               dims={dims}
               exaggeration={exaggeration}
               onExaggeration={setExaggeration}
+              markers={markers}
+              selectedMarker={selectedMarker}
+              onPlace={placeObject}
+              onSelectMarker={setSelectedMarker}
+              onMoveMarker={moveMarker}
             />
           ) : (
             <GraphEditor errors={nodeErrors} />
           )}
         </div>
 
-        {guided ? <GuidedPanel /> : <Inspector />}
+        <div className="panel" style={{ minWidth: 0 }}>
+          <div className="segmented" style={{ margin: 8 }}>
+            <button
+              style={{ flex: 1 }}
+              aria-pressed={rightPanel === 'settings'}
+              onClick={() => setRightPanel('settings')}
+            >
+              {guided ? 'Build' : 'Settings'}
+            </button>
+            <button
+              style={{ flex: 1 }}
+              aria-pressed={rightPanel === 'objects'}
+              onClick={() => setRightPanel('objects')}
+            >
+              Objects
+            </button>
+          </div>
+          <div style={{ flex: 1, minHeight: 0, display: 'flex' }}>
+            {rightPanel === 'objects' ? (
+              <MapObjectsPanel
+                mode={placement}
+                onMode={setPlacement}
+                selected={selectedMarker}
+                onSelect={setSelectedMarker}
+              />
+            ) : guided ? (
+              <GuidedPanel />
+            ) : (
+              <Inspector />
+            )}
+          </div>
+        </div>
       </div>
 
       <StatusBar
@@ -140,12 +225,22 @@ function TerrainPane({
   dims,
   exaggeration,
   onExaggeration,
+  markers,
+  selectedMarker,
+  onPlace,
+  onSelectMarker,
+  onMoveMarker,
 }: {
   preview: ReturnType<typeof usePreview>;
   overlay: ReturnType<typeof useEditor.getState>['overlay'];
   dims: ReturnType<typeof mapDimensionsOf>;
   exaggeration: number;
   onExaggeration(v: number): void;
+  markers: Marker[];
+  selectedMarker: string | null;
+  onPlace?: (x: number, z: number) => void;
+  onSelectMarker(id: string | null): void;
+  onMoveMarker(id: string, x: number, z: number): void;
 }) {
   const setOverlay = useEditor((s) => s.setOverlay);
   const project = useEditor((s) => s.project);
@@ -159,6 +254,11 @@ function TerrainPane({
         worldHeight={dims.worldHeight}
         showWater={!project.settings.voidWater}
         exaggeration={exaggeration}
+        markers={markers}
+        selectedMarker={selectedMarker}
+        onPlace={onPlace}
+        onSelectMarker={onSelectMarker}
+        onMoveMarker={onMoveMarker}
       />
       <div className="viewport-overlay">
         <div className="viewport-controls">

@@ -66,13 +66,14 @@ Run the editor:
 npm run dev          # vite dev server; open the URL it prints
 ```
 
-Or build a project file from the command line:
+Or build a project file from the command line. The CLI is `packages/cli/dist/cli.js`, and the workspace
+exposes it as `terrasmith` once its bin is linked:
 
 ```bash
-npx terrasmith build my-map.terrasmith            # writes MyMap.sd7 beside the project
-npx terrasmith build my-map.terrasmith --quality final -o dist/MyMap_v2.sd7
-npx terrasmith inspect my-map.terrasmith          # size, seed, symmetry, node counts
-npx terrasmith nodes                              # the node catalog, by category
+node packages/cli/dist/cli.js build my-map.terrasmith     # writes MyMap.sd7 beside the project
+node packages/cli/dist/cli.js build my-map.terrasmith --quality final -o dist/MyMap_v2.sd7
+node packages/cli/dist/cli.js inspect my-map.terrasmith   # size, seed, symmetry, node counts
+node packages/cli/dist/cli.js nodes                       # the node catalog, by category
 ```
 
 To play the result, copy the `.sd7` into the `maps/` folder of your BAR data directory — the same folder
@@ -88,6 +89,18 @@ node tools/render-templates.mjs
 
 It writes hillshaded and flat-albedo PNGs to `samples/renders/` and prints, per template, the height range
 and the percentage of the map that is drivable, impassable and underwater.
+
+## Documentation
+
+- **[Making your first BAR map](docs/GUIDE.md)** — the guide to read if you play BAR and have never used a
+  terrain tool. Map sizes for a given player count, where flat ground has to go, how metal spots work, why
+  71% of BAR maps are 180-degree rotational, and how to get a finished map into BAR's pool.
+- **[Node reference](docs/NODES.md)** — every node, its ports and its parameters.
+- **[Architecture](docs/ARCHITECTURE.md)** — how the packages fit together and why.
+- **[Research](docs/research/)** — the engine-verified reference material the whole project is written
+  against: the SMF and SMT binary formats, `mapinfo.lua`, BAR's gameplay constraints, the archive and
+  publishing pipeline, the existing toolchain, and terrain algorithms. Each document cites engine and game
+  source by file and line, and carries a verification log.
 
 ## Packages
 
@@ -115,8 +128,8 @@ every layer runs in a browser tab, in a worker, in Node and in CI.
   validator that checks size, height range, slope bands, reachability, start positions, build pads, metal,
   water and symmetry.
 - **The node graph.** 37 node types across generators, filters, combiners, selectors, natural processes,
-  outputs and utilities, with a pull-based evaluator memoised on content hashes. Run `npx terrasmith nodes`
-  for the live list, and see [docs/NODES.md](docs/NODES.md) for the reference.
+  outputs and utilities, with a pull-based evaluator memoised on content hashes. The CLI's `nodes` command
+  prints the live list; [docs/NODES.md](docs/NODES.md) is the written reference.
 - **Seven templates** that are complete, buildable maps rather than empty graphs.
 - **The build pipeline and CLI.** A project file becomes a loadable `.sd7` containing the `.smf`, the
   deduplicated `.smt`, a generated `mapinfo.lua`, the `maphelper` shim, a `maps-metadata` record and a

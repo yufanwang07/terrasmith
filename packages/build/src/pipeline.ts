@@ -21,6 +21,7 @@ import {
   enforceSlopeBands,
   findPalettePreset,
   generateSplatWeights,
+  resolveTextureInputs,
   normalizeCurvature,
   paintMetalSpot,
   rescalePaletteHeights,
@@ -298,7 +299,16 @@ export async function buildMapFiles(
   };
 }
 
-/** Derive every analysis channel the texture stage needs, at graph resolution. */
+/**
+ * Derive every analysis channel the texture stage needs, once, over the whole
+ * map.
+ *
+ * All of them, not just the cheap ones. Flow accumulation in particular is a
+ * global computation — where water goes depends on the entire terrain — so if
+ * the block shader were left to derive it, each block would answer from its own
+ * thousand texels and the finished map would carry a grid of seams wherever the
+ * blocks met.
+ */
 function buildAnalysis(outputs: GraphOutputs, plan: BuildPlan): TextureAnalysis {
   const height = outputs.height;
   // The graph grid spans the world, so its cell size is the world width over
@@ -316,7 +326,21 @@ function buildAnalysis(outputs: GraphOutputs, plan: BuildPlan): TextureAnalysis 
     steps: 12,
   });
 
-  return { height, slopeDegrees, curvature, occlusion };
+  const resolved = resolveTextureInputs(
+    { height, slopeDegrees, curvature, occlusion },
+    { cellSize, waterLevel: 0 },
+  );
+
+  return {
+    height,
+    slopeDegrees,
+    curvature,
+    occlusion,
+    flow: resolved.flow,
+    deposition: resolved.deposition,
+    wear: resolved.wear,
+    wetness: resolved.wetness,
+  };
 }
 
 interface DerivedMaps {

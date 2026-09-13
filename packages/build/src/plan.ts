@@ -46,10 +46,31 @@ export interface BuildPlan {
    */
   graphWidth: number;
   graphHeight: number;
-  /** Edge of one texture bake block, in texels. */
+  /** Rows per texture bake strip. A strip always spans the full texture width. */
   blockSize: number;
   /** Peak bytes the texture stage will hold, for reporting and for warnings. */
   estimatedPeakBytes: number;
+}
+
+/**
+ * Texels a bake strip should hold.
+ *
+ * A strip carries eight float analysis channels, a float RGBA shading buffer
+ * and a byte output — about 52 bytes per texel — so a million texels is around
+ * 55 MB. That is comfortable in a phone browser, and larger strips buy nothing:
+ * the per-strip setup is a few allocations against a million texels of work.
+ */
+const TARGET_STRIP_TEXELS = 1 << 20;
+
+/**
+ * Rows per strip for a texture of the given width, rounded to whole tiles.
+ *
+ * A 32x32 map's texture is twice as wide as a 16x16 map's, so it gets half the
+ * rows and the memory cost stays flat rather than doubling with map size.
+ */
+function stripRowsFor(textureWidth: number): number {
+  const rows = Math.round(TARGET_STRIP_TEXELS / Math.max(1, textureWidth) / 32) * 32;
+  return Math.max(32, Math.min(512, rows));
 }
 
 /** The largest graph resolution each quality level will evaluate at. */
@@ -67,10 +88,11 @@ export interface PlanOptions {
   /** Override the graph resolution entirely. */
   graphResolution?: number;
   /**
-   * Edge of one texture bake block, in texels. Larger blocks amortise setup
-   * over more work; smaller ones cap peak memory. 1024 holds 16 MB of RGBA
-   * floats, which is comfortable everywhere including a phone browser.
-   * @default 1024
+   * Rows per texture bake strip; a strip spans the full texture width. Rounded
+   * down to a multiple of 32 so every strip holds whole tiles. 256 rows of an
+   * 8192-wide texture is 8 MB of bytes and about 34 MB of shading floats, which
+   * is comfortable everywhere including a phone browser.
+   * @default 256
    */
   blockSize?: number;
 }
@@ -79,7 +101,7 @@ export interface PlanOptions {
 export function planBuild(project: Project, options: PlanOptions = {}): BuildPlan {
   const quality = options.quality ?? 'standard';
   const dims = mapDimensionsOf(project.settings);
-  const blockSize = options.blockSize ?? 1024;
+  const blockSize = options.blockSize ?? stripRowsFor(dims.textureWidth);
 
   // The graph runs on a square grid so that noise is isotropic; a non-square
   // map gets the longer axis' resolution and is cropped at sample time.
@@ -93,10 +115,11 @@ export function planBuild(project: Project, options: PlanOptions = {}): BuildPla
   const graphHeight = aspect >= 1 ? Math.max(64, Math.round(graphSize / aspect)) : graphSize;
 
   const graphBytes = graphWidth * graphHeight * 4;
-  const blockBytes = blockSize * blockSize * 4 * 4;
+  // One strip's worth of eight float analysis channels plus its byte output.
+  const stripBytes = dims.textureWidth * (blockSize + 4) * (4 * 8 + 4);
   // The graph holds perhaps a dozen live intermediates at once; the texture
-  // stage holds a couple of blocks plus the minimap it is accumulating.
-  const estimatedPeakBytes = graphBytes * 12 + blockBytes * 3 + 1024 * 1024 * 4;
+  // stage holds one strip plus the minimap it is accumulating.
+  const estimatedPeakBytes = graphBytes * 12 + stripBytes + 1024 * 1024 * 4;
 
   return {
     mapx: dims.mapx,
@@ -118,9 +141,7 @@ export function planBuild(project: Project, options: PlanOptions = {}): BuildPla
   };
 }
 
-/** Number of texture blocks a plan will bake. */
+/** Number of texture strips a plan will bake. */
 export function blockCount(plan: BuildPlan): number {
-  return (
-    Math.ceil(plan.textureWidth / plan.blockSize) * Math.ceil(plan.textureHeight / plan.blockSize)
-  );
+  return Math.ceil(plan.textureHeight / Math.max(32, Math.floor(plan.blockSize / 32) * 32));
 }
