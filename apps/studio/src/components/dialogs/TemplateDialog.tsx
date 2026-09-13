@@ -13,9 +13,11 @@ import {
   TEMPLATES,
   projectFromTemplate,
   type EvalContext,
+  type Project,
   type Template,
 } from '@terrasmith/graph';
 import { registry, useEditor } from '../../state/store.js';
+import { autoLayout, hasOverlap } from '../graph/autoLayout.js';
 
 /** Thumbnail resolution. Small enough to evaluate seven of them without a wait. */
 const THUMB_SIZE = 72;
@@ -45,7 +47,7 @@ export function TemplateDialog({ onClose }: { onClose(): void }) {
                 key={template.id}
                 className="template-card"
                 onClick={() => {
-                  setProject(projectFromTemplate(template), template.name);
+                  setProject(tidyIfNeeded(projectFromTemplate(template)), template.name);
                   onClose();
                 }}
                 title={template.description}
@@ -72,6 +74,26 @@ export function TemplateDialog({ onClose }: { onClose(): void }) {
       </div>
     </div>
   );
+}
+
+/**
+ * Lay a template's graph out if its nodes collide.
+ *
+ * A template's positions are written by hand, and a node's height depends on
+ * how many ports it has — which changes when the node does. Rather than ask
+ * every template to be re-nudged whenever a port is added, check and fix.
+ * A layout that is already clear is left exactly as its author arranged it.
+ */
+function tidyIfNeeded(project: Project): Project {
+  if (!hasOverlap(project.graph)) return project;
+  const moves = new Map(autoLayout(project.graph).map((m) => [m.id, m.position]));
+  return {
+    ...project,
+    graph: {
+      ...project.graph,
+      nodes: project.graph.nodes.map((n) => ({ ...n, position: moves.get(n.id) ?? n.position })),
+    },
+  };
 }
 
 function TemplateThumbnail({ template }: { template: Template }) {

@@ -13,6 +13,7 @@ import {
   Background,
   BackgroundVariant,
   Controls,
+  ControlButton,
   MiniMap,
   ReactFlow,
   ReactFlowProvider,
@@ -26,6 +27,7 @@ import {
 import { useEditor } from '../../state/store.js';
 import { registry } from '../../state/store.js';
 import { TerrainNode, categoryColor, type TerrainNodeData } from './TerrainNode.js';
+import { autoLayout } from './autoLayout.js';
 
 const nodeTypes = { terrain: TerrainNode };
 
@@ -51,7 +53,7 @@ function GraphCanvas({ errors }: Props) {
   const disconnect = useEditor((s) => s.disconnect);
   const removeNodes = useEditor((s) => s.removeNodes);
   const addNode = useEditor((s) => s.addNode);
-  const { screenToFlowPosition } = useReactFlow();
+  const { screenToFlowPosition, fitView } = useReactFlow();
   const wrapperRef = useRef<HTMLDivElement>(null);
 
   const nodes = useMemo<Node<TerrainNodeData>[]>(
@@ -148,6 +150,14 @@ function GraphCanvas({ errors }: Props) {
     event.dataTransfer.dropEffect = 'copy';
   }, []);
 
+  const tidy = useCallback(() => {
+    const moves = autoLayout(project.graph);
+    if (moves.length > 0) moveNodes(moves);
+    // Let the move settle before re-framing, or fitView measures the old
+    // positions and the graph ends up off-screen.
+    requestAnimationFrame(() => void fitView({ duration: 250, padding: 0.12 }));
+  }, [project.graph, moveNodes, fitView]);
+
   return (
     <div className="graph-wrap" ref={wrapperRef} onDrop={onDrop} onDragOver={onDragOver}>
       <ReactFlow
@@ -166,7 +176,16 @@ function GraphCanvas({ errors }: Props) {
         multiSelectionKeyCode={['Meta', 'Shift']}
       >
         <Background variant={BackgroundVariant.Dots} gap={18} size={1} color="#242931" />
-        <Controls showInteractive={false} />
+        <Controls showInteractive={false}>
+          <ControlButton onClick={tidy} title="Lay the graph out left to right">
+            {/* Three stacked bars: the layered layout this produces. */}
+            <svg viewBox="0 0 16 16" width={12} height={12} fill="currentColor">
+              <rect x="1" y="2" width="6" height="3" rx="1" />
+              <rect x="9" y="6.5" width="6" height="3" rx="1" />
+              <rect x="1" y="11" width="6" height="3" rx="1" />
+            </svg>
+          </ControlButton>
+        </Controls>
         <MiniMap
           pannable
           zoomable
