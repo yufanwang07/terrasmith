@@ -21,6 +21,7 @@ import {
 } from '@terrasmith/format';
 import type { Project, StartBoxSet } from '@terrasmith/graph';
 import { archiveBaseName, type BuildArtifacts } from './pipeline.js';
+import { deriveStartBoxes } from './startboxes.js';
 
 /** Which container to write. */
 export type ArchiveFormat = 'sd7' | 'sdz';
@@ -171,8 +172,13 @@ export function buildMapsMetadata(project: Project, artifacts: BuildArtifacts): 
     maxPlayerCount: project.metadata.maxPlayers,
     tags: project.metadata.tags?.length ? project.metadata.tags : undefined,
     // Start boxes use BAR's 0..200 normalised space, where one unit is
-    // mapSize/200 elmos on each axis.
-    startboxesSet: project.startBoxSets.map(toMetadataBoxSet),
+    // mapSize/200 elmos on each axis. A map with none is unplayable in the
+    // lobby, so derive them from the start positions rather than shipping
+    // nothing.
+    startboxesSet: (project.startBoxSets.length > 0
+      ? project.startBoxSets
+      : deriveStartBoxes(project.startPositions, project.settings)
+    ).map(toMetadataBoxSet),
     metalSpots: project.metalSpots.map((spot) => ({
       x: Math.round(spot.x),
       z: Math.round(spot.z),

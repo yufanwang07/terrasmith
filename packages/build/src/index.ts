@@ -50,6 +50,12 @@ export {
   type BuildStats,
 } from './pipeline.js';
 export {
+  deriveStartBoxes,
+  checkStartBoxes,
+  STARTBOX_SPACE,
+  type StartBoxOptions,
+} from './startboxes.js';
+export {
   assembleArchive,
   buildMapInfo,
   buildMapsMetadata,

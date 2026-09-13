@@ -38,6 +38,7 @@ import {
 import {
   archiveBaseName,
   assembleArchive,
+  buildMap,
   buildMapFiles,
   buildMetalLayoutLua,
   type ArchiveResult,
@@ -120,13 +121,57 @@ function sha1(data: Uint8Array): string {
   return createHash('sha1').update(data).digest('hex');
 }
 
-/** Run a Python snippet and parse the single JSON object it prints. */
+/**
+ * Run a Python snippet and parse the single JSON object it prints.
+ *
+ * The catch is not decoration. `execFileSync` puts the command line in the
+ * thrown message and the interpreter's traceback in `error.stderr`, where no
+ * test reporter will show it — so a one-line Python mistake or a missing module
+ * surfaces as `Command failed: python3 -c import hashlib, json...`, which reads
+ * like a bug in the map rather than a bug in the harness.
+ */
 function python(source: string, ...args: string[]): unknown {
-  const out = execFileSync('python3', ['-c', source, ...args], {
-    encoding: 'utf8',
-    maxBuffer: 64 * 1024 * 1024,
-  });
-  return JSON.parse(out);
+  try {
+    const out = execFileSync('python3', ['-c', source, ...args], {
+      encoding: 'utf8',
+      maxBuffer: 64 * 1024 * 1024,
+    });
+    return JSON.parse(out);
+  } catch (error) {
+    const stderr = (error as { stderr?: Buffer | string }).stderr;
+    const detail = stderr ? String(stderr).trim() : String(error);
+    throw new Error(`the python3 helper failed:\n${detail}`);
+  }
+}
+
+/**
+ * Check the external readers are here before anything tries to use them.
+ *
+ * These tests deliberately verify the archive with something other than the
+ * code that wrote it, which means a Lua interpreter and two 7-Zip readers that
+ * are not npm dependencies and will not be on a fresh CI image. Failing once,
+ * up front, with the install line is the difference between "this map is
+ * broken" and "this machine is missing py7zr".
+ */
+function requireExternalReaders(): void {
+  const missing: string[] = [];
+  try {
+    execFileSync('python3', ['-c', 'import lupa, py7zr'], { stdio: 'ignore' });
+  } catch {
+    missing.push('python3 with lupa and py7zr — `pip install lupa py7zr`');
+  }
+  try {
+    execFileSync('bsdtar', ['--version'], { stdio: 'ignore' });
+  } catch {
+    missing.push('bsdtar on PATH — libarchive, `brew install libarchive` or `apt install libarchive-tools`');
+  }
+  if (missing.length > 0) {
+    throw new Error(
+      'packages/build/test/archive.test.ts checks the generated archive with readers ' +
+        'outside this process, and they are not installed:\n  - ' +
+        missing.join('\n  - '),
+    );
+  }
 }
 
 let project: Project;
@@ -147,6 +192,7 @@ let sevenZip: {
 };
 
 beforeAll(async () => {
+  requireExternalReaders();
   project = testProject();
   artifacts = await buildMapFiles(project, { registry: createDefaultRegistry(), blockSize: 256 });
   base = archiveBaseName(project);
@@ -526,4 +572,64 @@ describe('the maps-metadata record', () => {
       sdz.metadataJson,
     );
   });
+});
+
+describe('buildMap, the one call the CLI and the editor both make', () => {
+  it('refuses a project that would not load, and names every problem', async () => {
+    // The validation gate is the whole point of the wrapper: a bad project
+    // should cost a second and come back with a list of things to fix, rather
+    // than cost a full bake and hand over a file the engine rejects at load.
+    const broken = testProject();
+    broken.settings.sizeX = 3;
+    broken.metadata.name = '   ';
+    const options = { registry: createDefaultRegistry(), blockSize: 256 };
+    await expect(buildMap(broken, options)).rejects.toThrow(/this project cannot be built yet/i);
+    await expect(buildMap(broken, options)).rejects.toThrow(
+      /map width must be an even whole number/i,
+    );
+    // Every problem, not just the first: an author who fixes them one at a time
+    // pays a whole build per fix.
+    await expect(buildMap(broken, options)).rejects.toThrow(/the map needs a name/i);
+  });
+
+  it('builds the same archive that building and packaging by hand does', async () => {
+    // buildMapFiles and assembleArchive are covered above; what is not is that
+    // the wrapper composes them over the *same* project and options, which is
+    // the failure that would ship a `.sd7` whose mapinfo describes a different
+    // build than its `.smf`.
+    //
+    // Progress is checked from this same call rather than its own: a build of
+    // this map is the most expensive thing in the suite and there is no reason
+    // to pay for two.
+    const progress: number[] = [];
+    const result = await buildMap(project, {
+      registry: createDefaultRegistry(),
+      blockSize: 256,
+      format: 'sdz',
+      onProgress: (p) => progress.push(p.progress),
+    });
+    expect(result.problems).toEqual([]);
+    expect(result.archive.fileName).toBe(sdz.fileName);
+    expect(result.archive.mapInfoLua).toBe(sdz.mapInfoLua);
+    expect(result.archive.metadataJson).toBe(sdz.metadataJson);
+    // Byte-for-byte, which also says the two-stage path is reproducible end to
+    // end and not only stage by stage.
+    expect(result.archive.data).toEqual(sdz.data);
+    expect(result.artifacts.smtFileName).toBe(artifacts.smtFileName);
+    expect(result.elapsedMs).toBeGreaterThan(0);
+
+    // The CLI and the editor both draw a bar from these. A stage that reports
+    // 0.92 and then 0.4 makes the bar jump backwards, which reads as a hang;
+    // one that stops short of 1 leaves it stuck at 92% after the file is
+    // already written. The wrapper rescales two progress streams into one, so
+    // both are live risks here and nowhere else.
+    expect(progress.length).toBeGreaterThan(3);
+    for (let i = 1; i < progress.length; i++) {
+      expect(progress[i], `progress went backwards at report ${i}`).toBeGreaterThanOrEqual(
+        progress[i - 1],
+      );
+    }
+    expect(progress[0]).toBeGreaterThanOrEqual(0);
+    expect(progress[progress.length - 1]).toBeCloseTo(1, 6);
+  }, 240_000);
 });

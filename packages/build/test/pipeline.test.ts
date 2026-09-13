@@ -205,17 +205,25 @@ let artifacts: BuildArtifacts;
 let rebuilt: BuildArtifacts;
 /** The same map baked as one whole-texture strip, the control for the seam test. */
 let oneBlock: BuildArtifacts;
+/**
+ * The same map baked in 32-row strips — one tile row each, the floor
+ * `stripRowsFor` picks for the widest maps. It is the hardest case for the
+ * halo, because two rows in every 32 are halo and every strip boundary lands on
+ * a different row of the analysis field than the 256-row cut does.
+ */
+let thinStrips: BuildArtifacts;
 let smf: SmfFile;
 
 beforeAll(async () => {
   registry = createDefaultRegistry();
   project = testProject();
   // The override textures are exercised in archive.test.ts; skipping them here
-  // keeps three full builds inside a sensible test runtime.
+  // keeps four full builds inside a sensible test runtime.
   const options = { registry, blockSize: 256, extraTextures: false as const };
   artifacts = await buildMapFiles(project, options);
   rebuilt = await buildMapFiles(testProject(), options);
   oneBlock = await buildMapFiles(project, { ...options, blockSize: TEXTURE_SIZE });
+  thinStrips = await buildMapFiles(project, { ...options, blockSize: 32 });
   smf = readSmf(artifacts.smf);
 }, 240_000);
 
@@ -261,6 +269,12 @@ describe('the .smf the engine reads back', () => {
       expect(ptr).toBeGreaterThanOrEqual(80);
       expect(ptr).toBeLessThan(size);
     }
+    // A pointer can be inside the file and still have its block run off the
+    // end, which reads as a perfectly valid header and then faults the engine
+    // partway through the load. Every fixed-size block has to fit whole.
+    expect(smf.header.heightmapPtr + (MAPX + 1) * (MAPY + 1) * 2).toBeLessThanOrEqual(size);
+    expect(smf.header.typeMapPtr + (MAPX / 2) * (MAPY / 2)).toBeLessThanOrEqual(size);
+    expect(smf.header.metalmapPtr + (MAPX / 2) * (MAPY / 2)).toBeLessThanOrEqual(size);
     expect(smf.header.minimapPtr + MINIMAP_SIZE).toBeLessThanOrEqual(size);
   });
 
@@ -273,27 +287,37 @@ describe('the .smf the engine reads back', () => {
 });
 
 describe('the heightmap', () => {
-  it('decodes through the engine divisor of 65536, not 65535', () => {
+  it('is quantised against the engine divisor of 65536, not 65535', () => {
     // SMFReadMap.cpp reconstructs height as
     //   min + raw * (max - min) / 65536
     // so raw 65535 lands one step *below* maxHeight and the top of the declared
-    // range is never quite reachable. An encoder that assumes 65535 puts the
-    // whole map slightly too high, which is invisible in isolation and breaks
-    // the water line and anything that has to match a sibling map.
+    // range is never quite reachable.
     const span = MAX_HEIGHT - MIN_HEIGHT;
     const step = span / HEIGHT_QUANT_DIVISOR;
-    const topOfRange = MIN_HEIGHT + (65535 * span) / HEIGHT_QUANT_DIVISOR;
-    expect(topOfRange).toBeCloseTo(MAX_HEIGHT - step, 6);
+    expect(HEIGHT_QUANT_DIVISOR).toBe(65536);
+    expect(MIN_HEIGHT + (65535 * span) / HEIGHT_QUANT_DIVISOR).toBeCloseTo(MAX_HEIGHT - step, 6);
 
-    let lo = Infinity;
-    let hi = -Infinity;
-    for (let i = 0; i < smf.heightmap.length; i++) {
-      const world = MIN_HEIGHT + (smf.heightmap[i] * span) / HEIGHT_QUANT_DIVISOR;
-      if (world < lo) lo = world;
-      if (world > hi) hi = world;
+    // The whole difference between the two divisors is one least significant
+    // bit: an encoder that scales by 65535 writes a map the engine reads back
+    // up to a single step *low* (not high — the raw values come out smaller,
+    // not larger), uniformly across the terrain. No per-sample tolerance can
+    // separate that from dither, because it is smaller than dither. The mean
+    // can: a correct encoder's error is dither plus rounding and averages to
+    // roughly zero, while a 65535 encoder's averages to -mean((h - min) / span),
+    // which on any terrain that uses its range is a large fraction of a step.
+    // Measured here: 0.03 raw units correct against 0.53 for the 65535 variant.
+    const source = artifacts.heightfield;
+    let residual = 0;
+    let counted = 0;
+    for (let i = 0; i < source.data.length; i++) {
+      const raw = smf.heightmap[i];
+      // A clamped sample says nothing about the scale factor that produced it.
+      if (raw === 0 || raw === 65535) continue;
+      residual += raw - ((source.data[i] - MIN_HEIGHT) / span) * HEIGHT_QUANT_DIVISOR;
+      counted++;
     }
-    expect(lo).toBeGreaterThanOrEqual(MIN_HEIGHT);
-    expect(hi).toBeLessThanOrEqual(topOfRange + 1e-6);
+    expect(counted).toBeGreaterThan(source.data.length / 2);
+    expect(Math.abs(residual / counted)).toBeLessThan(0.2);
   });
 
   it('reproduces the built heightfield to within one quantisation step', () => {
@@ -560,14 +584,28 @@ describe('features', () => {
     expect(new Int16Array([smf.features[2].rotation])[0]).toBe(-16384);
   });
 
-  it('samples the ground height under each feature', () => {
+  it('samples the ground height under each feature, on the right axis', () => {
     // The engine discards the stored Y and snaps features to
     // CGround::GetHeightReal, but writing the real height keeps third-party
-    // viewers and importers honest.
-    for (const stored of smf.features) {
-      expect(stored.y).toBeGreaterThanOrEqual(MIN_HEIGHT);
-      expect(stored.y).toBeLessThanOrEqual(MAX_HEIGHT);
+    // viewers and importers honest — and it is the only assertion that pins the
+    // order of the lookup. "Inside the height range" would be satisfied by a
+    // constant, by the wrong sample, and above all by a transposed one, which
+    // is the bug this kind of code actually has: the heightfield is row-major,
+    // so z picks the row and x the column, and swapping them is invisible on
+    // every symmetric test map.
+    const field = artifacts.heightfield;
+    for (let i = 0; i < project.features.length; i++) {
+      const placed = project.features[i];
+      const col = Math.round((placed.x / (MAPX * 8)) * (field.width - 1));
+      const row = Math.round((placed.z / (MAPY * 8)) * (field.height - 1));
+      expect(smf.features[i].y).toBeCloseTo(field.data[row * field.width + col], 3);
+      expect(smf.features[i].y).toBeGreaterThanOrEqual(MIN_HEIGHT);
+      expect(smf.features[i].y).toBeLessThanOrEqual(MAX_HEIGHT);
     }
+    // f2 sits at (256, 768) and f3 at (768, 256) — mirrored across the
+    // diagonal. If the terrain happened to give them the same height the check
+    // above could not tell a transpose from the truth, so assert it does not.
+    expect(Math.abs(smf.features[1].y - smf.features[2].y)).toBeGreaterThan(1);
   });
 });
 
@@ -619,7 +657,16 @@ describe('a project with nothing wired to the height output', () => {
   });
 });
 
-describe("the texture baker's halo", () => {
+/**
+ * `bakeTexture` is the standalone baker the package exports for callers that
+ * bring their own shader. It is *not* what `buildMapFiles` runs: the build
+ * splits the texture into {@link StripTask}s and shades them through
+ * `runStripTask`, which has its own upsampler and its own halo handling, so
+ * these tests say nothing about the shipped map. What covers the build's halo
+ * is the byte-identity across strip heights further down, which is why that one
+ * spans four strip sizes rather than two.
+ */
+describe("the standalone texture baker's halo", () => {
   const SIZE = 256;
 
   /** A field whose value changes from texel to texel, so a clamped edge shows. */
@@ -636,8 +683,7 @@ describe("the texture baker's halo", () => {
 
   /**
    * A shader with a 3x3 stencil — the simplest thing that goes wrong without a
-   * halo. Everything neighbourhood-based in the real shading path, the
-   * hillshade above all, fails in exactly this way.
+   * halo, and the same shape as the hillshade the build's own shader runs.
    */
   const stencilShader: BlockShader = (block) => {
     const { width, height, fields } = block;
@@ -727,6 +773,15 @@ describe('the built texture', () => {
     expect(oneBlock.stats.uniqueTiles).toBe(artifacts.stats.uniqueTiles);
     expect(bytesEqual(oneBlock.smt, artifacts.smt)).toBe(true);
     expect(bytesEqual(oneBlock.smf, artifacts.smf)).toBe(true);
+
+    // 32 rows as well, because 256 and 1024 are both whole multiples of the
+    // 128-row spacing that the 129-sample analysis field maps onto, so they can
+    // agree with each other while an off-by-one in the analysis slice a strip
+    // is handed goes unnoticed. 32 is also live configuration, not a corner
+    // case: `stripRowsFor` picks it for a 32x32 map's 16384-wide texture.
+    expect(thinStrips.stats.uniqueTiles).toBe(artifacts.stats.uniqueTiles);
+    expect(bytesEqual(thinStrips.smt, artifacts.smt)).toBe(true);
+    expect(bytesEqual(thinStrips.smf, artifacts.smf)).toBe(true);
   });
 
   it('shows no step at a strip boundary that the terrain does not justify', () => {
@@ -757,11 +812,23 @@ describe('the built texture', () => {
     expect(artifacts.preview.height).toBe(1024);
     const texture = decodeTexture(artifacts.smt, smf.tileIndices);
     // At this map size the minimap is a 1:1 copy of the diffuse, so the two
-    // agree to within BC1's quantisation error and nothing else.
+    // agree to within BC1's quantisation error and nothing else. All three
+    // colour channels: the tile path and the minimap path pack bytes
+    // separately, and comparing only red would miss a channel order swap
+    // between them, which is what a minimap that comes out blue actually is.
     let worst = 0;
     for (let i = 0; i < texture.length; i += 4) {
-      worst = Math.max(worst, Math.abs(texture[i] - artifacts.preview.data[i]));
+      worst = Math.max(
+        worst,
+        Math.abs(texture[i] - artifacts.preview.data[i]),
+        Math.abs(texture[i + 1] - artifacts.preview.data[i + 1]),
+        Math.abs(texture[i + 2] - artifacts.preview.data[i + 2]),
+      );
     }
     expect(worst).toBeLessThan(32);
+    // And opaque: the preview is handed straight to the UI and to uploads.
+    for (let i = 3; i < artifacts.preview.data.length; i += 4) {
+      if (artifacts.preview.data[i] !== 255) throw new Error(`preview texel ${i >> 2} is not opaque`);
+    }
   });
 });
