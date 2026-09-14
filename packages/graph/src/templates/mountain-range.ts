@@ -19,6 +19,12 @@
  * and a handful of spurs; everything finer comes from erosion, which carves
  * valleys that connect to each other because water actually flowed through
  * them. Pile on octaves instead and you get texture where you wanted structure.
+ *
+ * Those explicit passes are also what decides where the half turn this map
+ * declares can go. A pass is the one feature on the map that has to survive
+ * being made symmetric, and it runs straight through the line the two halves
+ * are joined along, so the symmetry has to be settled before the pass is cut
+ * rather than after. See the two `gameplay.symmetry` nodes near the bottom.
  */
 
 import { GraphBuilder, type Template } from './shared.js';
@@ -49,14 +55,20 @@ export const MOUNTAIN_RANGE: Template = {
     // structure. The warp bends the ridge lines without smearing them — much
     // past this and the crests dissolve into smoke.
     //
-    // The height is load-bearing in a way that is not obvious. Above about
-    // 1 000 elmos the corridor pass below can no longer bring a crossing inside
-    // 27 degrees over its own length, and the map silently goes back to having
-    // no vehicle route between the two halves.
+    // The height is load-bearing in a way that is not obvious, because what the
+    // corridor pass below has to grade is not the amplitude written here but
+    // whatever survives the half turn. That half turn averages each crest with
+    // whatever the far end of the range had in the same place, and the crests
+    // are exactly where the two halves disagreed most, so it takes about a
+    // fifth off them. This read 980 while the map was not symmetric; 1 250
+    // lands in the same place now — 962 elmos of top height and 69% of the map
+    // drivable, both within a point of what the unfair version measured. Push
+    // it to 1 850 and the crossing is down to 51% and still falling, and the
+    // top no longer fits the range declared at the bottom of this file.
     g.node('spine', 'generator.noise', {
       fractal: 'ridged',
       featureSize: 2400,
-      amplitude: 980,
+      amplitude: 1250,
       octaves: 4,
       gain: 0.45,
       sharpness: 1,
@@ -124,10 +136,18 @@ export const MOUNTAIN_RANGE: Template = {
     // 1 500 elmos there does two jobs: out in the foothills it irons building
     // ground flat, and where a stretch crosses the range it pulls the climb out
     // into a grade a vehicle can take. The radius is the control that matters:
-    // at 1 500 the largest area a vehicle can reach in one piece is 61% of the
-    // map, at 1 100 it is 60%, and at 700 it falls to 28% — the two foothills
+    // at 1 500 the largest area a vehicle can reach in one piece is 59% of the
+    // map, at 700 it is 57%, and at 300 it falls to 26% — the two foothills
     // come apart again, the map looks exactly the same, and no tank can cross
-    // it.
+    // it. That cliff used to sit between 1 100 and 700, and it moved down
+    // because of the half turns below: a crossing that is the same on both
+    // approaches needs less help from the smoothing than one that has to come
+    // off well twice independently. 1 500 is kept for the margin and because
+    // the ironing is what the base pads are made of.
+    //
+    // It reads the foothills through a half turn rather than raw, which is what
+    // makes the stretch arriving at the middle from the north the same stretch
+    // that leaves it going south. `fairWays`, below.
     //
     // BAR has no terraform command: a base wants roughly 400x400 elmos within
     // about 10 elmos of level, and it has to be in the map already.
@@ -136,21 +156,87 @@ export const MOUNTAIN_RANGE: Template = {
       high: 10000,
       falloff: 80,
       soften: 500,
-    }, 1120, 540);
-    g.node('ways', 'filter.smooth', { radius: 1500, strength: 1 }, 1340, 380);
+    }, 1340, 540);
+    g.node('ways', 'filter.smooth', { radius: 1500, strength: 1 }, 1540, 380);
 
     // A thin band of water in the deepest valleys. Enough to make the low
     // ground read as low; not enough to matter to a land army.
-    g.node('sea', 'filter.seaLevel', { mode: 'coverage', coverage: 0.03 }, 1540, 380);
+    g.node('sea', 'filter.seaLevel', { mode: 'coverage', coverage: 0.03 }, 1740, 380);
 
-    // The terrain runs about -60..930, so this is that plus a little headroom.
-    // Declaring much wider throws away quantisation steps: the engine cuts the
-    // whole map into 65536 levels across whatever range is written here.
+    // Two half turns, both before the passes are cut rather than one after them,
+    // and this is the part of the map that most needed thinking about.
+    //
+    // The range declared a half turn and did not have one: the two halves
+    // differed by 201 elmos RMS and 765 at the worst point, on a map with 990
+    // elmos of relief between its deepest valley and its highest crest — a
+    // fifth of the map's whole relief out of true, and three quarters of it at
+    // the worst point. On a range map that lands squarely on what the map is
+    // for. The two halves' passes are not the same pass, and the player who
+    // drew the worse one loses the tank fight without ever being told why.
+    //
+    // Copying one half onto the other at the very end does make the heightmap
+    // symmetric, and it closes the passes. A pass runs north to south through a
+    // belt that lies across the middle, so it has to cross the line the two
+    // halves are joined along. Past that line the ground becomes the rotated
+    // copy of the far end of the range, which is a mountain, and the crossing
+    // pinches shut in the centre: the largest area a tank can hold in one piece
+    // fell from 61% of the map to 29%. Nothing rescued it from there. No
+    // reconcile mode did — averaging gave 26%, keeping the higher 24%, the
+    // lower 29% — and neither did any of the twelve foothill seeds, which came
+    // out between 20% and 33%. What did work was widening the corridors until
+    // one of them happened to straddle the middle, and that costs the map the
+    // barrier it exists for: 85% drivable and 1% impassable, which is not a
+    // range, it is a moor.
+    //
+    // So the passes have to be symmetric before they are cut. The erosion is
+    // the last stage here that cannot preserve a symmetry — its water follows
+    // the grid rather than the map's axes — and everything after it is a smooth
+    // or a threshold, both of which map symmetric input to symmetric output. So
+    // one half turn goes immediately after the erosion, and a second on the
+    // noise that decides where the corridors are, so that the corridor mask is
+    // symmetric too. The smoothing that makes a crossing then runs identically
+    // on the two approaches and the crossing is continuous through the middle.
+    // Measured on the exported grid the map is symmetric to the last bit: 0.000
+    // elmos RMS, 0.000 at the worst point.
+    //
+    // `average` on the terrain rather than the default `source`, and this one is
+    // worth knowing about. Copying a half leaves a step wherever the two halves
+    // disagreed, and every such step lands on the one line the copy is seamed
+    // along, so the map gains a ruler-straight cliff across its middle — 103
+    // elmos of drop averaged over the whole width and 535 at the worst of it,
+    // which is a wall in its own right and reads as one in a render. Averaging
+    // is continuous across that line, because both halves of the sum vary
+    // smoothly through it, and the seam simply is not there: on the finished
+    // map the middle two rows differ by 4 elmos averaged over the width, which
+    // is what every other pair of rows on the map does. It is also what the
+    // node's own notes recommend after erosion. The price is that it takes the
+    // disagreement out of the crests, which is what the spine amplitude at the
+    // top of this file pays back.
+    //
+    // `source` on the corridor noise, though, and deliberately: a mask wants a
+    // decisive threshold, and averaging fbm with its own half turn pulls it
+    // towards its mean, so fewer cells clear the 90-elmo line and the stretches
+    // stop being stretches. Measured, that alone takes the crossing from 59% of
+    // the map to 25%.
+    //
+    // What it cost: the largest buildable pad went from 656 elmos square to
+    // 624, and a third of the impassable ground — 7% of the map before, 3% now.
+    // What it bought: a map that measures 0 elmos off the symmetry it declares,
+    // 59% of it reachable in one piece by vehicles against the 61% the unfair
+    // version managed, and the range still a range at 69% drivable, which is
+    // what it was before to within a point.
+    g.node('fair', 'gameplay.symmetry', { kind: 'rotate180', mode: 'average' }, 1340, 300);
+    g.node('fairWays', 'gameplay.symmetry', { kind: 'rotate180' }, 1120, 540);
+
+    // The terrain runs -34..962, so this is that plus a little headroom for a
+    // reseed. Declaring much wider throws away quantisation steps: the engine
+    // cuts the whole map into 65536 levels across whatever range is written
+    // here, and at this width it still spends 93% of them on ground.
     g.node('out', 'output.height', {
       autoRange: false,
       minHeight: -100,
       maxHeight: 970,
-    }, 1740, 380);
+    }, 1940, 380);
 
     return g
       .link('across', 'bend:a')
@@ -161,8 +247,10 @@ export const MOUNTAIN_RANGE: Template = {
       .link('belt:mask', 'land:mask')
       .link('land', 'slump')
       .link('slump', 'erode')
-      .link('erode', 'ways')
-      .link('foothills', 'corridors')
+      .link('erode', 'fair')
+      .link('fair', 'ways')
+      .link('foothills', 'fairWays')
+      .link('fairWays', 'corridors')
       .link('corridors:mask', 'ways:mask')
       .link('ways', 'sea')
       .link('sea', 'out')

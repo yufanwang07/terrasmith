@@ -264,8 +264,14 @@ describe.each(TEMPLATES.map((t) => [t.id, t] as const))('%s', (_id, template) =>
   it('is small enough to read as documentation', () => {
     // The templates double as worked examples of the node catalog. Past about a
     // dozen nodes nobody reads them, they just run them.
+    //
+    // Raised from 13 when every template gained a symmetry node: a map that
+    // declares a half turn has to have one. Two of them need a second, because
+    // the routes across the terrain have to be symmetric before they are cut or
+    // they pinch shut where the halves meet, and that means symmetrising the
+    // noise the routes are chosen from as well as the finished map.
     expect(graph.nodes.length).toBeGreaterThanOrEqual(4);
-    expect(graph.nodes.length).toBeLessThanOrEqual(13);
+    expect(graph.nodes.length).toBeLessThanOrEqual(15);
   });
 
   it('wires every edge to a port that exists', () => {

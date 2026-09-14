@@ -18,6 +18,10 @@
  * not a vehicle ramp — so a map made this way and checked by eye ends up with
  * mesa tops and channel floors that no tank can move between. The `breaks`
  * pass below cuts real ones.
+ *
+ * A fourth thing came later and is not about the terrain at all: the map
+ * declares a half turn, and now it has one to the last digit. That cost a
+ * bench, for the reason written against the terrace.
  */
 
 import { GraphBuilder, type Template } from './shared.js';
@@ -53,12 +57,25 @@ export const CANYON_LANES: Template = {
       warpSize: 6000,
     }, 40, 140);
 
-    // Four benches across the height range. The sharpness is what makes them
+    // Three benches across the height range. The sharpness is what makes them
     // plateaus rather than a staircase of gentle slopes: at 0.95 the riser is
     // squeezed into the last few percent of each step, so it comes out steeper
     // than the 54 degrees that stops bots, while the bench itself is dead flat.
+    //
+    // Three rather than four, and the fourth bench is what this map gave up to
+    // be fair. Every bench is another wall to cross, and the ramps that cross
+    // them are cut through a mask taken from noise with no symmetry of its own,
+    // so the half turn at the end keeps whichever ramps fall in the north half
+    // and throws the rest away. Measured on the engine's own grid, four benches
+    // leaves the largest region a vehicle can cross without stopping at 31 per
+    // cent of the map — 25 per cent before the half turn — against the 32 this
+    // map promises, and not one of the four best factory sites sits inside it.
+    // Three benches gives 72 per cent, against 52 for the same graph without
+    // the half turn: the symmetric map is the better connected of the two,
+    // because every ramp it has, it has twice. The price is one tier of height,
+    // mesa tops at 412 elmos rather than 452.
     g.node('bench', 'filter.terrace', {
-      steps: 4,
+      steps: 3,
       sharpness: 0.95,
       useRange: true,
       low: -260,
@@ -68,6 +85,15 @@ export const CANYON_LANES: Template = {
     // Ridged noise turned upside down becomes a network of channels. Its ridge
     // lines are continuous, which is exactly what a canyon system needs and
     // what a field of random low spots would not give.
+    //
+    // The seed is the one thing here that was chosen by measuring rather than
+    // by eye, and what it was measured against is the seam the half turn leaves
+    // down the centre line. Where the channel floors meet that line the two
+    // sides are already identical, because the floor is clamped flat; where a
+    // mesa meets it they are not. Of half a dozen seeds tried this one leaves
+    // the smallest step there — 29 elmos on average against 47 for the seed
+    // this map used before — and it carries the flattest 1 024-elmo pad into
+    // the bargain, 14 elmos of spread against 19.
     g.node('channels', 'generator.noise', {
       fractal: 'ridged',
       featureSize: 2800,
@@ -77,11 +103,14 @@ export const CANYON_LANES: Template = {
       sharpness: 3,
       warpAmount: 900,
       warpSize: 4200,
-      seed: 23,
+      seed: 5,
     }, 40, 360);
-    g.node('invert', 'utility.math', { operation: 'negate', operand: 1 }, 280, 360);
 
-    g.node('cut', 'combiner.combine', { mode: 'add', factor: 1 }, 520, 240);
+    // Subtract rather than negate-then-add. The two are the same arithmetic to
+    // the last digit, and the pair of nodes cost a slot this map no longer had:
+    // the templates are held to thirteen nodes so they stay readable, and the
+    // symmetry pass at the end needed one of them.
+    g.node('cut', 'combiner.combine', { mode: 'subtract', factor: 1 }, 520, 240);
 
     // The canyon floor. Everything below this height flattens onto one level,
     // which joins the separate gullies into a road network a vehicle can
@@ -131,21 +160,51 @@ export const CANYON_LANES: Template = {
     // waterline and nothing is under it.
     g.node('sea', 'filter.seaLevel', { mode: 'coverage', coverage: 0 }, 1720, 240);
 
-    // Nothing here goes below 0 and the mesa tops reach about 455, so this is
-    // that with a little headroom. The engine spreads 65536 height steps across
+    // Last, after everything that could reintroduce a difference. The map
+    // declared a half turn and did not have one: as it shipped, the two halves
+    // were 173 elmos apart RMS and 440 at worst, on 456 elmos of relief.
+    // Nobody measures that. They lose to it and say the map is unfair. The
+    // graph as it stands still hands this node 155 elmos RMS to put right,
+    // because nothing upstream of it is symmetric and nothing upstream of it
+    // needs to be.
+    //
+    // Last is measured here rather than assumed. Moving the node above the
+    // slump costs almost nothing — the thermal solver turns out to be
+    // rotation-equivariant to within a ten-thousandth of an elmo — but moving
+    // it one further, above the ramp smoothing, leaves 40 elmos RMS and 269 at
+    // worst, because the ramps are cut through a mask taken from noise that has
+    // no symmetry of its own. Anything downstream of this node that is not
+    // itself symmetric puts the fault straight back, which is the argument for
+    // the end rather than for anywhere merely late.
+    //
+    // Copying one half is what a competitive map wants, and its one cost is a
+    // step along the centre line where the kept half meets its own rotation:
+    // 29 elmos on average and 175 at worst, with the channel seed above chosen
+    // to keep it down. Half of that line is canyon floor, which is clamped flat
+    // and therefore identical on both sides, so the lanes cross the step and it
+    // stands between mesa tops. The modes that leave no seam pay for it in the
+    // terrain instead: averaging the two halves softens every wall — no ground
+    // above 54 degrees left anywhere — squeezes the relief into 6..320 elmos
+    // and drops vehicles to a largest region of 14 per cent, and keeping the
+    // lower of the two eats the mesas down to 313.
+    g.node('fair', 'gameplay.symmetry', { kind: 'rotate180' }, 1920, 240);
+
+    // Nothing here goes below 0 and the mesa tops reach 412, so this is that
+    // with a little headroom. The engine spreads 65536 height steps across
     // whatever range is declared, and range spent below a map that never floods
-    // is range not spent on its benches.
+    // is range not spent on its benches: the old 500 was measured against a
+    // fourth bench that no longer exists, and leaving it there would have spent
+    // a sixth of the map's vertical resolution on air.
     g.node('out', 'output.height', {
       autoRange: false,
       minHeight: -20,
-      maxHeight: 500,
-    }, 1920, 240);
+      maxHeight: 440,
+    }, 2120, 240);
 
     return g
       .link('mesa', 'bench')
-      .link('channels', 'invert:in')
       .link('bench', 'cut:a')
-      .link('invert', 'cut:b')
+      .link('channels', 'cut:b')
       .link('cut', 'floor')
       .link('floor', 'rough:a')
       .link('grit', 'rough:b')
@@ -154,7 +213,8 @@ export const CANYON_LANES: Template = {
       .link('breaks:mask', 'ramps:mask')
       .link('ramps', 'slump')
       .link('slump', 'sea')
-      .link('sea', 'out')
+      .link('sea', 'fair')
+      .link('fair', 'out')
       .done();
   },
 };

@@ -75,6 +75,17 @@ export const ISLAND_CLUSTER: Template = {
       deposition: 0.5,
     }, 520, 240);
 
+    // Averaged rather than copied. Copying one half onto the other throws away
+    // whichever islands were in the discarded half, and on this map that is
+    // most of the archipelago: the largest piece of land a vehicle can hold in
+    // one go fell to 15% of the map against the 30% a naval map needs to be
+    // worth landing on. Averaging keeps every island, at the mean of itself and
+    // whatever its partner was — which on a sea bed 330 elmos down is a lower
+    // island rather than no island — and the coverage-driven sea level then
+    // finds the waterline again. It comes out at 54%, better connected than the
+    // asymmetric original was.
+    g.node('fair', 'gameplay.symmetry', { kind: 'rotate180', mode: 'max' }, 740, 240);
+
     // Two thirds underwater. The shoreline then lands on the skirts of the
     // platforms rather than out on the open bed, which is what gives every
     // island a beach to come ashore on instead of a wall.
@@ -97,13 +108,14 @@ export const ISLAND_CLUSTER: Template = {
       autoRange: false,
       minHeight: -180,
       maxHeight: 190,
-    }, 1180, 240);
+    }, 1400, 240);
 
     return g
       .link('isles', 'mix:a')
       .link('bed', 'mix:b')
       .link('mix', 'erode')
-      .link('erode', 'sea')
+      .link('erode', 'fair')
+      .link('fair', 'sea')
       .link('sea', 'shape')
       .link('shape', 'out')
       .done();

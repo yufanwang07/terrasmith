@@ -79,8 +79,23 @@ export const ROLLING_HILLS: Template = {
     // one height, and BAR has no terraform command: a base wants roughly
     // 400x400 elmos within about 10 elmos of level, and it has to be in the map
     // before it ships.
+    //
+    // The radius was 380, which gave a 464-elmo pad on the asymmetric map. Half
+    // of that map is thrown away by the symmetry node below, and the best pad
+    // was in the discarded half: it left the largest one at 384, under the 400 a
+    // base needs. 460 brings it back to 448, and to a second one the same size
+    // half a turn away, so both players get it. It costs 12 elmos of relief —
+    // 781 down to 770 — and broader valley floors.
+    //
+    // This is the knob rather than the slope band below or the sharpen above
+    // because the mask holds the smoothing to ground already under 10 degrees:
+    // a wider radius spreads the ironing further across the flats and never
+    // touches a hillside, so the drivable and impassable shares come out at
+    // 92.3% and 0.19% at either setting. Widening the band instead would have
+    // taken the width out of the slopes, which are the only interest this map
+    // has.
     g.node('gentle', 'selector.slope', { low: 0, high: 10, falloff: 5, soften: 220 }, 500, 520);
-    g.node('pads', 'filter.smooth', { radius: 380, strength: 0.9 }, 720, 300);
+    g.node('pads', 'filter.smooth', { radius: 460, strength: 0.9 }, 720, 300);
 
     // Sharpening after the levelling rather than before. On ground that has
     // just been ironed flat it does nothing, and on the hillsides it deepens
@@ -89,13 +104,49 @@ export const ROLLING_HILLS: Template = {
     g.node('relief', 'filter.sharpen', { radius: 520, amount: 1.5 }, 940, 300);
 
     // A tenth of the map underwater puts a handful of lakes in the low ground
-    // without turning any of it into a naval map.
+    // without turning any of it into a naval map. The shipped map floods 13.6%
+    // rather than 10%, and that is the symmetry below rather than a mistake
+    // here: this node finds the waterline that floods a tenth of the terrain
+    // reaching it, and the lakes are not evenly shared between the halves — the
+    // north goes under on 13.6% of itself against the south's 6.4% — so copying
+    // the north over the south takes the whole map to the north's figure.
+    // Asking for 7% here to land on ten afterwards would make this number a
+    // guess about the node after it: the waterline is where it says it is, and
+    // the copy decides how much of the map ends up below it.
     g.node('sea', 'filter.seaLevel', { mode: 'coverage', coverage: 0.1 }, 1140, 300);
+
+    // Last, so nothing after it can reintroduce a difference. A map that
+    // declares a symmetry and does not have one is the complaint BAR players
+    // make most: nobody measures a 200-elmo difference between the two halves,
+    // they lose to it and say the map is unfair. Without this node the terrain
+    // arriving here misses its own declared half turn by 223 elmos RMS and 481
+    // at worst — 29% of the map's whole relief — because none of the noise, the
+    // erosion or the levelling has any reason to come out symmetric. With it,
+    // both figures are exactly zero, and every pad, lake and ridge has a partner
+    // half a turn away. Placing it earlier was tried and is worse — the
+    // levelling and the sharpen then run on ground that already matches, which
+    // is tidier in principle and in practice moved the relief by 200 elmos and
+    // cost the map its largest buildable pad.
+    //
+    // Copying a half, which is the node's default and the right mode for a
+    // competitive map, has one visible cost and it is worth knowing about: the
+    // north half is laid over the south verbatim, and the two meet along the
+    // centre line only if that row happens to be its own mirror image, which it
+    // is not. So there is a step along that line — 127 elmos on average, 439 at
+    // the worst point — and it is where every one of the 0.19% of slope cells
+    // this map has over 54 degrees lives. It reads as a broken escarpment across
+    // the middle, drivable along about half its length, so armies still cross
+    // and the largest vehicle region is 81% of the map. Averaging closes the
+    // seam and ruins the map: the two halves disagree by 223 elmos, so the mean
+    // of them has 454 elmos of relief instead of 770, is drivable on 99.8% of
+    // its area and floods 0% instead of a tenth — the uniformly gentle terrain
+    // this template exists not to be.
+    g.node('fair', 'gameplay.symmetry', { kind: 'rotate180' }, 1340, 300);
     g.node('out', 'output.height', {
       autoRange: false,
       minHeight: -220,
       maxHeight: 660,
-    }, 1340, 300);
+    }, 1540, 300);
 
     return g
       .link('hills', 'mix:a')
@@ -106,7 +157,8 @@ export const ROLLING_HILLS: Template = {
       .link('gentle:mask', 'pads:mask')
       .link('pads', 'relief')
       .link('relief', 'sea')
-      .link('sea', 'out')
+      .link('sea', 'fair')
+      .link('fair', 'out')
       .done();
   },
 };
