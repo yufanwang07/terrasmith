@@ -53,7 +53,7 @@ export const COASTAL_SHELF: Template = {
     g.node('crest', 'generator.noise', {
       fractal: 'ridged',
       featureSize: 2800,
-      amplitude: 520,
+      amplitude: 440,
       octaves: 3,
       gain: 0.45,
       sharpness: 0.9,
@@ -82,8 +82,8 @@ export const COASTAL_SHELF: Template = {
 
     g.node('out', 'output.height', {
       autoRange: false,
-      minHeight: -300,
-      maxHeight: 900,
+      minHeight: -210,
+      maxHeight: 1010,
     }, 1580, 300);
 
     return g

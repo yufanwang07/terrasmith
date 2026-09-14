@@ -219,6 +219,11 @@ function createViewport(mount: HTMLElement, handlers: ViewportHandlers): Viewpor
   // in a room; a horizon does more for the impression of a landscape than any
   // amount of work on the terrain itself, and it costs one sphere.
   const sky = buildSky();
+  // Comfortably inside the far plane and centred on the camera every frame.
+  // Sized from the map it was, at twelve times the diagonal, which on a 16x16
+  // map is past the 120 000 far plane — so the sky was being clipped away and
+  // the top of the view was the clear colour.
+  sky.scale.setScalar(camera.far * 0.45);
   scene.add(sky);
 
   // A key light roughly where BAR's default sun sits, plus enough fill that
@@ -397,6 +402,9 @@ function createViewport(mount: HTMLElement, handlers: ViewportHandlers): Viewpor
   const frame = () => {
     if (!running) return;
     orbit.update();
+    // The sky is infinitely far away, so it rides with the camera rather than
+    // sitting somewhere the camera can approach.
+    sky.position.copy(camera.position);
     renderer.render(scene, camera);
     requestAnimationFrame(frame);
   };
@@ -451,7 +459,6 @@ function createViewport(mount: HTMLElement, handlers: ViewportHandlers): Viewpor
       sun.position.set(0.8, 1.0, -0.7).normalize().multiplyScalar(diagonal);
       sun.target.position.set(0, 0, 0);
       sun.target.updateMatrixWorld();
-      sky.scale.setScalar(Math.max(1, diagonal * 12));
       renderer.shadowMap.needsUpdate = true;
       const fog = scene.fog as THREE.Fog;
       fog.near = diagonal * 1.2;

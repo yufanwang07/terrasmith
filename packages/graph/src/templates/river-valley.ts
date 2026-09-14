@@ -73,8 +73,8 @@ export const RIVER_VALLEY: Template = {
           kind: 'polyline',
           smooth: true,
           value: 25,
-          width: 3400,
-          falloff: 1100,
+          width: 2600,
+          falloff: 1400,
           points: [
             { x: -600, z: 4616 },
             { x: 1560, z: 3576 },
@@ -148,7 +148,7 @@ export const RIVER_VALLEY: Template = {
     g.node('land', 'generator.noise', {
       fractal: 'hybrid',
       featureSize: 4600,
-      amplitude: 520,
+      amplitude: 460,
       octaves: 5,
       gain: 0.48,
       offset: 95,
@@ -168,7 +168,7 @@ export const RIVER_VALLEY: Template = {
 
     // ...added back as height, at 75 elmos of rise per 1 000 elmos out. This is
     // what makes the map a valley rather than a trench across a plain.
-    g.node('valley', 'combiner.combine', { mode: 'add', factor: 0.075 }, 520, 380);
+    g.node('valley', 'combiner.combine', { mode: 'add', factor: 0.06 }, 520, 380);
 
     // Level the gentle ground, and only that, before anything is cut into it.
     g.node('gentle', 'selector.slope', { low: 0, high: 12, falloff: 5, soften: 220 }, 760, 620);
@@ -196,11 +196,11 @@ export const RIVER_VALLEY: Template = {
     }, 1480, 380);
 
     g.node('fair', 'gameplay.symmetry', { kind: 'rotate180', feather: 0 }, 1720, 380);
-    g.node('sea', 'filter.seaLevel', { mode: 'coverage', coverage: 0.15 }, 1960, 380);
+    g.node('sea', 'filter.seaLevel', { mode: 'coverage', coverage: 0.22 }, 1960, 380);
     g.node('out', 'output.height', {
       autoRange: false,
-      minHeight: -80,
-      maxHeight: 740,
+      minHeight: -60,
+      maxHeight: 700,
     }, 2200, 380);
 
     return g

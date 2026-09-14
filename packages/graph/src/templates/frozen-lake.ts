@@ -47,12 +47,12 @@ export const FROZEN_LAKE: Template = {
 
     g.node('fair', 'gameplay.symmetry', { kind: 'rotate180', feather: 256 }, 740, 300);
     g.node('sea', 'filter.seaLevel', { mode: 'coverage', coverage: 0 }, 960, 300);
-    g.node('ice', 'filter.clamp', { min: 360, max: 4000, softness: 50 }, 1180, 300);
+    g.node('ice', 'filter.clamp', { min: 440, max: 4000, softness: 40 }, 1180, 300);
 
     g.node('out', 'output.height', {
       autoRange: false,
-      minHeight: 0,
-      maxHeight: 1100,
+      minHeight: 430,
+      maxHeight: 1140,
     }, 1400, 300);
 
     return g

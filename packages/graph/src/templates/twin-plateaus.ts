@@ -114,8 +114,8 @@ export const TWIN_PLATEAUS: Template = {
 
     g.node('basin', 'generator.noise', {
       fractal: 'fbm',
-      featureSize: 2600,
-      amplitude: 340,
+      featureSize: 2800,
+      amplitude: 440,
       octaves: 5,
       gain: 0.5,
       warpAmount: 700,
@@ -127,7 +127,7 @@ export const TWIN_PLATEAUS: Template = {
 
     g.node('raise', 'layout.flatten', {
       mode: 'smoothSet',
-      falloff: 880,
+      falloff: 700,
     }, 300, 380);
 
     g.node('routes', 'layout.shapes', { shapes: rampLayout, scaleToMap: false }, 300, 620);
