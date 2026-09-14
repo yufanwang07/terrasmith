@@ -9,7 +9,7 @@
  */
 
 import { useEffect, useMemo, useState } from 'react';
-import { validateMap, type MapIssue } from '@terrasmith/core';
+import { resampleField, validateMap, type MapIssue } from '@terrasmith/core';
 import type { Field } from '@terrasmith/core';
 import { mapDimensionsOf, type Project } from '@terrasmith/graph';
 import type { PreviewState } from './preview.js';
@@ -55,11 +55,6 @@ export function useValidation(project: Project, preview: PreviewState): Validati
 
     const timer = setTimeout(() => {
       const dims = mapDimensionsOf(project.settings);
-      const field: Field = {
-        width: heightResult.width,
-        height: heightResult.height,
-        data: heightResult.data,
-      };
 
       // The checks want map dimensions in squares, but the preview grid is
       // coarser. Scaling the declared size down to the preview keeps every
@@ -67,21 +62,55 @@ export function useValidation(project: Project, preview: PreviewState): Validati
       const previewMapx = roundToMultiple(heightResult.width - 1, 128);
       const previewMapy = roundToMultiple(heightResult.height - 1, 128);
 
-      const issues =
-        previewMapx > 0 && previewMapy > 0
-          ? validateMap({
-              mapx: previewMapx,
-              mapy: previewMapy,
-              height: field,
-              minHeight: heightResult.min,
-              maxHeight: heightResult.max,
-              startPositions: project.startPositions.map((p) => ({ x: p.x, z: p.z })),
-              playerCount: project.metadata.maxPlayers,
-              symmetry: project.settings.symmetry,
-              maxMetal: project.settings.maxMetal,
-              extractorRadius: project.settings.extractorRadius,
-            })
-          : [];
+      // The engine's slope map is defined on the corner grid — one sample more
+      // than squares on each axis — and `validateMap` refuses anything else
+      // rather than quietly reading the wrong cell. A preview is a round number
+      // of samples, not a corner grid, so a 384-sample preview was being handed
+      // to a check that wanted 385 and every run threw inside the timer, which
+      // nothing was watching: the issues panel simply stayed empty. Resampling
+      // by the one row and column costs nothing and is the only honest way to
+      // ask the question at preview resolution.
+      const field: Field = resampleField(
+        {
+          width: heightResult.width,
+          height: heightResult.height,
+          data: heightResult.data,
+        },
+        previewMapx + 1,
+        previewMapy + 1,
+      );
+
+      let issues: MapIssue[];
+      try {
+        issues =
+          previewMapx > 0 && previewMapy > 0
+            ? validateMap({
+                mapx: previewMapx,
+                mapy: previewMapy,
+                height: field,
+                minHeight: heightResult.min,
+                maxHeight: heightResult.max,
+                startPositions: project.startPositions.map((p) => ({ x: p.x, z: p.z })),
+                playerCount: project.metadata.maxPlayers,
+                symmetry: project.settings.symmetry,
+                maxMetal: project.settings.maxMetal,
+                extractorRadius: project.settings.extractorRadius,
+              })
+            : [];
+      } catch (error) {
+        // Say so rather than showing a clean bill of health. A checker that
+        // fails silently is worse than no checker: it tells the author their
+        // map is fine.
+        issues = [
+          {
+            severity: 'error',
+            code: 'check.failed',
+            title: 'The map checks could not run',
+            detail: error instanceof Error ? error.message : String(error),
+            fix: 'Export the map to run the same checks at full resolution, and report this.',
+          },
+        ];
+      }
 
       // The size check is meaningless here: it would report on the preview's
       // dimensions rather than the map's, which are validated separately.

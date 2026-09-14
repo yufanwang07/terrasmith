@@ -277,21 +277,32 @@ export function checkHeightRange(ctx: MapContext): MapIssue[] {
     return issues;
   }
 
-  if (terrain.min < minHeight || terrain.max > maxHeight) {
+  const declared = maxHeight - minHeight;
+  const step = declared / 65536;
+
+  // Measured against one quantisation step, not against zero. The declared
+  // range usually comes from measuring the terrain at one resolution while the
+  // check runs at another, so the two extremes disagree in the last few
+  // decimals — and an overshoot the heightmap has no bit to represent clamps
+  // nothing. Against zero, every automatically ranged map reported that its
+  // peaks were being flattened, which is both wrong and the first thing an
+  // author saw.
+  const under = minHeight - terrain.min;
+  const over = terrain.max - maxHeight;
+  if (under > step || over > step) {
+    const clipped = Math.max(under, over);
     issues.push({
       severity: 'error',
       code: 'height.clipped',
       title: 'Terrain falls outside the declared height range',
       detail:
         `Terrain spans ${terrain.min.toFixed(1)}..${terrain.max.toFixed(1)} elmos but the ` +
-        `declared range is ${minHeight}..${maxHeight}. Everything outside is clamped on export, ` +
-        `which flattens peaks and floors into perfectly level plates.`,
+        `declared range is ${minHeight}..${maxHeight}, so ${clipped.toFixed(1)} elmos of it is ` +
+        `clamped on export, which flattens peaks and floors into perfectly level plates.`,
       fix: `Widen the declared range to at least ${Math.floor(terrain.min)}..${Math.ceil(terrain.max)}.`,
     });
   }
 
-  const declared = maxHeight - minHeight;
-  const step = declared / 65536;
   const usedFraction = relief / declared;
   // One quantisation riser over a single 8-elmo square, as the slope map sees it.
   const falseSlope = (Math.atan(step / ELMOS_PER_SQUARE) * 180) / Math.PI;

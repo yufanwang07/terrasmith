@@ -566,6 +566,33 @@ describe('validateMap', () => {
   it('flags terrain outside the declared range', () => {
     const issues = validateMap({ ...baseInput(), minHeight: 0, maxHeight: 50 });
     expect(codes(issues)).toContain('height.clipped');
+    expect(issues.find((i) => i.code === 'height.clipped')?.detail).toMatch(/elmos of it is\s+clamped/);
+  });
+
+  it('ignores an overshoot too small for the heightmap to represent', () => {
+    // A declared range is normally measured from the terrain at one resolution
+    // and checked against it at another, so the two extremes disagree in the
+    // last few decimals. Reported against zero, every automatically ranged map
+    // claimed its peaks were being flattened.
+    const sloped = createField(mapx + 1, mapx + 1);
+    for (let y = 0; y <= mapx; y++) {
+      for (let x = 0; x <= mapx; x++) sloped.data[y * (mapx + 1) + x] = x * 0.5;
+    }
+    const low = 0;
+    const high = mapx * 0.5;
+    const step = (high - low) / 65536;
+
+    const clipped = (minHeight: number, maxHeight: number) =>
+      codes(validateMap({ ...baseInput(), height: sloped, minHeight, maxHeight })).includes(
+        'height.clipped',
+      );
+
+    // Inside the range by a hair, and outside it by a hair: neither is a bit
+    // the heightmap has.
+    expect(clipped(low - step * 0.4, high + step * 0.4)).toBe(false);
+    expect(clipped(low + step * 0.4, high - step * 0.4)).toBe(false);
+    // Two steps is real clipping.
+    expect(clipped(low + step * 2, high - step * 2)).toBe(true);
   });
 
   it('flags starts that sit inside each other’s T2 defence envelope', () => {
