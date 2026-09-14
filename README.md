@@ -152,21 +152,23 @@ Being concrete about this is more useful than a roadmap.
   covered end to end by tests.
 - **Everything runs on the CPU.** The WebGPU acceleration the architecture describes does not exist. A
   full-resolution erosion pass on a 24x24 map is minutes, not seconds.
-- **The catalog is terrain-only.** The 37 registered node types shape heightfields and masks. Metal spots,
-  start positions, start boxes and features are project data the exporter reads, not something you wire
-  into a graph. Gameplay and layout node definitions are being written but are not in
-  `createDefaultRegistry` yet; `node packages/cli/dist/cli.js nodes` always prints the real list.
-- **No feature placement.** Trees, rocks and geothermal vents are in the project model and in the archive
-  writer, but nothing generates or edits them.
-- **The automatic texturing is rough.** It produces a plausible diffuse from the terrain and the material
-  palette, but the high-frequency detail reads as mottling rather than as ground at map scale. Look at
-  `samples/renders/` and judge for yourself; this is the most visible thing still to fix.
+- **Features are placed by hand, not generated.** Metal spots, start positions and geothermal vents are
+  placed in the viewport and read by the exporter, and `gameplay.metalSpots` will lay out a symmetric
+  metal map for you. Trees and rocks are in the project model and in the archive writer, but nothing
+  generates or edits them, so a map ships bare.
+- **The terrain reads as terrain, not yet as a place.** The palettes and the templates have had a pass
+  and `samples/renders/` is worth judging for yourself, but the ridged generator puts a quarter of a map
+  in the bottom tenth of its range at the default sharpness — flat-floored valleys with ridges out of
+  them, which suits some maps and makes others look like a plain with spikes. The dial is there; the
+  defaults are one person's taste.
 - **The advanced-shading texture set is packed but barely tuned.** The build writes a specular map and
   four tiling detail-normal textures into `maps/` and names them in the generated `mapinfo.lua`'s
   `resources` block, so the engine takes its advanced shading path. But the splat-distribution map is only
   written when a Splat output is connected, the map-sized detail normal map is off unless you ask for it,
   and the `texMults` strengths are a first guess rather than the result of looking at a map in game.
-- **No importer.** You cannot open an existing `.sd7` and edit it, even though the format layer can read one.
+- **No `.sd7` importer.** `generator.importHeightmap` reads a 16-bit PNG or an r16 from World Machine,
+  Gaea, L3DT or Blender, but you cannot open a finished map archive and edit it, even though the format
+  layer can read one.
 
 ## Contributing
 
