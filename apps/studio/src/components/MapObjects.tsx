@@ -10,7 +10,13 @@
  */
 
 import { useMemo, useState } from 'react';
-import { BAR_EXTRACTOR_RADIUS, scatterTrees, symmetryImages } from '@terrasmith/core';
+import {
+  BAR_EXTRACTOR_RADIUS,
+  scatterTrees,
+  suggestGeoVents,
+  suggestMetalSpots,
+  symmetryImages,
+} from '@terrasmith/core';
 import {
   mapDimensionsOf,
   type MetalSpot,
@@ -110,7 +116,9 @@ interface Props {
 }
 
 export function MapObjectsPanel({ mode, onMode, selected, onSelect, terrain }: Props) {
-  const [spacing, setSpacing] = useState(140);
+  const [spacing, setSpacing] = useState(100);
+  const [clumping, setClumping] = useState(0.7);
+  const [treeLine, setTreeLine] = useState(0);
   const project = useEditor((s) => s.project);
   const setMetalSpots = useEditor((s) => s.setMetalSpots);
   const setStartPositions = useEditor((s) => s.setStartPositions);
@@ -179,6 +187,11 @@ export function MapObjectsPanel({ mode, onMode, selected, onSelect, terrain }: P
       worldWidth: dims.worldWidth,
       worldHeight: dims.worldHeight,
       spacing,
+      clumping,
+      // A wood is about a fifth of the map across whatever the map's size, so
+      // the scale follows the map rather than being a fixed number of elmos.
+      woodSize: Math.max(400, dims.worldWidth * 0.11),
+      maxHeight: treeLine > 0 ? treeLine : undefined,
       symmetry: project.settings.symmetry,
       seed: project.settings.seed,
       exclusions,
@@ -192,6 +205,48 @@ export function MapObjectsPanel({ mode, onMode, selected, onSelect, terrain }: P
         x: Math.round(t.x),
         z: Math.round(t.z),
         rotation: t.rotation,
+      })),
+    ]);
+  };
+
+  const autoMetal = () => {
+    if (!terrain) return;
+    // The layout grammar every BAR team map uses: safe spots inside the start
+    // ring, expansions one lane-step out, and a contested pair in the middle,
+    // placed as whole symmetry orbits so each player's share is identical by
+    // construction rather than by luck.
+    const spots = suggestMetalSpots(terrain, {
+      startPositions: project.startPositions.map((p) => ({ x: p.x, z: p.z })),
+      symmetry: project.settings.symmetry,
+      seed: project.settings.seed,
+    });
+    setMetalSpots(
+      spots.map((spot) => ({
+        id: nextId('metal'),
+        x: Math.round(spot.x),
+        z: Math.round(spot.z),
+        income: Number(spot.income.toFixed(2)),
+      })),
+    );
+  };
+
+  const autoGeo = () => {
+    if (!terrain) return;
+    const vents = suggestGeoVents(terrain, {
+      worldWidth: dims.worldWidth,
+      worldHeight: dims.worldHeight,
+      symmetry: project.settings.symmetry,
+      startPositions: project.startPositions.map((p) => ({ x: p.x, z: p.z })),
+      seed: project.settings.seed,
+    });
+    setFeatures([
+      ...project.features.filter((f) => f.name !== GEO_VENT),
+      ...vents.map((v) => ({
+        id: nextId('geo'),
+        name: v.name,
+        x: Math.round(v.x),
+        z: Math.round(v.z),
+        rotation: 0,
       })),
     ]);
   };
@@ -258,6 +313,31 @@ export function MapObjectsPanel({ mode, onMode, selected, onSelect, terrain }: P
         </div>
 
         <div className="inspector-section">
+          <div className="inspector-title">Lay out the economy</div>
+          <p className="inspector-desc">
+            Places the whole map&rsquo;s metal and vents at once, on ground a building actually fits
+            on, as whole symmetry orbits so every player&rsquo;s share is the same by construction.
+          </p>
+          <div className="row" style={{ gap: 6, flexWrap: 'wrap' }}>
+            <button className="btn" disabled={!terrain} onClick={autoMetal}>
+              Auto metal
+            </button>
+            <button className="btn" disabled={!terrain} onClick={autoGeo}>
+              Auto vents
+            </button>
+          </div>
+          <div className="field-help">
+            {project.startPositions.length === 0
+              ? 'Place at least one start position first — the metal layout is built around the starts, ' +
+                'and without them it has nothing to be near or far from.'
+              : 'Metal goes in clusters: three safe spots inside each start ring, three one lane-step ' +
+                'out, and a contested pair in the middle. Vents go on flat ground away from the ' +
+                'bases, because a vent nobody has to fight for is just free income. Both replace ' +
+                'what is there.'}
+          </div>
+        </div>
+
+        <div className="inspector-section">
           <div className="inspector-title">Trees</div>
           <p className="inspector-desc">
             A map with no trees on it plays as an open field. Trees block line of sight and burn, so
@@ -279,6 +359,43 @@ export function MapObjectsPanel({ mode, onMode, selected, onSelect, terrain }: P
             <div className="field-help">
               How far apart, on average. 60 is thick enough that a tank drives round rather than
               through; 250 is scattered cover.
+            </div>
+          </div>
+          <div className="field">
+            <div className="field-label">
+              <span>Clumping</span>
+              <span className="field-value">{Math.round(clumping * 100)}%</span>
+            </div>
+            <input
+              type="range"
+              min={0}
+              max={1}
+              step={0.05}
+              value={clumping}
+              onChange={(e) => setClumping(Number(e.target.value))}
+            />
+            <div className="field-help">
+              How much the trees gather into woods rather than spreading evenly. An even sprinkle is
+              not what cover looks like: it is the clearings between the woods that make the woods
+              worth holding.
+            </div>
+          </div>
+          <div className="field">
+            <div className="field-label">
+              <span>Tree line</span>
+              <span className="field-value">{treeLine > 0 ? `${treeLine} elmos` : 'none'}</span>
+            </div>
+            <input
+              type="range"
+              min={0}
+              max={1200}
+              step={25}
+              value={treeLine}
+              onChange={(e) => setTreeLine(Number(e.target.value))}
+            />
+            <div className="field-help">
+              Nothing grows above this height. Leave it at none for a map with no mountains worth
+              speaking of.
             </div>
           </div>
           <div className="row" style={{ gap: 6, flexWrap: 'wrap' }}>

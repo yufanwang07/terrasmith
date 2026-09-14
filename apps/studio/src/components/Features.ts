@@ -43,13 +43,33 @@ const TREE_VARIATION = 0.32;
  * odd ones as conifers, and each gets a little colour spread so a wood is not
  * one flat green.
  */
-const BROADLEAF = new THREE.Color(0x4a6b34);
-const CONIFER = new THREE.Color(0x33502f);
 const TRUNK = new THREE.Color(0x3a2f26);
+
+/**
+ * What grows on each palette, as a broadleaf and a conifer colour.
+ *
+ * Trees the same green on every map is the thing that gives a generated map
+ * away. What grows somewhere is a fact about where it is: a desert has grey-green
+ * scrub and a tropical island has near-black canopy, and neither is the olive of
+ * a temperate wood. The trunk stays the same because bark does.
+ */
+const CANOPY: Record<string, { broadleaf: number; conifer: number }> = {
+  temperate: { broadleaf: 0x4a6b34, conifer: 0x33502f },
+  'arid-desert': { broadleaf: 0x6b6b3c, conifer: 0x55603a },
+  'alpine-snow': { broadleaf: 0x3c5730, conifer: 0x24401f },
+  volcanic: { broadleaf: 0x4a4a38, conifer: 0x36402e },
+  'tropical-island': { broadleaf: 0x2c4a22, conifer: 0x1f3a1c },
+  tundra: { broadleaf: 0x5a6340, conifer: 0x2f4434 },
+  'mars-red': { broadleaf: 0x6b5340, conifer: 0x554636 },
+};
+
+const DEFAULT_CANOPY = CANOPY.temperate;
 
 export interface FeatureLayerOptions {
   worldWidth: number;
   worldHeight: number;
+  /** Palette id, which decides what colour the canopy is. */
+  palette?: string;
 }
 
 export class FeatureLayer {
@@ -69,8 +89,8 @@ export class FeatureLayer {
 
   constructor(private options: FeatureLayerOptions) {}
 
-  setWorld(worldWidth: number, worldHeight: number): void {
-    this.options = { worldWidth, worldHeight };
+  setWorld(worldWidth: number, worldHeight: number, palette?: string): void {
+    this.options = { worldWidth, worldHeight, palette };
   }
 
   /**
@@ -88,11 +108,16 @@ export class FeatureLayer {
     const conifers = features.filter((f) => isTree(f) && treeIndex(f) % 2 === 1);
     const broadleaves = features.filter((f) => isTree(f) && treeIndex(f) % 2 === 0);
 
+    const canopy = CANOPY[this.options.palette ?? ''] ?? DEFAULT_CANOPY;
     if (broadleaves.length > 0) {
-      this.instances.push(this.buildInstances(broadleaves, this.broadleafGeometry, BROADLEAF, heightAt));
+      this.instances.push(
+        this.buildInstances(broadleaves, this.broadleafGeometry, new THREE.Color(canopy.broadleaf), heightAt),
+      );
     }
     if (conifers.length > 0) {
-      this.instances.push(this.buildInstances(conifers, this.coniferGeometry, CONIFER, heightAt));
+      this.instances.push(
+        this.buildInstances(conifers, this.coniferGeometry, new THREE.Color(canopy.conifer), heightAt),
+      );
     }
     for (const mesh of this.instances) this.group.add(mesh);
   }

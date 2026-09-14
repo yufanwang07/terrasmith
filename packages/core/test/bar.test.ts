@@ -842,3 +842,48 @@ describe('EPIC5', () => {
     expect(Array.from(mask.data).every((v) => v === 1)).toBe(true);
   });
 });
+
+describe('suggestMetalSpots on a map with water', () => {
+  /** Squares per axis. 256 is a 4x4 map, big enough for a base ring and a middle. */
+  const squares = 256;
+
+  /** A flat lake bed in the middle of gently rolling land. */
+  function withLake(): Field {
+    const size = squares + 1;
+    const f = createField(size, size);
+    for (let z = 0; z < size; z++) {
+      for (let x = 0; x < size; x++) {
+        const u = x / (size - 1) - 0.5;
+        const v = z / (size - 1) - 0.5;
+        // Rolling land, and a wide flat basin 60 elmos under water.
+        f.data[z * size + x] = Math.hypot(u, v) < 0.28 ? -60 : 80 + Math.sin(u * 9) * 30 + Math.cos(v * 11) * 30;
+      }
+    }
+    return f;
+  }
+
+  it('puts the metal on land, not on the lake bed', () => {
+    // The flattest ground on most maps is the bottom of a lake, and a mex does
+    // work underwater — so scoring on flatness alone put ten of fourteen spots
+    // under water on a map that is a tenth flooded. That is a naval map's
+    // layout on a land map: a player with no shipyard cannot reach the metal.
+    const height = withLake();
+    const world = squares * 8;
+    const spots = suggestMetalSpots(height, {
+      startPositions: [
+        { x: world * 0.15, z: world * 0.15 },
+        { x: world * 0.85, z: world * 0.85 },
+      ],
+      symmetry: 'rotate180',
+      seed: 1,
+    });
+    expect(spots.length).toBeGreaterThan(4);
+
+    const underwater = spots.filter((spot) => {
+      const ix = Math.round((spot.x / world) * (height.width - 1));
+      const iz = Math.round((spot.z / world) * (height.height - 1));
+      return height.data[iz * height.width + ix] <= 0;
+    });
+    expect(underwater, `${underwater.length} of ${spots.length} spots are underwater`).toHaveLength(0);
+  });
+});

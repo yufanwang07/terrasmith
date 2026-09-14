@@ -19,8 +19,18 @@
 
 import type { Field } from './field.js';
 import { slopeDegreesField } from './analysis.js';
+import { buildabilityMap } from './bar/pathing.js';
+import { fractalNoise2D, resolveNoiseParams } from './noise.js';
 import { Rng } from './random.js';
 import { mirrorPlacements, symmetryTransforms, type SymmetryKind } from './symmetry.js';
+
+/**
+ * Half-width of the soft edge on a wood, in noise units.
+ *
+ * Wide enough that the boundary is ragged rather than a contour line, narrow
+ * enough that the wood still has an edge at all.
+ */
+const EDGE = 0.07;
 
 /** The reserved feature names the engine resolves without any game content. */
 export const ENGINE_TREE_TYPES = 16;
@@ -66,10 +76,40 @@ export interface ScatterOptions {
   maxHeight?: number;
   /**
    * A 0..1 mask over the same grid as the heightfield: the chance a candidate
-   * in that cell survives. This is how a forest becomes a *forest* rather than
-   * an even sprinkle — feed it a noise field, or a selector's output.
+   * in that cell survives. Supply one to place trees from a selector's output —
+   * along a river, inside a drawn shape — and the built-in clumping below is
+   * ignored.
    */
   density?: Field;
+  /**
+   * How strongly trees gather into woods, 0 to 1.
+   *
+   * 0 is an even sprinkle, which is what a jittered grid gives on its own and
+   * what nothing in nature looks like: real cover is woods and clearings, and
+   * the clearings are what make the woods worth anything on a map. 1 leaves
+   * dense stands with bare ground between them.
+   *
+   * Ignored when an explicit `density` mask is supplied.
+   * @default 0.7
+   */
+  clumping?: number;
+  /**
+   * How wide a wood is, in elmos.
+   *
+   * 900 is about a fifth of a 16x16 map across — big enough to hide an army in
+   * and small enough that there are several. Under about 300 the clumps stop
+   * reading as woods and start reading as noise.
+   * @default 900
+   */
+  woodSize?: number;
+  /**
+   * Stretch the woods along one axis, to make strips rather than blobs.
+   *
+   * 1 is round. 3 gives belts about three times as long as they are wide, which
+   * is the shape a tree line along a valley or a ridge takes.
+   * @default 1
+   */
+  woodStretch?: number;
   /** Places nothing may be planted, as centre and radius in elmos. */
   exclusions?: readonly { x: number; z: number; radius: number }[];
   /** How many distinct tree types to draw from. @default 4 */
@@ -130,6 +170,31 @@ export function scatterTrees(height: Field, options: ScatterOptions): ScatteredF
   const rng = new Rng(seed);
   const types = Math.min(Math.max(1, Math.round(treeTypes)), ENGINE_TREE_TYPES);
 
+  // Where the woods are. A candidate's chance of surviving is this field's
+  // value at its position, so a low-frequency noise field turns a uniform
+  // scatter into stands with clearings between them — which is what cover on a
+  // map is for. Three octaves rather than one: a single octave's clumps are
+  // round and a wood's edge is not.
+  const clump = Math.min(Math.max(options.clumping ?? 0.7, 0), 1);
+  const woodSize = Math.max(120, options.woodSize ?? 900);
+  const stretch = Math.max(0.1, options.woodStretch ?? 1);
+  // Where the wood's edge falls. At 0 the threshold is under everything the
+  // noise produces and the map is one wood; at 1 only the densest cores
+  // survive. 0.7 leaves a bit over a third of the suitable ground planted,
+  // which is roughly what a wooded map carries.
+  const threshold = 0.3 + clump * 0.42;
+  const woods =
+    density || clump <= 0
+      ? null
+      : resolveNoiseParams({
+          type: 'perlin',
+          fractal: 'fbm',
+          octaves: 3,
+          gain: 0.55,
+          frequency: worldWidth / woodSize,
+          seed: seed + 0x5f3a,
+        });
+
   const cols = Math.max(1, Math.round(worldWidth / spacing));
   const rows = Math.max(1, Math.round(worldHeight / spacing));
   const out: ScatteredFeature[] = [];
@@ -151,7 +216,23 @@ export function scatterTrees(height: Field, options: ScatterOptions): ScatteredF
       if (h < minHeight) continue;
       if (maxHeight !== undefined && h > maxHeight) continue;
       if (sampleWorld(slope, x, z, worldWidth, worldHeight) > maxSlopeDegrees) continue;
-      if (density && pick > clamp01(sampleWorld(density, x, z, worldWidth, worldHeight))) continue;
+      if (density) {
+        if (pick > clamp01(sampleWorld(density, x, z, worldWidth, worldHeight))) continue;
+      } else if (woods) {
+        // A threshold with a soft edge, not a probability.
+        //
+        // Thinning every candidate by a chance that varies smoothly gives a
+        // scatter that is denser in some places, which is not what a wood is: a
+        // wood has an edge, and the clearing beside it is empty. So the noise
+        // picks *where the wood is* and everything inside it is planted, with
+        // only the last `EDGE` of the falloff left to chance so the boundary is
+        // ragged rather than drawn with a compass.
+        const n = fractalNoise2D((x / worldWidth) * stretch, z / worldHeight, woods);
+        const t = clamp01(n * 0.62 + 0.5);
+        const inside = (t - (threshold - EDGE)) / (2 * EDGE);
+        if (inside <= 0) continue;
+        if (inside < 1 && pick > inside) continue;
+      }
 
       let blocked = false;
       for (const keep of exclusions) {
@@ -238,4 +319,124 @@ function clamp(v: number, lo: number, hi: number): number {
 
 function clamp01(v: number): number {
   return v < 0 ? 0 : v > 1 ? 1 : v;
+}
+
+// --- Geothermal vents ------------------------------------------------------
+
+export interface SuggestGeoOptions {
+  worldWidth: number;
+  worldHeight: number;
+  /** Mirror the result, so every player has the same access. */
+  symmetry?: SymmetryKind;
+  /**
+   * How many vents to place, before mirroring.
+   *
+   * The orbit multiplies this: two on a half-turn map is four vents. Two is
+   * about right for a team map — a geothermal plant is a large fixed income
+   * that does not need a metal spot, so a handful of them decide where the
+   * fight is, and a map covered in them decides nothing.
+   * @default 2
+   */
+  count?: number;
+  /** Keep vents this far from a start position, in elmos. @default 1200 */
+  startClearance?: number;
+  /** Start positions to stay clear of. */
+  startPositions?: readonly { x: number; z: number }[];
+  /** Keep vents this far from each other, in elmos. @default 900 */
+  separation?: number;
+  /** Keep vents this far from the map edge, in elmos. @default 400 */
+  edgeMargin?: number;
+  /** Sea level. A vent underwater is a vent nobody can build on. @default 0 */
+  waterLevel?: number;
+  seed?: number;
+}
+
+/**
+ * Propose geothermal vent positions.
+ *
+ * A vent is worth taking only if a plant can be built on it, so the candidates
+ * are ground a geothermal plant's footprint actually fits on — measured with
+ * the engine's own buildability rule, which is a height difference under the
+ * footprint rather than a slope. Placed away from the starts on purpose: a vent
+ * inside someone's base is free income, and the whole interest of a vent is
+ * that somebody has to go and hold it.
+ *
+ * They are spread rather than clustered — the opposite of metal, which comes in
+ * clusters because that is how BAR's maps are drawn. Two vents beside each other
+ * are one position; two vents apart are two decisions.
+ */
+export function suggestGeoVents(height: Field, options: SuggestGeoOptions): ScatteredFeature[] {
+  const {
+    worldWidth,
+    worldHeight,
+    symmetry,
+    count = 2,
+    startClearance = 1200,
+    startPositions = [],
+    separation = 900,
+    edgeMargin = 400,
+    waterLevel = 0,
+    seed = 0,
+  } = options;
+
+  // A geothermal plant is a 12x12-square building in BAR; `lab` is the closest
+  // shipped footprint at 12x12 and the same tolerance, so it stands in for one.
+  const buildable = buildabilityMap(height, { building: 'lab', waterLevel });
+  const cellSize = worldWidth / Math.max(1, height.width - 1);
+  const slope = slopeDegreesField(height, { cellSize });
+  const rng = new Rng(seed + 0x9e37);
+
+  interface Site {
+    x: number;
+    z: number;
+    score: number;
+  }
+  const sites: Site[] = [];
+  const squares = buildable.width;
+  const squareSize = worldWidth / squares;
+
+  for (let sz = 0; sz < buildable.height; sz++) {
+    for (let sx = 0; sx < squares; sx++) {
+      if (buildable.data[sz * squares + sx] <= 0) continue;
+      const x = (sx + 0.5) * squareSize;
+      const z = (sz + 0.5) * (worldHeight / buildable.height);
+      if (x < edgeMargin || z < edgeMargin || x > worldWidth - edgeMargin || z > worldHeight - edgeMargin) {
+        continue;
+      }
+      if (sampleWorld(height, x, z, worldWidth, worldHeight) <= waterLevel) continue;
+
+      let nearestStart = Infinity;
+      for (const start of startPositions) {
+        nearestStart = Math.min(nearestStart, Math.hypot(x - start.x, z - start.z));
+      }
+      if (nearestStart < startClearance) continue;
+
+      // Flatter is better, and a little jitter breaks the ties a grid of
+      // equally flat squares would otherwise resolve in scan order — which
+      // puts every vent along the top edge.
+      const flat = 1 - Math.min(1, sampleWorld(slope, x, z, worldWidth, worldHeight) / 20);
+      sites.push({ x, z, score: flat + rng.next() * 0.25 });
+    }
+  }
+  if (sites.length === 0) return [];
+  sites.sort((a, b) => b.score - a.score);
+
+  const chosen: ScatteredFeature[] = [];
+  for (const site of sites) {
+    if (chosen.length >= count) break;
+    let clear = true;
+    for (const taken of chosen) {
+      if (Math.hypot(site.x - taken.x, site.z - taken.z) < separation) {
+        clear = false;
+        break;
+      }
+    }
+    if (!clear) continue;
+    chosen.push({ name: GEO_VENT, x: site.x, z: site.z, rotation: 0 });
+  }
+
+  if (!symmetry || symmetry === 'none') return chosen;
+  return mirrorPlacements(chosen, symmetry, worldWidth, worldHeight, {
+    tolerance: Math.min(separation * 0.5, 200),
+  });
 }

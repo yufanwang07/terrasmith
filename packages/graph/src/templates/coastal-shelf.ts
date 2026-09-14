@@ -27,47 +27,50 @@ export const COASTAL_SHELF: Template = {
     // The shelf itself.
     g.node('shelf', 'generator.gradient', {
       direction: 'z',
-      low: -340,
-      high: 560,
-      falloff: 'smooth',
+      low: -460,
+      high: 420,
+      falloff: 'sharp',
     }, 40, 140);
 
     // Inland relief.
     g.node('inland', 'generator.noise', {
       fractal: 'fbm',
-      featureSize: 4400,
-      amplitude: 380,
+      featureSize: 3600,
+      amplitude: 460,
       octaves: 4,
       gain: 0.46,
       warpAmount: 700,
-      warpSize: 5000,
+      warpSize: 4200,
       seed: 5,
     }, 40, 360);
 
     g.node('mix', 'combiner.combine', { mode: 'add', factor: 1 }, 300, 240);
 
+    // The sea bed bottoms out.
+    g.node('floor', 'filter.clamp', { min: -200, max: 4000, softness: 160 }, 520, 160);
+
     // The bluff material.
     g.node('crest', 'generator.noise', {
       fractal: 'ridged',
-      featureSize: 1900,
-      amplitude: 320,
+      featureSize: 2800,
+      amplitude: 520,
       octaves: 3,
       gain: 0.45,
-      sharpness: 0.8,
-      warpAmount: 500,
-      warpSize: 3200,
+      sharpness: 0.9,
+      warpAmount: 600,
+      warpSize: 3600,
       seed: 13,
     }, 40, 560);
 
     // The coastal band.
-    g.node('rise', 'selector.height', { low: 40, high: 360, falloff: 140, soften: 260 }, 300, 460);
+    g.node('rise', 'selector.height', { low: 200, high: 10000, falloff: 130, soften: 200 }, 300, 460);
 
     g.node('bluff', 'combiner.combine', { mode: 'add', factor: 1 }, 520, 300);
 
     g.node('erode', 'natural.hydraulic', {
       method: 'pipe',
-      amount: 1.2,
-      scale: 240,
+      amount: 0.7,
+      scale: 300,
       deposition: 0.6,
     }, 740, 300);
 
@@ -75,7 +78,7 @@ export const COASTAL_SHELF: Template = {
     g.node('pads', 'filter.smooth', { radius: 460, strength: 0.9 }, 960, 300);
 
     g.node('fair', 'gameplay.symmetry', { kind: 'mirrorX', mode: 'source', feather: 0 }, 1180, 300);
-    g.node('sea', 'filter.seaLevel', { mode: 'coverage', coverage: 0.22 }, 1380, 300);
+    g.node('sea', 'filter.seaLevel', { mode: 'coverage', coverage: 0.24 }, 1380, 300);
 
     g.node('out', 'output.height', {
       autoRange: false,
@@ -86,9 +89,10 @@ export const COASTAL_SHELF: Template = {
     return g
       .link('shelf', 'mix:a')
       .link('inland', 'mix:b')
-      .link('mix', 'bluff:a')
+      .link('mix', 'floor')
+      .link('floor', 'bluff:a')
       .link('crest', 'bluff:b')
-      .link('mix', 'rise')
+      .link('floor', 'rise')
       .link('rise:mask', 'bluff:mask')
       .link('bluff', 'erode')
       .link('erode', 'pads')

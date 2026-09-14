@@ -123,6 +123,44 @@ describe('scatterTrees', () => {
     expect(scatterTrees(terrain, { ...base, spacing: 40, limit: 25 })).toHaveLength(25);
   });
 
+  it('gathers trees into woods with clearings between them', () => {
+    // An even sprinkle is not what cover looks like. What makes a wood worth
+    // holding is the clearing beside it, so the measure is not how many trees
+    // there are but how unevenly they are spread: with clumping on, most of the
+    // cells that hold any trees should hold several, and most cells should hold
+    // none.
+    const occupancy = (clumping: number): { covered: number; peak: number } => {
+      const trees = scatterTrees(terrain, { ...base, spacing: 70, clumping });
+      const CELLS = 24;
+      const counts = new Float64Array(CELLS * CELLS);
+      for (const tree of trees) {
+        const cx = Math.min(CELLS - 1, Math.floor((tree.x / WORLD) * CELLS));
+        const cz = Math.min(CELLS - 1, Math.floor((tree.z / WORLD) * CELLS));
+        counts[cz * CELLS + cx]++;
+      }
+      let covered = 0;
+      let peak = 0;
+      for (const v of counts) {
+        if (v > 0) covered++;
+        if (v > peak) peak = v;
+      }
+      return { covered: covered / counts.length, peak };
+    };
+
+    const even = occupancy(0);
+    const clumped = occupancy(0.8);
+    // Clumping leaves far less of the map wooded, and what is wooded is denser.
+    expect(clumped.covered).toBeLessThan(even.covered * 0.7);
+    expect(clumped.peak).toBeGreaterThanOrEqual(even.peak * 0.8);
+  });
+
+  it('keeps a tree line when one is set', () => {
+    const line = 300;
+    for (const tree of scatterTrees(terrain, { ...base, spacing: 70, maxHeight: line })) {
+      expect(sampleAt(terrain, tree.x, tree.z)).toBeLessThanOrEqual(line + 40);
+    }
+  });
+
   it('refuses a density mask on a different grid', () => {
     expect(() =>
       scatterTrees(terrain, { ...base, density: createField(64, 64) }),

@@ -292,6 +292,7 @@ function TerrainPane({
         exaggeration={exaggeration}
         markers={markers}
         features={features}
+        palette={project.texture.palette}
         selectedMarker={selectedMarker}
         onPlace={onPlace}
         onSelectMarker={onSelectMarker}

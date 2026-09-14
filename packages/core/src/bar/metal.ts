@@ -688,6 +688,21 @@ export interface SuggestMetalOptions {
   seed?: number;
 }
 
+/** Nearest-sample height at a world position, clamped at the edges. */
+function sampleHeight(
+  field: Field,
+  x: number,
+  z: number,
+  worldWidth: number,
+  worldHeight: number,
+): number {
+  const ix = Math.round((x / worldWidth) * (field.width - 1));
+  const iz = Math.round((z / worldHeight) * (field.height - 1));
+  const cx = Math.min(field.width - 1, Math.max(0, ix));
+  const cz = Math.min(field.height - 1, Math.max(0, iz));
+  return field.data[cz * field.width + cx];
+}
+
 /** Base ring from research section 12.4: 0-600 elmos, under 8 s for a T1 tank. */
 const BASE_RING_ELMOS = 600;
 /** Near-expansion ring: 600-1500 elmos, 8-20 s out. */
@@ -755,6 +770,16 @@ export function suggestMetalSpots(height: Field, options: SuggestMetalOptions): 
       }
       if (!fits(mexMask, p, mexSquares)) continue;
       let score = fits(labMask, p, labSquares) ? 2 : 1;
+      // Dry ground outranks a lake bed, always.
+      //
+      // A mex works underwater in BAR and the buildability rule says so, which
+      // is right — but the flattest ground on most maps is the bottom of a
+      // lake, so scoring on flatness alone put ten of rolling-hills' fourteen
+      // spots under water. That is a naval map's layout on a land map: a
+      // player with no shipyard cannot reach most of the metal. The bonus is
+      // larger than every other term, so land wins wherever there is enough of
+      // it, and a genuinely flooded map still gets a layout rather than none.
+      if (sampleHeight(height, p.x, p.z, worldW, worldH) > waterLevel) score += 4;
       if (rng) score += rng.next() * 0.5;
       candidates.push({ x: p.x, z: p.z, score });
     }

@@ -42,6 +42,8 @@ interface Props {
   markers?: Marker[];
   /** Trees, drawn as geometry rather than as markers. */
   features?: readonly DrawnFeature[];
+  /** Palette id, which decides what colour the trees are. */
+  palette?: string;
   /** Which marker is selected, if any. */
   selectedMarker?: string | null;
   /**
@@ -83,6 +85,7 @@ export function Viewport({
   exaggeration,
   markers,
   features,
+  palette,
   selectedMarker,
   onPlace,
   onSelectMarker,
@@ -129,8 +132,8 @@ export function Viewport({
   }, [markers, worldWidth, worldHeight, preview.result, exaggeration]);
 
   useEffect(() => {
-    stateRef.current?.setFeatures(features ?? [], worldWidth, worldHeight);
-  }, [features, worldWidth, worldHeight, preview.result, exaggeration]);
+    stateRef.current?.setFeatures(features ?? [], worldWidth, worldHeight, palette ?? '');
+  }, [features, worldWidth, worldHeight, palette, preview.result, exaggeration]);
 
   useEffect(() => {
     stateRef.current?.setSelectedMarker(selectedMarker ?? null);
@@ -167,7 +170,12 @@ interface ViewportInternals {
   /** The painted map texture, or null to go back to plain vertex colours. */
   setSurface(image: { width: number; height: number; rgba: Uint8Array } | null): void;
   /** The trees standing on the map. Drawn instanced, so thousands are one call. */
-  setFeatures(features: readonly DrawnFeature[], worldWidth: number, worldHeight: number): void;
+  setFeatures(
+    features: readonly DrawnFeature[],
+    worldWidth: number,
+    worldHeight: number,
+    palette: string,
+  ): void;
   setWater(show: boolean, worldWidth: number, worldHeight: number): void;
   setMarkers(markers: Marker[], worldWidth: number, worldHeight: number): void;
   setSelectedMarker(id: string | null): void;
@@ -190,6 +198,12 @@ function createViewport(mount: HTMLElement, handlers: ViewportHandlers): Viewpor
   const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
   renderer.setClearColor(0x0a0c0f);
+  renderer.shadowMap.enabled = true;
+  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  // The scene only changes when the terrain does, and a shadow map over an
+  // eight-thousand-elmo map is not cheap. Rendered on demand instead of on
+  // every frame, so orbiting the camera costs nothing extra.
+  renderer.shadowMap.autoUpdate = false;
   mount.appendChild(renderer.domElement);
 
   const scene = new THREE.Scene();
@@ -201,11 +215,25 @@ function createViewport(mount: HTMLElement, handlers: ViewportHandlers): Viewpor
 
   const camera = new THREE.PerspectiveCamera(45, 1, 10, 120000);
 
+  // The sky. A flat background colour makes every map look like it is floating
+  // in a room; a horizon does more for the impression of a landscape than any
+  // amount of work on the terrain itself, and it costs one sphere.
+  const sky = buildSky();
+  scene.add(sky);
+
   // A key light roughly where BAR's default sun sits, plus enough fill that
   // north faces stay readable rather than going black.
   const sun = new THREE.DirectionalLight(0xfff4e6, 2.1);
   sun.position.set(0.8, 1.0, -0.7).normalize();
+  // Shadows are what make a ridge read as a ridge from above. The map is
+  // static between edits, so the shadow map is rendered once per change rather
+  // than per frame — see `renderer.shadowMap.autoUpdate` below.
+  sun.castShadow = true;
+  sun.shadow.mapSize.set(2048, 2048);
+  sun.shadow.bias = -0.0006;
+  sun.shadow.normalBias = 12;
   scene.add(sun);
+  scene.add(sun.target);
   scene.add(new THREE.HemisphereLight(0x9fb4cc, 0x2a2a24, 1.0));
 
   // Vertex colours multiply against the map texture, which is what lets the
@@ -231,6 +259,8 @@ function createViewport(mount: HTMLElement, handlers: ViewportHandlers): Viewpor
   terrainMaterial.normalScale = new THREE.Vector2(2, 2);
 
   const terrain = new THREE.Mesh(new THREE.BufferGeometry(), terrainMaterial);
+  terrain.castShadow = true;
+  terrain.receiveShadow = true;
   scene.add(terrain);
 
   /** The painted map texture, rebuilt whenever the surface worker lands one. */
@@ -283,6 +313,9 @@ function createViewport(mount: HTMLElement, handlers: ViewportHandlers): Viewpor
   scene.add(markerLayer.group);
 
   const featureLayer = new FeatureLayer({ worldWidth: 1, worldHeight: 1 });
+  featureLayer.group.traverse((o) => {
+    o.castShadow = true;
+  });
   scene.add(featureLayer.group);
 
   // The heightfield the markers stand on, kept so a marker can be dropped onto
@@ -400,6 +433,26 @@ function createViewport(mount: HTMLElement, handlers: ViewportHandlers): Viewpor
       // Haze begins past the far corner of the map and is complete well beyond
       // it, so the map itself is never fogged and the horizon still recedes.
       const diagonal = Math.hypot(worldWidth, worldHeight);
+
+      // The sun is directional, so its shadow camera is orthographic and has to
+      // be told the map's extent — the default is a 10-elmo box, which on a map
+      // this size puts every shadow in one pixel at the origin.
+      const reach = diagonal * 0.62;
+      const shadow = sun.shadow.camera;
+      shadow.left = -reach;
+      shadow.right = reach;
+      shadow.top = reach;
+      shadow.bottom = -reach;
+      shadow.near = 1;
+      shadow.far = diagonal * 3;
+      shadow.updateProjectionMatrix();
+      // The light is a direction, not a place; put it far enough out that the
+      // whole map is in front of its near plane.
+      sun.position.set(0.8, 1.0, -0.7).normalize().multiplyScalar(diagonal);
+      sun.target.position.set(0, 0, 0);
+      sun.target.updateMatrixWorld();
+      sky.scale.setScalar(Math.max(1, diagonal * 12));
+      renderer.shadowMap.needsUpdate = true;
       const fog = scene.fog as THREE.Fog;
       fog.near = diagonal * 1.2;
       fog.far = diagonal * 4;
@@ -420,6 +473,7 @@ function createViewport(mount: HTMLElement, handlers: ViewportHandlers): Viewpor
     setSurface(image) {
       const wasPainted = surfaceTexture !== null;
       surfaceTexture?.dispose();
+      renderer.shadowMap.needsUpdate = true;
       if (!image) {
         surfaceTexture = null;
         terrainMaterial.map = null;
@@ -450,9 +504,13 @@ function createViewport(mount: HTMLElement, handlers: ViewportHandlers): Viewpor
       markerLayer.set(markers, heightAt);
     },
 
-    setFeatures(features, worldWidth, worldHeight) {
-      featureLayer.setWorld(worldWidth, worldHeight);
+    setFeatures(features, worldWidth, worldHeight, palette) {
+      featureLayer.setWorld(worldWidth, worldHeight, palette);
       featureLayer.set(features, heightAt);
+      featureLayer.group.traverse((o) => {
+        o.castShadow = true;
+      });
+      renderer.shadowMap.needsUpdate = true;
     },
 
     setSelectedMarker(id) {
@@ -486,6 +544,8 @@ function createViewport(mount: HTMLElement, handlers: ViewportHandlers): Viewpor
       picking.dispose();
       markerLayer.dispose();
       featureLayer.dispose();
+      sky.geometry.dispose();
+      (sky.material as THREE.Material).dispose();
       surfaceTexture?.dispose();
       terrainMaterial.normalMap?.dispose();
       terrain.geometry.dispose();
@@ -977,4 +1037,53 @@ function buildDetailNormal(): THREE.DataTexture {
   texture.needsUpdate = true;
   texture.userData.repeatElmos = layer.repeatElmos;
   return texture;
+}
+
+/**
+ * The sky.
+ *
+ * An inverted sphere with a vertical gradient, drawn behind everything and lit
+ * by nothing. A flat clear colour makes every map look like it is floating in a
+ * room, and a horizon does more for the impression of a landscape than any
+ * amount of further work on the terrain. Vertex colours rather than a shader so
+ * there is nothing to keep in step with three.js's own.
+ */
+function buildSky(): THREE.Mesh {
+  const geometry = new THREE.SphereGeometry(1, 24, 16);
+  const position = geometry.attributes.position;
+  const colors = new Float32Array(position.count * 3);
+  const zenith = new THREE.Color(0x1d3550);
+  const horizon = new THREE.Color(0x6d7f8c);
+  const ground = new THREE.Color(0x14171c);
+  const color = new THREE.Color();
+
+  for (let i = 0; i < position.count; i++) {
+    const y = position.getY(i);
+    if (y >= 0) {
+      // Eased toward the horizon: a linear ramp puts the transition halfway up
+      // the sky, where nobody looks, instead of at the skyline.
+      color.copy(horizon).lerp(zenith, Math.pow(y, 0.55));
+    } else {
+      color.copy(horizon).lerp(ground, Math.min(1, -y * 2.4));
+    }
+    colors[i * 3] = color.r;
+    colors[i * 3 + 1] = color.g;
+    colors[i * 3 + 2] = color.b;
+  }
+  geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+
+  const sky = new THREE.Mesh(
+    geometry,
+    new THREE.MeshBasicMaterial({
+      vertexColors: true,
+      side: THREE.BackSide,
+      // Behind everything, and never fogged: fogging the sky toward the fog
+      // colour makes the fog colour the sky.
+      fog: false,
+      depthWrite: false,
+    }),
+  );
+  sky.renderOrder = -1;
+  sky.frustumCulled = false;
+  return sky;
 }

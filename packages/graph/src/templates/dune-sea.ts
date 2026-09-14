@@ -32,52 +32,52 @@ export const DUNE_SEA: Template = {
       warpSize: 9000,
     }, 40, 140);
 
-    g.node('coarse', 'generator.noise', {
+    g.node('draa', 'generator.noise', {
       fractal: 'ridged',
-      featureSize: 4200,
-      amplitude: 300,
+      featureSize: 3400,
+      amplitude: 320,
       octaves: 3,
       gain: 0.45,
       sharpness: 0.45,
-      warpAmount: 1300,
-      warpSize: 6000,
+      warpAmount: 1100,
+      warpSize: 5600,
       seed: 5,
     }, 40, 340);
 
-    g.node('fine', 'generator.noise', {
+    g.node('crests', 'generator.noise', {
       fractal: 'ridged',
-      featureSize: 950,
-      amplitude: 85,
+      featureSize: 1200,
+      amplitude: 120,
       octaves: 3,
       gain: 0.45,
-      sharpness: 0.7,
-      warpAmount: 260,
-      warpSize: 1600,
+      sharpness: 0.75,
+      warpAmount: 300,
+      warpSize: 1900,
       seed: 23,
     }, 40, 540);
 
-    g.node('where', 'selector.height', { low: 0, high: 10000, falloff: 120, soften: 300 }, 280, 60);
-    g.node('field', 'combiner.blend', { amount: 1 }, 520, 440);
+    g.node('deep', 'selector.height', { low: 30, high: 10000, falloff: 40, soften: 600 }, 280, 60);
+    g.node('pile', 'combiner.combine', { mode: 'add', factor: 1 }, 520, 440);
     g.node('sand', 'combiner.combine', { mode: 'add', factor: 1 }, 740, 260);
 
-    g.node('pans', 'selector.height', { low: -10000, high: 0, falloff: 140, soften: 260 }, 960, 560);
-    g.node('iron', 'filter.smooth', { radius: 560, strength: 1 }, 1180, 340);
+    g.node('pans', 'selector.height', { low: -10000, high: 40, falloff: 150, soften: 260 }, 960, 560);
+    g.node('iron', 'filter.smooth', { radius: 640, strength: 1 }, 1180, 340);
 
     g.node('fair', 'gameplay.symmetry', { kind: 'rotate180', feather: 384 }, 1400, 340);
     g.node('sea', 'filter.seaLevel', { mode: 'coverage', coverage: 0.02 }, 1620, 340);
     g.node('out', 'output.height', {
       autoRange: false,
-      minHeight: -60,
-      maxHeight: 520,
+      minHeight: -70,
+      maxHeight: 440,
     }, 1840, 340);
 
     return g
-      .link('fine', 'field:a')
-      .link('coarse', 'field:b')
-      .link('swells', 'where')
-      .link('where:mask', 'field:mask')
+      .link('draa', 'pile:a')
+      .link('crests', 'pile:b')
+      .link('swells', 'deep')
+      .link('deep:mask', 'pile:mask')
       .link('swells', 'sand:a')
-      .link('field', 'sand:b')
+      .link('pile', 'sand:b')
       .link('sand', 'pans')
       .link('sand', 'iron')
       .link('pans:mask', 'iron:mask')
