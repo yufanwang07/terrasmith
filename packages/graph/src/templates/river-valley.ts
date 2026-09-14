@@ -65,27 +65,6 @@ export const RIVER_VALLEY: Template = {
       scaleToMap: false,
       shapes: JSON.stringify([
         {
-          // The flood plain. Levelled with `min`, so it shaves the ground down
-          // to 15 elmos where it stands higher and leaves every hollow alone
-          // where it does not — which is where the backwaters and the ragged
-          // shoreline come from, rather than from a wobble setting.
-          id: 'river-plain',
-          kind: 'polyline',
-          smooth: true,
-          value: 25,
-          width: 2600,
-          falloff: 1400,
-          points: [
-            { x: -600, z: 4616 },
-            { x: 1560, z: 3576 },
-            { x: 3400, z: 4556 },
-            { x: 5120, z: 4096 },
-            { x: 6840, z: 3636 },
-            { x: 8680, z: 4616 },
-            { x: 10840, z: 3576 },
-          ],
-        },
-        {
           // The channel. It weaves inside the plain rather than running down
           // the middle of it, so the water lies against the north bank at one
           // bend and the south bank at the next, the way a real river does.
@@ -98,7 +77,7 @@ export const RIVER_VALLEY: Template = {
           smooth: true,
           value: -45,
           width: 900,
-          falloff: 700,
+          falloff: 500,
           points: [
             { x: -600, z: 4310 },
             { x: 1560, z: 3796 },
@@ -148,10 +127,10 @@ export const RIVER_VALLEY: Template = {
     g.node('land', 'generator.noise', {
       fractal: 'hybrid',
       featureSize: 3600,
-      amplitude: 540,
+      amplitude: 560,
       octaves: 5,
-      gain: 0.54,
-      offset: 95,
+      gain: 0.52,
+      offset: -270,
       warpAmount: 900,
       warpSize: 5200,
       seed: 3,
@@ -161,25 +140,25 @@ export const RIVER_VALLEY: Template = {
     // edge of the map so nothing comes back as a capped plateau.
     g.node('sides', 'layout.distance', {
       signed: false,
-      maxDistance: 4400,
+      maxDistance: 2200,
       grow: 0,
       only: 'river-main',
     }, 280, 260);
 
     // ...added back as height, at 75 elmos of rise per 1 000 elmos out. This is
     // what makes the map a valley rather than a trench across a plain.
-    g.node('valley', 'combiner.combine', { mode: 'add', factor: 0.06 }, 520, 380);
+    g.node('valley', 'combiner.combine', { mode: 'add', factor: 0.17 }, 520, 380);
 
     // Level the gentle ground, and only that, before anything is cut into it.
     g.node('gentle', 'selector.slope', { low: 0, high: 12, falloff: 5, soften: 220 }, 760, 620);
-    g.node('pads', 'filter.smooth', { radius: 640, strength: 0.9 }, 1000, 380);
+    g.node('pads', 'filter.smooth', { radius: 420, strength: 0.9 }, 1000, 380);
 
     // The plain and the channel, from the two river shapes above.
     g.node('bed', 'layout.flatten', {
       useShapeValues: true,
       mode: 'min',
       lineWidth: 900,
-      falloff: 700,
+      falloff: 500,
       only: 'river',
     }, 1240, 380);
 
@@ -196,7 +175,7 @@ export const RIVER_VALLEY: Template = {
     }, 1480, 380);
 
     g.node('fair', 'gameplay.symmetry', { kind: 'rotate180', feather: 0 }, 1720, 380);
-    g.node('sea', 'filter.seaLevel', { mode: 'coverage', coverage: 0.22 }, 1960, 380);
+    g.node('sea', 'filter.seaLevel', { mode: 'coverage', coverage: 0.142 }, 1960, 380);
     g.node('out', 'output.height', {
       autoRange: false,
       minHeight: -60,

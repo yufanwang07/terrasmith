@@ -8,7 +8,9 @@
 
 export {
   createField,
+  fractalNoise2D,
   resampleField,
+  resolveNoiseParams,
   sampleBilinear,
   slopeDegreesField,
   fieldRange,

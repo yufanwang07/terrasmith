@@ -8,7 +8,13 @@
  * gets a map with buildable ground marked as ground and cliffs marked as rock.
  */
 
-import { resampleField, slopeDegreesField, type Field } from './compat.js';
+import {
+  fractalNoise2D,
+  resampleField,
+  resolveNoiseParams,
+  slopeDegreesField,
+  type Field,
+} from './compat.js';
 
 /**
  * Terrain-type slots Terrasmith paints by default. These line up with the
@@ -108,24 +114,77 @@ export interface GrassMapOptions {
   minHeight?: number;
   /** Grass stops above this height, in elmos. @default Infinity */
   maxHeight?: number;
+  /**
+   * How much the grass gathers into patches rather than covering everything it
+   * could, 0 to 1.
+   *
+   * A blanket over every gentle, dry, low square is what this used to produce,
+   * and it is what nothing looks like: real grassland is patchy, and the bare
+   * ground between the patches is what makes them read as grass rather than as
+   * a green filter over the map. 0 is the blanket.
+   * @default 0.55
+   */
+  clumping?: number;
+  /**
+   * How wide a patch of grass is, in elmos.
+   *
+   * Smaller than a wood, because grass grows where the soil is and the soil
+   * varies over shorter distances than the shelter a tree needs.
+   * @default 520
+   */
+  patchSize?: number;
+  /** @default 0 */
+  seed?: number;
 }
 
-/** Derive a grass coverage map: gentle, dry, low ground. */
+/**
+ * Derive a grass coverage map: gentle, dry, low ground, in patches.
+ *
+ * The engine's grass map is a flag rather than a density — 0 is none and 1 is
+ * grass — so the patchiness has to be in *where* the flag is set, not in how
+ * strongly.
+ */
 export function deriveGrassMap(height: Field, options: GrassMapOptions): Uint8Array {
   const maxSlope = options.maxSlope ?? 25;
   const minHeight = options.minHeight ?? 6;
   const maxHeight = options.maxHeight ?? Infinity;
+  const clumping = Math.min(Math.max(options.clumping ?? 0.55, 0), 1);
+  const patchSize = Math.max(80, options.patchSize ?? 520);
 
   const slope = slopeDegreesField(height, { cellSize: options.cellSize });
   const h = resampleField(height, options.width, options.height);
   const s = resampleField(slope, options.width, options.height);
 
+  // The map's own width in elmos, so the patch scale is a real distance rather
+  // than a number of cells — the grass map is a quarter the heightfield's
+  // resolution and the patches must not change size with it.
+  const worldWidth = (height.width - 1) * options.cellSize;
+  const patches =
+    clumping <= 0
+      ? null
+      : resolveNoiseParams({
+          type: 'perlin',
+          fractal: 'fbm',
+          octaves: 3,
+          gain: 0.5,
+          frequency: worldWidth / patchSize,
+          seed: (options.seed ?? 0) + 0x6ea5,
+        });
+  // Same shape as the tree scatter's: a threshold with a soft edge, because a
+  // patch of grass has an edge and a probability does not.
+  const threshold = 0.34 + clumping * 0.34;
+
   const out = new Uint8Array(options.width * options.height);
   for (let i = 0; i < out.length; i++) {
     const z = h.data[i];
-    // The engine's grass map is a flag, not a density: 0 is none and 1 is
-    // grass, with the rest undefined.
-    out[i] = s.data[i] <= maxSlope && z >= minHeight && z <= maxHeight ? 1 : 0;
+    if (s.data[i] > maxSlope || z < minHeight || z > maxHeight) continue;
+    if (patches) {
+      const x = (i % options.width) / options.width;
+      const y = Math.floor(i / options.width) / options.height;
+      const n = fractalNoise2D(x, y, patches) * 0.62 + 0.5;
+      if (n < threshold) continue;
+    }
+    out[i] = 1;
   }
   return out;
 }

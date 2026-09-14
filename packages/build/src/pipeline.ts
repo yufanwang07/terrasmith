@@ -385,6 +385,7 @@ function buildDerivedMaps(
         width: plan.quarterWidth,
         height: plan.quarterHeight,
         cellSize,
+        seed: project.settings.seed,
       });
 
   const { featureTypes, features } = collectFeatures(project, heightfield, plan);

@@ -10,9 +10,11 @@ import {
   type StripRunner,
   type StripTask,
   buildMapFiles,
+  deriveGrassMap,
 } from '../src/index.js';
 import { createDefaultRegistry, createProject } from '@terrasmith/graph';
 import { readSmf } from '@terrasmith/format';
+import { createField, type Field } from '@terrasmith/core';
 
 /** A stand-in result; `runStrips` only cares about `index`. */
 function fakeResult(index: number): StripResult {
@@ -326,6 +328,78 @@ describe('feature headings', () => {
       const back = (((feature.rotation / 65536) * 360) % 360 + 360) % 360;
       const want = ((headings[i] % 360) + 360) % 360;
       expect(Math.abs(back - want) % 360).toBeLessThan(0.02);
+    }
+  });
+});
+
+describe('the grass map', () => {
+  const SIZE = 257;
+  const CELL = 8192 / (SIZE - 1);
+
+  /** Gentle dry ground everywhere, so nothing but the patchiness varies. */
+  const openGround = (): Field => {
+    const f = createField(SIZE, SIZE);
+    for (let i = 0; i < f.data.length; i++) f.data[i] = 60;
+    return f;
+  };
+
+  const coverage = (map: Uint8Array): number => {
+    let on = 0;
+    for (const v of map) on += v;
+    return on / map.length;
+  };
+
+  it('grows in patches rather than as a blanket', () => {
+    // The engine's grass map is a flag, not a density, so patchiness has to be
+    // in where the flag is set. A blanket over every gentle dry square is what
+    // this produced, and it reads as a green filter over the map rather than as
+    // grass: it is the bare ground between the patches that makes them grass.
+    const ground = openGround();
+    const opts = { width: 128, height: 128, cellSize: CELL, seed: 3 };
+    const blanket = deriveGrassMap(ground, { ...opts, clumping: 0 });
+    const patchy = deriveGrassMap(ground, { ...opts, clumping: 0.55 });
+
+    expect(coverage(blanket)).toBe(1);
+    expect(coverage(patchy)).toBeGreaterThan(0.1);
+    expect(coverage(patchy)).toBeLessThan(0.6);
+  });
+
+  it('keeps the patches the same size whatever resolution it is asked for', () => {
+    // The grass map is a quarter of the heightfield's resolution, and a patch
+    // measured in cells rather than in elmos would change size with it.
+    const ground = openGround();
+    const base = { cellSize: CELL, clumping: 0.55, seed: 3 };
+    const coarse = coverage(deriveGrassMap(ground, { ...base, width: 64, height: 64 }));
+    const fine = coverage(deriveGrassMap(ground, { ...base, width: 256, height: 256 }));
+    expect(Math.abs(coarse - fine)).toBeLessThan(0.06);
+  });
+
+  it('still refuses slopes, water and anything over its ceiling', () => {
+    const f = createField(SIZE, SIZE);
+    for (let z = 0; z < SIZE; z++) {
+      for (let x = 0; x < SIZE; x++) {
+        // A ramp from under the sea to well above any ceiling.
+        f.data[z * SIZE + x] = -60 + (z / (SIZE - 1)) * 900;
+      }
+    }
+    const map = deriveGrassMap(f, {
+      width: 128,
+      height: 128,
+      cellSize: CELL,
+      clumping: 0,
+      maxHeight: 400,
+    });
+    // Nothing in the flooded rows, nothing above the ceiling. Checked a row
+    // clear of each boundary: the map is resampled from 257 rows to 128, so a
+    // row exactly on a limit is a blend of one either side of it.
+    const margin = 12;
+    for (let z = 0; z < 128; z++) {
+      const height = -60 + (z / 127) * 900;
+      if (height < 6 - margin || height > 400 + margin) {
+        for (let x = 0; x < 128; x++) {
+          expect(map[z * 128 + x], `grass at height ${height.toFixed(0)}`).toBe(0);
+        }
+      }
     }
   });
 });
