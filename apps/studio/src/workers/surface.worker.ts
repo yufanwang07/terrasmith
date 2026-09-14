@@ -25,9 +25,11 @@ import {
   generateSatmap,
   enforceSlopeBands,
   rescalePaletteHeights,
+  sunDirToLighting,
   type Field,
   type MaterialPalette,
 } from '@terrasmith/core';
+import { DEFAULT_SUN_DIR } from '@terrasmith/format';
 
 /** Paint one heightfield. */
 export interface SurfaceRequest {
@@ -132,6 +134,11 @@ function paint(field: Field, request: SurfaceRequest): Uint8Array {
       lighting: {
         occlusionStrength: clamp01(request.occlusion, DEFAULT_OCCLUSION_STRENGTH),
         hillshadeStrength: clamp01(request.shading, DEFAULT_HILLSHADE_STRENGTH),
+        // The same sun the exporter bakes from, which is the one the generated
+        // `mapinfo.lua` declares. A preview lit from the cartographic north-west
+        // while the map ships lit from bearing 049 disagrees with itself about
+        // which side of every ridge is bright.
+        ...sunDirToLighting(DEFAULT_SUN_DIR),
       },
     },
   );

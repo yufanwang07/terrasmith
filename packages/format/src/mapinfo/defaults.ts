@@ -65,6 +65,17 @@ export const DEFAULT_TERRAIN_TYPES: Record<number, TerrainType> = {
  * Everything the caller supplies wins; everything else comes from values tuned
  * against shipped BAR maps.
  */
+/**
+ * The sun a generated `mapinfo.lua` declares.
+ *
+ * Engine axes: `x` east, `y` up, `z` south, pointing from the ground *toward*
+ * the sun. High enough that valleys are not black, off-axis enough for long
+ * shadows to show relief. Exported because the texture bake has to light from
+ * the same place — what it bakes is added to this, so a bake from another
+ * quarter darkens the faces the engine is lighting.
+ */
+export const DEFAULT_SUN_DIR: readonly [number, number, number, number] = [0.8, 1.0, -0.7, 1e9];
+
 export function createMapInfo(options: {
   name: string;
   shortname?: string;
@@ -160,7 +171,7 @@ export function createMapInfo(options: {
     lighting: {
       // A high, slightly off-axis sun reads well on terrain: low enough for
       // long shadows to show relief, high enough that valleys are not black.
-      sunDir: [0.8, 1.0, -0.7, 1e9],
+      sunDir: [...DEFAULT_SUN_DIR],
       groundAmbientColor: [0.4, 0.4, 0.4],
       groundDiffuseColor: [0.9, 0.9, 0.85],
       groundSpecularColor: [0.7, 0.7, 0.7],

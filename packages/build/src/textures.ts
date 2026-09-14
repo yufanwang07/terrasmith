@@ -371,6 +371,12 @@ export function generateDetailNormal(
   const field: Field = { width: size, height: size, data: heights };
   const range = fieldRange(field);
   const span = Math.max(1e-6, range.max - range.min);
+  // The alpha below is centred on the field's own mean, not on the midpoint of
+  // its range: a min-max normalised fbm is not symmetric about its midpoint,
+  // and what has to come out at zero is the *average* of what the engine adds.
+  let mean = 0;
+  for (let i = 0; i < heights.length; i++) mean += heights[i];
+  mean /= heights.length;
 
   // The normal's steepness comes from the height derivative, so scale the
   // heights into a range where `relief` means what it says regardless of how
@@ -391,10 +397,20 @@ export function generateDetailNormal(
       image.data[o] = toByte((-dx / len) * 0.5 + 0.5);
       image.data[o + 1] = toByte((-dz / len) * 0.5 + 0.5);
       image.data[o + 2] = toByte((1 / len) * 0.5 + 0.5);
-      // Diffuse term: mid-grey with the surface's own light and shade, so the
-      // texture darkens in its hollows the way a real one does.
-      const t = (heights[y * size + x] - range.min) / span;
-      image.data[o + 3] = toByte(0.45 + t * 0.35);
+      // Diffuse term: signed about zero, so the texture darkens in its hollows
+      // and brightens on its crests without moving the map's overall albedo.
+      //
+      // The engine reads this alpha as `a * 2 - 1` and *adds* it to the ground
+      // colour before the lighting multiply, so its mean has to be 0.5 or the
+      // whole map shifts. It was `0.45 + t * 0.35` over a min-max normalised
+      // field, which has a mean near 0.5 — so the alpha's mean was 0.625 and
+      // every texel on every exported map was getting about +0.25 added
+      // equally to red, green and blue. On a mid-ground albedo of 0.35 that is
+      // a 60% brightening and, because it is an equal-channel add, a large
+      // push toward grey. Nothing in Terrasmith showed it: not the preview,
+      // not the exported diffuse. The map was simply brighter and greyer in
+      // game than anything the author had seen.
+      image.data[o + 3] = toByte(0.5 + ((heights[y * size + x] - mean) / span) * 0.35);
     }
   }
   return image;

@@ -150,6 +150,62 @@ export const RIVER_VALLEY: Template = {
             { x: 8560, z: 5696 },
           ],
         },
+        // Four base platforms, two on each bank, levelled to whatever height
+        // the ground under them happens to be. BAR has no terraform command, so
+        // a lab needs 96 x 96 elmos within 10.7 of level and a working base
+        // about 400 x 400, and it all has to be in the map before it ships.
+        // These are 800 elmos square, which is a base and its expansion
+        // rather than a factory: the masked smoothing above makes the map
+        // generally buildable, and these make it certainly buildable in four
+        // places that are half a turn apart in pairs.
+        {
+          id: 'pad-north-west',
+          kind: 'polygon',
+          closed: true,
+          falloff: 650,
+          points: [
+            { x: 2000, z: 900 },
+            { x: 2800, z: 900 },
+            { x: 2800, z: 1700 },
+            { x: 2000, z: 1700 },
+          ],
+        },
+        {
+          id: 'pad-south-east',
+          kind: 'polygon',
+          closed: true,
+          falloff: 650,
+          points: [
+            { x: 8240, z: 7292 },
+            { x: 7440, z: 7292 },
+            { x: 7440, z: 6492 },
+            { x: 8240, z: 6492 },
+          ],
+        },
+        {
+          id: 'pad-north-east',
+          kind: 'polygon',
+          closed: true,
+          falloff: 650,
+          points: [
+            { x: 7200, z: 900 },
+            { x: 8000, z: 900 },
+            { x: 8000, z: 1700 },
+            { x: 7200, z: 1700 },
+          ],
+        },
+        {
+          id: 'pad-south-west',
+          kind: 'polygon',
+          closed: true,
+          falloff: 650,
+          points: [
+            { x: 3040, z: 7292 },
+            { x: 2240, z: 7292 },
+            { x: 2240, z: 6492 },
+            { x: 3040, z: 6492 },
+          ],
+        },
       ]),
     }, 40, 140);
 
@@ -167,6 +223,7 @@ export const RIVER_VALLEY: Template = {
       offset: 110,
       warpAmount: 900,
       warpSize: 5200,
+      warpIterations: 2,
       seed: 3,
     }, 40, 480);
 
@@ -187,6 +244,17 @@ export const RIVER_VALLEY: Template = {
     g.node('gentle', 'selector.slope', { low: 0, high: 8, falloff: 4, soften: 200 }, 760, 620);
     g.node('pads', 'filter.smooth', { radius: 700, strength: 1 }, 1000, 380);
 
+    // The four drawn platforms. A shape with no height of its own levels to
+    // the mean of the ground it covers, which is the "flatten this, whatever
+    // height suits" case, so no pad has to climb to reach an elevation it was
+    // given and none of them is ringed by a rim too steep to drive up.
+    g.node('base', 'layout.flatten', {
+      useShapeValues: true,
+      mode: 'smoothSet',
+      falloff: 700,
+      only: 'pad-',
+    }, 1120, 500);
+
     // The plain and the channel, from the two river shapes above.
     g.node('bed', 'layout.flatten', {
       useShapeValues: true,
@@ -201,7 +269,7 @@ export const RIVER_VALLEY: Template = {
     // exactly the part of the channel that had to be lifted and nothing else.
     g.node('ford', 'layout.flatten', {
       useShapeValues: false,
-      height: -10,
+      height: -17,
       mode: 'max',
       lineWidth: 340,
       falloff: 300,
@@ -209,11 +277,11 @@ export const RIVER_VALLEY: Template = {
     }, 1480, 380);
 
     g.node('fair', 'gameplay.symmetry', { kind: 'rotate180', feather: 0 }, 1720, 380);
-    g.node('sea', 'filter.seaLevel', { mode: 'coverage', coverage: 0.213 }, 1960, 380);
+    g.node('sea', 'filter.seaLevel', { mode: 'coverage', coverage: 0.186 }, 1960, 380);
     g.node('out', 'output.height', {
       autoRange: false,
-      minHeight: -60,
-      maxHeight: 700,
+      minHeight: -70,
+      maxHeight: 760,
     }, 2200, 380);
 
     return g
@@ -223,7 +291,9 @@ export const RIVER_VALLEY: Template = {
       .link('valley', 'gentle')
       .link('valley', 'pads')
       .link('gentle:mask', 'pads:mask')
-      .link('pads', 'bed')
+      .link('pads', 'base')
+      .link('shapes:shapes', 'base:shapes')
+      .link('base', 'bed')
       .link('shapes:shapes', 'bed:shapes')
       .link('bed', 'ford')
       .link('shapes:shapes', 'ford:shapes')

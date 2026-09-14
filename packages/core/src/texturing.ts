@@ -1012,6 +1012,30 @@ function bakeShading(
 }
 
 /**
+ * The compass bearing and altitude of an engine `sunDir`.
+ *
+ * `mapinfo.lua`'s `lighting.sunDir` is a vector pointing from the ground toward
+ * the sun, in the engine's axes: `x` east, `y` up, `z` south. A bake that
+ * lights from somewhere else fights the engine's own sun rather than
+ * supplementing it — with the shipped default of `[0.8, 1.0, -0.7]` the engine
+ * lights from bearing 049 and the bake's cartographic default of 315 lights
+ * from the opposite quarter, so the two disagree about which side of every
+ * ridge is lit.
+ */
+export function sunDirToLighting(sunDir: readonly number[]): {
+  azimuth: number;
+  altitude: number;
+} {
+  const [x = 0, y = 1, z = 0] = sunDir;
+  const horizontal = Math.hypot(x, z);
+  // Bearing of the direction the light comes *from*. North is -z, so a
+  // northward component is a negative z.
+  const azimuth = ((Math.atan2(x, -z) * 180) / Math.PI + 360) % 360;
+  const altitude = (Math.atan2(y, horizontal) * 180) / Math.PI;
+  return { azimuth, altitude };
+}
+
+/**
  * Compass bearing to the angle `hillshade` in `analysis.ts` actually wants.
  *
  * `hillshade` builds its light vector as `(cos a, sin a)` in grid space, where

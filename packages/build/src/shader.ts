@@ -14,12 +14,14 @@ import {
   DEFAULT_OCCLUSION_STRENGTH,
   createColorField,
   fractalNoise2D,
+  sunDirToLighting,
   generateSatmap,
   type ColorField,
   type Field,
   type MaterialPalette,
   type SatmapOptions,
 } from '@terrasmith/core';
+import { DEFAULT_SUN_DIR } from '@terrasmith/format';
 import type { BlockInputs, BlockShader } from './texture.js';
 
 export interface PaletteShaderOptions {
@@ -37,8 +39,16 @@ export interface PaletteShaderOptions {
   grain?: number;
   /** Grain feature size in elmos. */
   grainScale?: number;
+  /**
+   * The map's own sun, as `mapinfo.lua`'s `lighting.sunDir` — `x` east, `y` up,
+   * `z` south, pointing from the ground toward the sun. The baked hillshade
+   * follows it, because what is baked is added to the engine's live sun.
+   */
+  sunDir?: readonly number[];
   seed?: number;
 }
+
+
 
 /** Wrap a Float32Array block as a Field without copying. */
 function asField(data: Float32Array, width: number, height: number): Field {
@@ -55,6 +65,11 @@ export function createPaletteShader(options: PaletteShaderOptions): BlockShader 
     lighting: {
       occlusionStrength: options.occlusionStrength ?? DEFAULT_OCCLUSION_STRENGTH,
       hillshadeStrength: options.shadingStrength ?? DEFAULT_HILLSHADE_STRENGTH,
+      // From the map's own sun rather than from the cartographic convention.
+      // What is baked here is added to the engine's live sun, so a bake lit
+      // from a different quarter darkens the faces the engine is lighting: the
+      // shipped `sunDir` is bearing 049 and the relief default is 315.
+      ...sunDirToLighting(options.sunDir ?? DEFAULT_SUN_DIR),
     },
   };
 

@@ -13,8 +13,8 @@ import {
   deriveGrassMap,
 } from '../src/index.js';
 import { createDefaultRegistry, createProject } from '@terrasmith/graph';
-import { readSmf } from '@terrasmith/format';
-import { createField, type Field } from '@terrasmith/core';
+import { DEFAULT_SUN_DIR, readSmf } from '@terrasmith/format';
+import { createField, sunDirToLighting, type Field } from '@terrasmith/core';
 
 /** A stand-in result; `runStrips` only cares about `index`. */
 function fakeResult(index: number): StripResult {
@@ -239,6 +239,29 @@ describe('generated detail normals', () => {
     expect(Array.from(rock.data)).not.toEqual(Array.from(sand.data));
   });
 
+  it('centres the diffuse alpha on mid-grey', () => {
+    // The engine reads this alpha as `a * 2 - 1` and adds it to the ground
+    // colour before the lighting multiply, so a mean that is not 0.5 moves the
+    // whole map. It was 0.625, which added about +0.25 equally to red, green
+    // and blue on every texel of every exported map — a 60% brightening of
+    // mid-ground and, being an equal-channel add, a large desaturation. It
+    // showed nowhere in the tool.
+    for (const layer of DEFAULT_DETAIL_LAYERS) {
+      const tile = generateDetailNormal(layer, 128, 3);
+      let sum = 0;
+      let n = 0;
+      for (let i = 3; i < tile.data.length; i += 4) {
+        sum += tile.data[i];
+        n++;
+      }
+      // Within a hundredth: the field is min-max normalised, so its own mean
+      // is near but not exactly 0.5 and the alpha inherits that.
+      expect(Math.abs(sum / n / 255 - 0.5), `${layer.fileName} biases the whole map`).toBeLessThan(
+        0.01,
+      );
+    }
+  });
+
   it('writes a diffuse term in alpha rather than leaving it flat', () => {
     const tile = generateDetailNormal(layer, 32, 1);
     let min = 255;
@@ -401,5 +424,28 @@ describe('the grass map', () => {
         }
       }
     }
+  });
+});
+
+describe('the baked sun', () => {
+  it('agrees with the sun the generated mapinfo declares', () => {
+    // What the shader bakes is *added* to the engine's live sun, so a bake lit
+    // from a different quarter darkens the faces the engine is lighting. The
+    // relief-map convention of 315 and the shipped sunDir's bearing of 049 are
+    // very nearly opposite, and the two were disagreeing on which side of every
+    // ridge is lit.
+    const { azimuth, altitude } = sunDirToLighting(DEFAULT_SUN_DIR);
+    expect(azimuth).toBeCloseTo(48.8, 1);
+    expect(altitude).toBeCloseTo(43.3, 1);
+  });
+
+  it('reads a compass bearing out of the engine axes', () => {
+    // `x` east, `y` up, `z` south, pointing from the ground toward the sun.
+    expect(sunDirToLighting([0, 1, -1]).azimuth).toBeCloseTo(0, 6);
+    expect(sunDirToLighting([1, 1, 0]).azimuth).toBeCloseTo(90, 6);
+    expect(sunDirToLighting([0, 1, 1]).azimuth).toBeCloseTo(180, 6);
+    expect(sunDirToLighting([-1, 1, 0]).azimuth).toBeCloseTo(270, 6);
+    // Altitude is the angle above the horizon, not off the vertical.
+    expect(sunDirToLighting([1, 1, 0]).altitude).toBeCloseTo(45, 6);
   });
 });
