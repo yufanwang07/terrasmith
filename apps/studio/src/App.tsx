@@ -204,6 +204,7 @@ export function App() {
                 onMode={setPlacement}
                 selected={selectedMarker}
                 onSelect={setSelectedMarker}
+                terrain={preview.result?.kind === 'field' ? preview.result : null}
               />
             ) : guided ? (
               <GuidedPanel />

@@ -9,8 +9,10 @@ import {
   type StripResult,
   type StripRunner,
   type StripTask,
+  buildMapFiles,
 } from '../src/index.js';
-import { createProject } from '@terrasmith/graph';
+import { createDefaultRegistry, createProject } from '@terrasmith/graph';
+import { readSmf } from '@terrasmith/format';
 
 /** A stand-in result; `runStrips` only cares about `index`. */
 function fakeResult(index: number): StripResult {
@@ -276,6 +278,54 @@ describe('the draft shading grid', () => {
       );
       expect(plan.textureWidth % plan.shadeScale).toBe(0);
       expect(plan.blockSize % plan.shadeScale).toBe(0);
+    }
+  });
+});
+
+describe('feature headings', () => {
+  const project = createProject({
+    settings: { ...createProject().settings, sizeX: 4, sizeZ: 4 },
+    graph: {
+      nodes: [
+        { id: 'n', type: 'generator.constant', params: { value: 100 }, position: { x: 0, y: 0 } },
+        { id: 'o', type: 'output.height', params: {}, position: { x: 200, y: 0 } },
+      ],
+      edges: [{ id: 'e', fromNode: 'n', fromPort: 'out', toNode: 'o', toPort: 'terrain' }],
+      groups: [],
+    },
+  });
+
+  it('writes every facing as a value a short can hold', async () => {
+    // `FeatureHandler.cpp` C-casts the stored float to a short, which is
+    // undefined for anything outside -32768..32767. A heading of 200 degrees is
+    // 36409 in the engine's 65536-per-turn units, so half of every possible
+    // facing used to land in that hole.
+    const headings = [0, 45, 90, 179, 180, 181, 200, 270, 359, 360, 720, -90, -200];
+    const artifacts = await buildMapFiles(
+      {
+        ...project,
+        features: headings.map((rotation, i) => ({
+          id: `f${i}`,
+          name: 'TreeType0',
+          x: 100 + i * 40,
+          z: 200,
+          rotation,
+        })),
+      },
+      { registry: createDefaultRegistry(), quality: 'draft' },
+    );
+
+    const smf = readSmf(artifacts.smf);
+    expect(smf.features).toHaveLength(headings.length);
+    for (const [i, feature] of smf.features.entries()) {
+      expect(feature.rotation, `heading ${headings[i]} is outside short range`).toBeGreaterThanOrEqual(
+        -32768,
+      );
+      expect(feature.rotation).toBeLessThanOrEqual(32767);
+      // And it is still the same facing, to within one unit of rounding.
+      const back = (((feature.rotation / 65536) * 360) % 360 + 360) % 360;
+      const want = ((headings[i] % 360) + 360) % 360;
+      expect(Math.abs(back - want) % 360).toBeLessThan(0.02);
     }
   });
 });

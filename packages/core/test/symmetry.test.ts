@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { createField, fieldRange, type Field } from '../src/field.js';
 import { Rng } from '../src/random.js';
+import { fractalNoise2D, resolveNoiseParams } from '../src/noise.js';
 import {
   PLACEMENT_MERGE_TOLERANCE,
   SYMMETRY_KINDS,
@@ -643,5 +644,89 @@ describe('degenerate and hostile input', () => {
         expect(symmetryError(out, kind).maxError, `${kind} ${mode}`).toBe(0);
       }
     }
+  });
+});
+
+describe('the seam a copy leaves', () => {
+  const N = 129;
+
+  /** Rolling noise, so the two halves genuinely disagree. */
+  const noisy = (): Field => {
+    const f = createField(N, N);
+    const params = resolveNoiseParams({ type: 'perlin', fractal: 'fbm', octaves: 5, frequency: 3, seed: 4 });
+    for (let z = 0; z < N; z++) {
+      for (let x = 0; x < N; x++) f.data[z * N + x] = fractalNoise2D(x / N, z / N, params) * 400;
+    }
+    return f;
+  };
+
+  /** The worst mean step between two neighbouring rows, which a seam dominates. */
+  const worstRowStep = (f: Field): number => {
+    let worst = 0;
+    for (let z = 1; z < f.height; z++) {
+      let sum = 0;
+      for (let x = 0; x < f.width; x++) {
+        sum += Math.abs(f.data[z * f.width + x] - f.data[(z - 1) * f.width + x]);
+      }
+      worst = Math.max(worst, sum / f.width);
+    }
+    return worst;
+  };
+
+  it('closes it without giving up any symmetry', () => {
+    // A hard copy makes the map stop being itself at the boundary of the master
+    // sector and start being a rotated copy of somewhere else, and the two do
+    // not join: the step across that line is several times anything else on the
+    // map. Feathering weights the orbit instead of choosing from it, and the
+    // weights depend only on the orbit as a set — which every member agrees on,
+    // so the result is still exact.
+    const field = noisy();
+    const natural = worstRowStep(field);
+    const hard = enforceSymmetry(field, 'rotate180');
+    const soft = enforceSymmetry(field, 'rotate180', { feather: 8 });
+
+    // The seam stands out from the map's own roughness, and feathering takes it
+    // back down to it. How far it stands out depends on the grid — the seam is
+    // a fixed step while a neighbouring step shrinks as the grid refines — so
+    // the assertion is that it is there and that it goes, not a fixed ratio.
+    expect(worstRowStep(hard)).toBeGreaterThan(natural * 1.8);
+    expect(worstRowStep(soft)).toBeLessThanOrEqual(natural * 1.05);
+    expect(worstRowStep(hard)).toBeGreaterThan(worstRowStep(soft) * 1.7);
+
+    for (const result of [hard, soft]) {
+      expect(symmetryError(result, 'rotate180').rmse).toBe(0);
+    }
+  });
+
+  it('is the hard copy at zero, and never changes the other modes', () => {
+    const field = noisy();
+    const hard = enforceSymmetry(field, 'rotate180');
+    expect(Array.from(enforceSymmetry(field, 'rotate180', { feather: 0 }).data)).toEqual(
+      Array.from(hard.data),
+    );
+    // `average`, `max` and `min` read the whole orbit at every sample already,
+    // so they have no seam and the option must not perturb them.
+    for (const mode of ['average', 'max', 'min'] as const) {
+      const plain = enforceSymmetry(field, 'rotate180', { mode });
+      const feathered = enforceSymmetry(field, 'rotate180', { mode, feather: 16 });
+      expect(Array.from(feathered.data), mode).toEqual(Array.from(plain.data));
+    }
+  });
+
+  it('honours the master sector it was given', () => {
+    // Feathering still leans toward the master half, or it would be `average`
+    // under another name.
+    const field = noisy();
+    const first = enforceSymmetry(field, 'rotate180', { feather: 4, sourceSector: 'first' });
+    const last = enforceSymmetry(field, 'rotate180', { feather: 4, sourceSector: 'last' });
+    expect(Array.from(first.data)).not.toEqual(Array.from(last.data));
+    // A sample well inside the master half is nearly its own value.
+    const i = 8 * N + 64;
+    expect(Math.abs(first.data[i] - field.data[i])).toBeLessThan(1);
+    expect(Math.abs(last.data[i] - field.data[i])).toBeGreaterThan(1);
+  });
+
+  it('refuses a negative blend rather than producing NaN', () => {
+    expect(() => enforceSymmetry(noisy(), 'rotate180', { feather: -1 })).toThrow(/non-negative/);
   });
 });

@@ -141,7 +141,14 @@ export const ROLLING_HILLS: Template = {
     // of them has 454 elmos of relief instead of 770, is drivable on 99.8% of
     // its area and floods 0% instead of a tenth — the uniformly gentle terrain
     // this template exists not to be.
-    g.node('fair', 'gameplay.symmetry', { kind: 'rotate180' }, 1340, 300);
+    // The seam blend is 256 rather than the node's 128 because this map's hills
+    // are its widest feature: the two halves meet across 800-elmo landforms, so
+    // they need more room to agree. Measured at the engine grid, the step
+    // between the rows either side of the centre line goes 127 elmos at 0, 16.5
+    // at 64, 8.7 at 128 and 4.9 at 256, against a typical neighbouring step of
+    // 1.4 — so 256 is where the seam stops being findable. It costs three elmos
+    // of the map's 770 and nothing at all of the base pad.
+    g.node('fair', 'gameplay.symmetry', { kind: 'rotate180', feather: 256 }, 1340, 300);
     g.node('out', 'output.height', {
       autoRange: false,
       minHeight: -220,

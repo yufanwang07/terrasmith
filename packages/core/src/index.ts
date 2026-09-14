@@ -18,6 +18,7 @@ export * from './materials.js';
 export * from './texturing.js';
 export * from './symmetry.js';
 export * from './shapes.js';
+export * from './features.js';
 export * from './parallel/index.js';
 export * from './io/index.js';
 export * from './bar/index.js';

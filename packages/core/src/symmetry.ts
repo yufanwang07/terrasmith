@@ -575,6 +575,29 @@ export interface EnforceSymmetryOptions {
   strength?: number;
   /** See {@link SymmetryTransformOptions.period}; only the glide kinds use it. */
   period?: { x: number; z: number };
+  /**
+   * Width of the crossfade between orbit members, in **samples**, for `source`
+   * mode only. 0 is the hard copy.
+   *
+   * A hard copy leaves a seam. Taking one member of every orbit means that at
+   * the boundary of the master sector the map stops being itself and becomes a
+   * rotated copy of somewhere else, and the two do not meet: on a shipped
+   * rolling-hills the step between the two rows either side of the centre line
+   * averaged 127 elmos against a typical 1.5, which is a cliff across the whole
+   * map and held essentially every impassable cell it had.
+   *
+   * Feathering weights the orbit rather than choosing from it, with a softmax
+   * over each member's row so the first member still dominates away from the
+   * boundary and the members blend where they meet. The result is *exactly*
+   * symmetric either way: the weights depend only on the orbit as a set, which
+   * every member of it agrees on.
+   *
+   * Measured in samples because it is applied to a grid; a caller that thinks
+   * in elmos divides by its cell size. 8 samples is about a 64-elmo blend at
+   * the SMF's own resolution, which closes the seam without softening anything
+   * a player would notice.
+   */
+  feather?: number;
   /** Optional destination, for a graph that reuses buffers. Must not alias the input. */
   out?: Field;
 }
@@ -610,7 +633,16 @@ export function enforceSymmetry(
     return result;
   }
 
-  const mode = options.mode ?? 'source';
+  const rawFeather = options.feather ?? 0;
+  if (!Number.isFinite(rawFeather) || rawFeather < 0) {
+    throw new Error(`symmetry feather must be a non-negative number of samples, got ${rawFeather}`);
+  }
+  const feather = rawFeather;
+  // Only `source` has a seam to close; the other modes are already continuous
+  // wherever the field is, because they read the whole orbit at every sample.
+  const mode = feather > 0 && (options.mode ?? 'source') === 'source'
+    ? ('feathered' as const)
+    : options.mode ?? 'source';
   const takeLast = options.sourceSector === 'last';
   const rawStrength = options.strength ?? 1;
   if (!Number.isFinite(rawStrength)) {
@@ -630,6 +662,27 @@ export function enforceSymmetry(
           let sum = 0;
           for (let i = 0; i < n; i++) sum += orbit.v[i];
           v = sum / n;
+          break;
+        }
+        case 'feathered': {
+          // Softmax over each member's row, lowest wins. `- best` before the
+          // exponential is the usual guard: the rows are grid indices, so on a
+          // large map the raw exponent underflows to zero for every member and
+          // the weights come out NaN.
+          let best = Infinity;
+          for (let i = 0; i < n; i++) {
+            const key = takeLast ? -orbit.z[i] : orbit.z[i];
+            if (key < best) best = key;
+          }
+          let sum = 0;
+          let total = 0;
+          for (let i = 0; i < n; i++) {
+            const key = takeLast ? -orbit.z[i] : orbit.z[i];
+            const w = Math.exp(-(key - best) / feather);
+            sum += w * orbit.v[i];
+            total += w;
+          }
+          v = sum / total;
           break;
         }
         case 'max': {

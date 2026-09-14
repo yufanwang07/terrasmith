@@ -379,6 +379,7 @@ interface SymmetryParams {
   kind: string;
   mode: string;
   sourceSector: string;
+  feather: number;
   strength: number;
   period: number;
 }
@@ -494,6 +495,20 @@ export const symmetryNode: NodeDefinition<SymmetryParams> = {
       ],
       { tier: 'advanced', visibleWhen: (p) => p.mode === 'source' },
     ),
+    elmos('feather', 'Seam blend', 128, {
+      min: 0,
+      max: 1024,
+      softMax: 256,
+      tier: 'advanced',
+      visibleWhen: (p) => p.mode === 'source',
+      description:
+        'Copying one half onto the other leaves a seam where they meet: the map stops being itself and ' +
+        'becomes a copy of somewhere else, and the two do not join. On a gentle map that step measured 127 ' +
+        'elmos over one square — a cliff across the whole map, holding nearly every impassable cell it had. ' +
+        'This blends the two halves across the join. The result stays exactly symmetric either way; 0 is the ' +
+        'hard copy. 128 elmos takes that 127-elmo step down to 9 and costs three elmos of relief; widen it ' +
+        'if the map\'s features are large enough that the halves still meet visibly.',
+    }),
     num('strength', 'Strength', 1, {
       min: 0,
       max: 1,
@@ -530,9 +545,14 @@ export const symmetryNode: NodeDefinition<SymmetryParams> = {
 
     // Measured on the input: after the fix there is nothing left to report.
     const deviation = symmetryErrorField(terrain, kind, { period });
+    // The blend is authored in elmos and applied to a grid, so it converts
+    // here — a seam is the same width on the map whatever resolution the graph
+    // is being evaluated at.
+    const cellSize = ctx.worldWidth / Math.max(1, terrain.width - 1);
     const result = enforceSymmetry(terrain, kind, {
       mode: params.mode as SymmetryBlend,
       sourceSector: params.sourceSector === 'last' ? 'last' : 'first',
+      feather: Math.max(0, params.feather) / cellSize,
       strength: params.strength,
       period,
     });

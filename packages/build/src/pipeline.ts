@@ -446,12 +446,30 @@ function collectFeatures(
       y: sampleHeightAt(heightfield, placed.x, placed.z, plan),
       z: placed.z,
       // The engine reads rotation as a 16-bit angle stored in a float, where a
-      // full turn is 65536.
-      rotation: (placed.rotation / 360) * 65536,
+      // full turn is 65536 — and then C-casts that float to a `short`, which is
+      // undefined behaviour for anything outside -32768..32767. A heading of
+      // 200 degrees is 36409, so half of every possible facing was landing in
+      // that hole. Wrapped into the signed half-turn first, which is the same
+      // angle and is representable.
+      rotation: headingUnits(placed.rotation),
       relativeSize: 1,
     });
   }
   return { featureTypes, features };
+}
+
+/**
+ * A heading in degrees as the engine's 65536-per-turn units, in `short` range.
+ *
+ * `FeatureHandler.cpp` casts the stored float straight to a `short`, so the
+ * value has to be one a `short` can hold. Wrapping is exact: the units are
+ * modular, so -29127 and 36409 are the same facing.
+ */
+function headingUnits(degrees: number): number {
+  if (!Number.isFinite(degrees)) return 0;
+  const turns = degrees / 360;
+  const wrapped = turns - Math.round(turns);
+  return Math.round(wrapped * 65536);
 }
 
 function sampleHeightAt(field: Field, x: number, z: number, plan: BuildPlan): number {

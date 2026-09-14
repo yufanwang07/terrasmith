@@ -9,8 +9,8 @@
  * the same feature seen from two sides.
  */
 
-import { useMemo } from 'react';
-import { BAR_EXTRACTOR_RADIUS, symmetryImages } from '@terrasmith/core';
+import { useMemo, useState } from 'react';
+import { BAR_EXTRACTOR_RADIUS, scatterTrees, symmetryImages } from '@terrasmith/core';
 import {
   mapDimensionsOf,
   type MetalSpot,
@@ -84,9 +84,16 @@ interface Props {
   onMode(mode: PlacementMode): void;
   selected: string | null;
   onSelect(id: string | null): void;
+  /**
+   * The terrain the preview is showing, if there is one. Planting reads it, so
+   * the button is disabled until a preview has arrived rather than planting a
+   * forest on a map that does not exist yet.
+   */
+  terrain?: { width: number; height: number; data: Float32Array } | null;
 }
 
-export function MapObjectsPanel({ mode, onMode, selected, onSelect }: Props) {
+export function MapObjectsPanel({ mode, onMode, selected, onSelect, terrain }: Props) {
+  const [spacing, setSpacing] = useState(140);
   const project = useEditor((s) => s.project);
   const setMetalSpots = useEditor((s) => s.setMetalSpots);
   const setStartPositions = useEditor((s) => s.setStartPositions);
@@ -138,6 +145,38 @@ export function MapObjectsPanel({ mode, onMode, selected, onSelect }: Props) {
     setStartPositions(project.startPositions.filter((s) => s.id !== selected));
     setFeatures(project.features.filter((f) => f.id !== selected));
     onSelect(null);
+  };
+
+  const trees = project.features.filter((f) => f.name !== GEO_VENT).length;
+
+  const plantTrees = () => {
+    if (!terrain) return;
+    // Nothing within a lab's reach of a start, and nothing on a metal spot: a
+    // tree there is one the player has to shoot before they can build, which is
+    // a bad first thirty seconds rather than an interesting decision.
+    const exclusions = [
+      ...project.startPositions.map((p) => ({ x: p.x, z: p.z, radius: 400 })),
+      ...project.metalSpots.map((p) => ({ x: p.x, z: p.z, radius: 120 })),
+    ];
+    const planted = scatterTrees(terrain, {
+      worldWidth: dims.worldWidth,
+      worldHeight: dims.worldHeight,
+      spacing,
+      symmetry: project.settings.symmetry,
+      seed: project.settings.seed,
+      exclusions,
+    });
+    setFeatures([
+      // Vents are placed by hand and survive a replant; trees do not.
+      ...project.features.filter((f) => f.name === GEO_VENT),
+      ...planted.map((t) => ({
+        id: nextId('tree'),
+        name: t.name,
+        x: Math.round(t.x),
+        z: Math.round(t.z),
+        rotation: t.rotation,
+      })),
+    ]);
   };
 
   const selectedSpot = project.metalSpots.find((s) => s.id === selected);
@@ -198,6 +237,49 @@ export function MapObjectsPanel({ mode, onMode, selected, onSelect }: Props) {
             Adds one spot per player, placed by the map&rsquo;s symmetry so every side gets the same
             thing in the same place. A geothermal vent is a fixed second income that does not need a
             metal spot, so a map usually has a handful in contested places.
+          </div>
+        </div>
+
+        <div className="inspector-section">
+          <div className="inspector-title">Trees</div>
+          <p className="inspector-desc">
+            A map with no trees on it plays as an open field. Trees block line of sight and burn, so
+            a tree line is what turns one approach into two.
+          </p>
+          <div className="field">
+            <div className="field-label">
+              <span>Spacing</span>
+              <span className="field-value">{spacing} elmos</span>
+            </div>
+            <input
+              type="range"
+              min={50}
+              max={300}
+              step={10}
+              value={spacing}
+              onChange={(e) => setSpacing(Number(e.target.value))}
+            />
+            <div className="field-help">
+              How far apart, on average. 60 is thick enough that a tank drives round rather than
+              through; 250 is scattered cover.
+            </div>
+          </div>
+          <div className="row" style={{ gap: 6, flexWrap: 'wrap' }}>
+            <button className="btn" disabled={!terrain} onClick={plantTrees}>
+              Plant trees
+            </button>
+            <button
+              className="btn"
+              disabled={trees === 0}
+              onClick={() => setFeatures(project.features.filter((f) => f.name === GEO_VENT))}
+            >
+              Clear {trees > 0 ? `${trees.toLocaleString()} trees` : 'trees'}
+            </button>
+          </div>
+          <div className="field-help">
+            Planted only on ground that is above water and under 24 degrees, mirrored by the
+            map&rsquo;s symmetry, and kept clear of start positions and metal spots. Replaces whatever
+            was planted before; geothermal vents are left alone.
           </div>
         </div>
 

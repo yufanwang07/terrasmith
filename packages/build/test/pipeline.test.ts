@@ -577,11 +577,17 @@ describe('features', () => {
     expect(smf.features[0].rotation).toBe(0);
     expect(smf.features[1].rotation).toBe((90 / 360) * 65536);
     expect(smf.features[1].rotation).toBe(16384);
-    // Three quarters of a turn is 49152, which wraps to -16384 once the engine
-    // casts it to a short. That is the same heading, which is why writing the
-    // unwrapped value is safe.
-    expect(smf.features[2].rotation).toBe(49152);
-    expect(new Int16Array([smf.features[2].rotation])[0]).toBe(-16384);
+
+    // Three quarters of a turn is 49152 unwrapped, and that is not a value a
+    // short holds. This used to write it anyway, on the reasoning that the
+    // engine's cast wraps it back to the same heading — which is true of an
+    // integer conversion and not of this one: `static_cast<short>` of a float
+    // outside the destination's range is undefined, and on x86 the SSE
+    // conversion yields the integer indefinite value, so the feature comes out
+    // facing zero rather than facing three quarters round. It is wrapped into
+    // the signed half turn before it is written.
+    expect(smf.features[2].rotation).toBe(-16384);
+    expect(((smf.features[2].rotation / 65536) * 360 + 360) % 360).toBeCloseTo(270, 6);
   });
 
   it('samples the ground height under each feature, on the right axis', () => {
