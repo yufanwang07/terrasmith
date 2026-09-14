@@ -134,9 +134,36 @@ export function encodeBlock(
   }
 
   // --- Dominant eigenvector by power iteration ---
-  let ax = cxx + cxy + cxz;
-  let ay = cxy + cyy + cyz;
-  let az = cxz + cyz + czz;
+  //
+  // Seeded with the longest row of the covariance rather than with `C * 1`.
+  // `C * 1` is zero for any block whose colours vary only at right angles to
+  // (1,1,1) — a red/green split at equal luminance is the everyday case — and
+  // the obvious fallback of (1,1,1) is the very vector the product just showed
+  // to be in the null space, so the iteration stays there, both endpoints land
+  // on the same pixel, and the block encodes flat. A row of `C` can never be:
+  // `C * row_i = 0` would need `row_i . row_i = 0`, and the longest row is not
+  // the zero row unless the whole block is one colour, which is handled above.
+  // On a magenta/green checker with the bounding-box pass turned off this is
+  // the difference between a squared error of 7520 and one of 280.
+  const n0 = cxx * cxx + cxy * cxy + cxz * cxz;
+  const n1 = cxy * cxy + cyy * cyy + cyz * cyz;
+  const n2 = cxz * cxz + cyz * cyz + czz * czz;
+  let ax: number;
+  let ay: number;
+  let az: number;
+  if (n0 >= n1 && n0 >= n2) {
+    ax = cxx;
+    ay = cxy;
+    az = cxz;
+  } else if (n1 >= n2) {
+    ax = cxy;
+    ay = cyy;
+    az = cyz;
+  } else {
+    ax = cxz;
+    ay = cyz;
+    az = czz;
+  }
   if (ax * ax + ay * ay + az * az < 1e-9) {
     ax = 1;
     ay = 1;

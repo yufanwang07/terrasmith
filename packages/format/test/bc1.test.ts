@@ -120,3 +120,66 @@ describe('BC1 decoder', () => {
     expect(rgba[15]).toBe(0);
   });
 });
+
+describe('the principal-axis seed', () => {
+  /** A 4x4 block from a list of RGB triples, opaque. */
+  const block = (colors: readonly (readonly [number, number, number])[]): Uint8Array => {
+    const data = new Uint8Array(64);
+    for (let i = 0; i < 16; i++) {
+      const c = colors[i % colors.length];
+      data[i * 4] = c[0];
+      data[i * 4 + 1] = c[1];
+      data[i * 4 + 2] = c[2];
+      data[i * 4 + 3] = 255;
+    }
+    return data;
+  };
+
+  const squaredError = (source: Uint8Array, decoded: Uint8Array): number => {
+    let total = 0;
+    for (let i = 0; i < 16; i++) {
+      for (let c = 0; c < 3; c++) {
+        const d = decoded[i * 4 + c] - source[i * 4 + c];
+        total += d * d;
+      }
+    }
+    return total;
+  };
+
+  it('fits a block whose colours are orthogonal to the grey axis', () => {
+    // The iteration used to be seeded with `C * (1,1,1)`, which is exactly zero
+    // here — the two colours differ along (+d, -d, 0) — and the fallback was
+    // (1,1,1) again, so the axis never moved, both endpoints landed on the same
+    // pixel and the block came back flat.
+    const source = block([
+      [138, 118, 128],
+      [118, 138, 128],
+    ]);
+    const decoded = decodeBc1(encodeBc1(source, 4, 4, { tryBoundingBox: false }), 4, 4);
+
+    const first = [decoded[0], decoded[1], decoded[2]].join();
+    const second = [decoded[4], decoded[5], decoded[6]].join();
+    expect(first, 'the two colours collapsed into one').not.toBe(second);
+    // 7520 was the flat result; a real fit is an order of magnitude better.
+    expect(squaredError(source, decoded)).toBeLessThan(1000);
+  });
+
+  it('still fits an ordinary two-colour block', () => {
+    const source = block([
+      [200, 180, 160],
+      [60, 70, 80],
+    ]);
+    const decoded = decodeBc1(encodeBc1(source, 4, 4, { tryBoundingBox: false }), 4, 4);
+
+    // Measured against what the block would cost if the encoder gave up and
+    // painted its mean, which is the failure the seed fix is guarding against.
+    // An absolute figure here would only pin 5-6-5 quantisation noise.
+    const mean = new Uint8Array(64);
+    for (let c = 0; c < 3; c++) {
+      let sum = 0;
+      for (let i = 0; i < 16; i++) sum += source[i * 4 + c];
+      for (let i = 0; i < 16; i++) mean[i * 4 + c] = Math.round(sum / 16);
+    }
+    expect(squaredError(source, decoded)).toBeLessThan(squaredError(source, mean) / 20);
+  });
+});
