@@ -262,7 +262,11 @@ export function runStripTask(task: StripTask): StripResult {
         const src = (ty * 32 + row) * stride + tx * 32 * 4;
         scratch.set(rgba.subarray(src, src + 128), row * 128);
       }
-      tiles.set(compressTile(scratch), at);
+      // A draft skips the encoder's second endpoint attempt. It costs about a
+      // quarter of the encode for a small quality win on blocks with outliers,
+      // and a build whose colour is already a stretched half-resolution shade
+      // has nothing to gain from it.
+      tiles.set(compressTile(scratch, { tryBoundingBox: scale === 1 }), at);
       at += SMALL_TILE_SIZE;
     }
   }
