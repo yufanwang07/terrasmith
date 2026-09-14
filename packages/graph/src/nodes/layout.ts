@@ -486,7 +486,7 @@ interface MaskParams {
 
 export const layoutMaskNode: NodeDefinition<MaskParams> = {
   type: 'layout.mask',
-  label: 'Layout Mask',
+  label: 'Layout mask',
   category: 'layout',
   description:
     'Turns the shapes of a layout into a mask: 1 inside them, 0 outside, with a soft edge in between. ' +
@@ -553,7 +553,7 @@ interface DistanceParams {
  */
 export const layoutDistanceNode: NodeDefinition<DistanceParams> = {
   type: 'layout.distance',
-  label: 'Layout Distance',
+  label: 'Distance to layout',
   category: 'layout',
   description:
     'Measures how far every point on the map is from the nearest shape, in elmos, counting distances ' +
@@ -635,7 +635,7 @@ interface FlattenParams {
  */
 export const layoutFlattenNode: NodeDefinition<FlattenParams> = {
   type: 'layout.flatten',
-  label: 'Flatten To Shape',
+  label: 'Flatten to shape',
   category: 'layout',
   description:
     'Levels the terrain inside each shape of a layout, blending smoothly back into the ground around ' +
@@ -1188,7 +1188,7 @@ interface RadialParams {
  */
 export const layoutRadialNode: NodeDefinition<RadialParams> = {
   type: 'layout.radial',
-  label: 'Radial Layout',
+  label: 'Radial layout',
   category: 'layout',
   description:
     'Builds a layout automatically: a number of points, pads or spokes arranged around the middle of ' +

@@ -10,12 +10,15 @@ you that the ramp you just cut is 31 degrees, so vehicles cannot use it but bots
 main base is 80 elmos across and a bot lab needs 96; that the metal blob you painted is 190 elmos wide and
 no single extractor can capture it.
 
-<!--
-  SCREENSHOT GOES HERE.
-  Drop a PNG at docs/images/studio.png (editor window, terrain viewport with the
-  "who can go here" overlay on, node graph visible) and replace this comment with:
-  ![The Terrasmith editor](docs/images/studio.png)
--->
+**[Open the editor](https://yufanwang07.github.io/terrasmith/)** — it runs entirely in the browser, builds
+the archive client-side, and needs no account.
+
+![The Terrasmith editor, showing a map with the passability overlay on](docs/images/studio-overlay.jpg)
+
+*Above: the viewport with "who can go here" on — green is passable by the selected unit class, red is not.
+Below: the same map's node graph.*
+
+![The node graph for the same map](docs/images/studio-graph.jpg)
 
 ## Why this exists
 
@@ -58,7 +61,7 @@ another heightmap exporter.
 Requires Node 22.12 or newer.
 
 ```bash
-git clone https://github.com/<your-fork>/terrasmith
+git clone https://github.com/yufanwang07/terrasmith
 cd terrasmith
 npm install
 npm run build
@@ -131,7 +134,7 @@ every layer runs in a browser tab, in a worker, in Node and in CI.
   (which is a height-difference test, not a slope test), a faithful port of BAR's metal spot finder, and a
   validator that checks size, height range, slope bands, reachability, start positions, build pads, metal,
   water and symmetry.
-- **The node graph.** 37 node types across generators, filters, combiners, selectors, natural processes,
+- **The node graph.** 50 node types across generators, layout, filters, combiners, selectors, natural processes, gameplay,
   outputs and utilities, with a pull-based evaluator memoised on content hashes. The CLI's `nodes` command
   prints the live list; [docs/NODES.md](docs/NODES.md) is the written reference.
 - **Seven templates** that are complete, buildable maps rather than empty graphs.
