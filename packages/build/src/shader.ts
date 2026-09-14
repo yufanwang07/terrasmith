@@ -10,6 +10,8 @@
  */
 
 import {
+  DEFAULT_HILLSHADE_STRENGTH,
+  DEFAULT_OCCLUSION_STRENGTH,
   createColorField,
   fractalNoise2D,
   generateSatmap,
@@ -51,8 +53,8 @@ export function createPaletteShader(options: PaletteShaderOptions): BlockShader 
     cellSize: 1,
     waterLevel: options.waterLevel ?? 0,
     lighting: {
-      occlusionStrength: options.occlusionStrength ?? 0.55,
-      hillshadeStrength: options.shadingStrength ?? 0.12,
+      occlusionStrength: options.occlusionStrength ?? DEFAULT_OCCLUSION_STRENGTH,
+      hillshadeStrength: options.shadingStrength ?? DEFAULT_HILLSHADE_STRENGTH,
     },
   };
 

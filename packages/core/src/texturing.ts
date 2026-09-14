@@ -42,8 +42,9 @@ import {
   type WrapMode,
 } from './field.js';
 import {
-  evaluateBand,
-  evaluateInfluence,
+  bandWeight,
+  compileRule,
+  influenceWeight,
   sampleGradientInto,
   type Gradient,
   type MaterialPalette,
@@ -68,11 +69,41 @@ export function srgbToLinear(v: number): number {
   return v <= 0.04045 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
 }
 
+/**
+ * The sRGB transfer curve, sampled uniformly in linear light.
+ *
+ * `Math.pow(v, 1 / 2.4)` is one of the more expensive things V8 will do and the
+ * satmap asks for it three times per texel — 200 million calls on a 16x16 map,
+ * a tenth of the whole bake. The curve has no parameters, so it can be tabulated
+ * once and interpolated.
+ *
+ * 16384 samples put the worst interpolation error at 9e-4 of one 8-bit step:
+ * a texel lands on a different byte only if its true value sits within a
+ * thousandth of a rounding boundary, and the colour is then quantised to
+ * 5-6-5 bits by the BC1 encoder regardless. {@link linearToSrgbByte} in the
+ * format package is exact where the result is a byte to begin with.
+ */
+const SRGB_CURVE_SAMPLES = 16384;
+const SRGB_CURVE = buildSrgbCurve();
+
+function buildSrgbCurve(): Float32Array {
+  const table = new Float32Array(SRGB_CURVE_SAMPLES + 1);
+  for (let i = 0; i <= SRGB_CURVE_SAMPLES; i++) {
+    const v = i / SRGB_CURVE_SAMPLES;
+    table[i] = v <= 0.0031308 ? v * 12.92 : 1.055 * Math.pow(v, 1 / 2.4) - 0.055;
+  }
+  return table;
+}
+
 /** Linear light back to an sRGB component. */
 export function linearToSrgb(v: number): number {
-  if (v <= 0) return 0;
+  if (!(v > 0)) return 0;
   if (v >= 1) return 1;
-  return v <= 0.0031308 ? v * 12.92 : 1.055 * Math.pow(v, 1 / 2.4) - 0.055;
+  const x = v * SRGB_CURVE_SAMPLES;
+  const i = x | 0;
+  const t = x - i;
+  const lo = SRGB_CURVE[i];
+  return lo + (SRGB_CURVE[i + 1] - lo) * t;
 }
 
 // --- Inputs ----------------------------------------------------------------
@@ -628,39 +659,47 @@ function weightsOf(
   const exclusion = Math.max(options.exclusion ?? 1, 0);
   const out = palette.map(() => createField(width, height));
 
+  // Hoisted out of the texel loop: the channels' backing arrays, and the rule
+  // itself compiled to plain numbers. Reaching through `resolved.flow.data[i]`
+  // and resolving `band.blendMin ?? band.blend ?? 0` inside a loop that runs
+  // sixty-seven million times per layer was a third of the whole bake, and none
+  // of it depends on the texel.
+  const heightData = resolved.height.data;
+  const slopeData = resolved.slopeDegrees.data;
+  const flowData = resolved.flow.data;
+  const depositionData = resolved.deposition.data;
+  const wearData = resolved.wear.data;
+  const curvatureData = resolved.curvature.data;
+  const wetnessData = resolved.wetness.data;
+  const occlusionData = resolved.occlusion.data;
+
   for (let layer = 0; layer < palette.length; layer++) {
-    const { rule } = palette[layer];
     const data = out[layer].data;
     const scale = base[layer];
+    const rule = compileRule(palette[layer].rule);
+    const { height: rHeight, slope: rSlope, flow: rFlow, deposition: rDeposition } = rule;
+    const { wear: rWear, curvature: rCurvature, wetness: rWetness, occlusion: rOcclusion } = rule;
+    const plain = exclusion === 1;
+
     for (let i = 0; i < n; i++) {
       // `c` is the product of the rule's conditions, always in 0..1. Exclusion
       // shapes it; `scale` (priority x rule weight) multiplies afterwards.
       let c = 1;
-      if (rule.height !== undefined) c = evaluateBand(resolved.height.data[i], rule.height);
-      if (c > 0 && rule.slope !== undefined) {
-        c *= evaluateBand(resolved.slopeDegrees.data[i], rule.slope);
-      }
-      if (c > 0 && rule.flow !== undefined) c *= evaluateInfluence(resolved.flow.data[i], rule.flow);
-      if (c > 0 && rule.deposition !== undefined) {
-        c *= evaluateInfluence(resolved.deposition.data[i], rule.deposition);
-      }
-      if (c > 0 && rule.wear !== undefined) c *= evaluateInfluence(resolved.wear.data[i], rule.wear);
-      if (c > 0 && rule.curvature !== undefined) {
-        c *= evaluateInfluence(resolved.curvature.data[i], rule.curvature);
-      }
-      if (c > 0 && rule.wetness !== undefined) {
-        c *= evaluateInfluence(resolved.wetness.data[i], rule.wetness);
-      }
-      if (c > 0 && rule.occlusion !== undefined) {
-        c *= evaluateInfluence(resolved.occlusion.data[i], rule.occlusion);
-      }
+      if (rHeight !== null) c = bandWeight(heightData[i], rHeight);
+      if (c > 0 && rSlope !== null) c *= bandWeight(slopeData[i], rSlope);
+      if (c > 0 && rFlow !== null) c *= influenceWeight(flowData[i], rFlow);
+      if (c > 0 && rDeposition !== null) c *= influenceWeight(depositionData[i], rDeposition);
+      if (c > 0 && rWear !== null) c *= influenceWeight(wearData[i], rWear);
+      if (c > 0 && rCurvature !== null) c *= influenceWeight(curvatureData[i], rCurvature);
+      if (c > 0 && rWetness !== null) c *= influenceWeight(wetnessData[i], rWetness);
+      if (c > 0 && rOcclusion !== null) c *= influenceWeight(occlusionData[i], rOcclusion);
       // The explicit zero short-circuit matters: `Math.pow(0, 0)` is 1, so an
       // exclusion of 0 would otherwise turn every excluded material back on.
       // Written as `c > 0` rather than `c <= 0` so a NaN texel — one NaN in the
       // heightfield is enough — resolves to no material rather than to a NaN
       // weight, which survives normalisation, comes out of `linearToSrgb` as
       // NaN, and is written to the PNG as a black pixel with nothing to say why.
-      data[i] = c > 0 ? (exclusion === 1 ? c : Math.pow(c, exclusion)) * scale : 0;
+      data[i] = c > 0 ? (plain ? c : Math.pow(c, exclusion)) * scale : 0;
     }
   }
 
@@ -770,6 +809,15 @@ export function dominantMaterial(weights: readonly Field[]): Field {
  * layer's, and it has no sun on it to win any of it back.
  */
 export const DEFAULT_OCCLUSION_STRENGTH = 0.35;
+
+/**
+ * How far the baked directional hillshade may darken a texel.
+ *
+ * Small on purpose. The engine lights the terrain itself from `mapinfo.lua`'s
+ * sun, so anything baked in is a second shadow that does not move: enough to
+ * keep a slope readable on the minimap, not enough to fight the real one.
+ */
+export const DEFAULT_HILLSHADE_STRENGTH = 0.12;
 
 export interface LightingOptions {
   /**
@@ -943,7 +991,7 @@ function bakeShading(
   options: TexturingOptions,
 ): Float32Array {
   const aoStrength = clamp01(lighting.occlusionStrength ?? DEFAULT_OCCLUSION_STRENGTH);
-  const hsStrength = clamp01(lighting.hillshadeStrength ?? 0.12);
+  const hsStrength = clamp01(lighting.hillshadeStrength ?? DEFAULT_HILLSHADE_STRENGTH);
   const n = height.width * height.height;
   const out = new Float32Array(n);
   out.fill(1);

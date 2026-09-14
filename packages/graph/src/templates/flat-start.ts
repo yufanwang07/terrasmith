@@ -52,13 +52,21 @@ export const FLAT_START: Template = {
 
     // Dry by default. A learning map with a lake in it invites the question
     // "why is that there", which is not the lesson. Raise this and watch the
-    // low ground flood.
+    // low ground flood. At zero it still does a job: it shifts the terrain so
+    // the lowest point lands exactly on height 0, which is where BAR's water
+    // surface is, so the map sits on the waterline rather than above or below
+    // it by whatever the noise happened to produce.
     g.node('sea', 'filter.seaLevel', { mode: 'coverage', coverage: 0 }, 560, 180);
 
+    // Nothing here goes below 0 and the smoothing leaves about 120 elmos of
+    // relief, so this is that plus a little headroom for whoever turns the
+    // height up. The engine spreads 65536 steps across whatever is declared
+    // here, and on a map this gentle a range padded far past the terrain is the
+    // difference between smooth ground and visible contour lines.
     g.node('out', 'output.height', {
       autoRange: false,
-      minHeight: -40,
-      maxHeight: 200,
+      minHeight: -20,
+      maxHeight: 160,
     }, 800, 180);
 
     return g.link('noise', 'smooth').link('smooth', 'sea').link('sea', 'out').done();

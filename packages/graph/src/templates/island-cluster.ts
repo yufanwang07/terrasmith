@@ -80,16 +80,23 @@ export const ISLAND_CLUSTER: Template = {
     // island a beach to come ashore on instead of a wall.
     g.node('sea', 'filter.seaLevel', { mode: 'coverage', coverage: 0.64 }, 740, 240);
 
-    // One node doing two jobs. The ceiling flattens the island tops into tables
-    // with room for a factory; the floor stops the deep water eating the height
-    // range, which matters because the engine quantises the whole map into
-    // 65536 steps between the declared limits, and range spent on empty sea bed
-    // shows up as terracing on gentle land.
+    // The ceiling is what this node is for: it flattens the island tops into
+    // tables with room for a factory, easing into the limit over 60 elmos so
+    // they read as worn platforms rather than as cut cake. The floor is a guard
+    // and nothing more — the sea bed here bottoms out near -150, well above the
+    // -170 where the soft clamp would start pulling it up, so on this seed the
+    // floor never fires. Lower the sea bed's offset and it will.
     g.node('shape', 'filter.clamp', { min: -230, max: 160, softness: 60 }, 960, 240);
+
+    // The terrain runs about -150..160. The engine cuts the map into 65536
+    // steps across whatever is declared here, so a range padded out to the
+    // clamp limits rather than to the terrain spends a third of them on water
+    // that does not exist, and that shows as terracing on the island skirts —
+    // the gentlest and most visible ground on the map.
     g.node('out', 'output.height', {
       autoRange: false,
-      minHeight: -260,
-      maxHeight: 210,
+      minHeight: -180,
+      maxHeight: 190,
     }, 1180, 240);
 
     return g

@@ -7,6 +7,7 @@
  * rewiring anything: every generator already works in world coordinates.
  */
 
+import { DEFAULT_HILLSHADE_STRENGTH, DEFAULT_OCCLUSION_STRENGTH } from '@terrasmith/core';
 import type { Graph } from './types.js';
 
 /** Current on-disk format version. Bump only for changes a migration must handle. */
@@ -202,8 +203,8 @@ export function createProject(overrides: Partial<Project> = {}): Project {
     },
     texture: {
       palette: 'temperate',
-      bakedOcclusion: 0.6,
-      bakedShading: 0.25,
+      bakedOcclusion: DEFAULT_OCCLUSION_STRENGTH,
+      bakedShading: DEFAULT_HILLSHADE_STRENGTH,
       grain: 0.15,
       markSlopeBands: true,
       ...overrides.texture,

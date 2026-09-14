@@ -6,7 +6,18 @@
  * map. So the assertions here are the properties a BAR map has to have to load
  * and to be worth playing: it evaluates, it has exactly one heightfield, the
  * water line is where the graph says it is, there is somewhere flat to put a
- * factory, and the preview predicts the build.
+ * factory, an army can get from one end of it to the other, and the preview
+ * predicts the build.
+ *
+ * Every movement and buildability number is taken from `@terrasmith/core`'s BAR
+ * layer rather than recomputed here, and taken at the resolution the engine
+ * actually uses. That matters more than it sounds. A central-difference slope
+ * over an arbitrary preview grid is not the engine's slope map — the engine
+ * blends towards the *steepest* of the eight triangles in each 16-elmo cell
+ * (`RE:rts/Map/ReadMap.cpp:742-780`), so a gradient reads flat exactly where a
+ * cliff top reads steep — and a home-made "largest flat area" that measures the
+ * area of a connected blob happily reports a winding one-cell ribbon as a
+ * 900-elmo base pad. Both mistakes report a map as playable that is not.
  *
  * The thresholds come from `docs/research/bar-gameplay.md` §4 and §12: 27
  * degrees stops vehicles, 54 stops bots, water sits at height 0, and a base
@@ -14,7 +25,20 @@
  */
 
 import { beforeAll, describe, expect, it } from 'vitest';
-import { fieldRange, resampleField, slopeDegreesField, type Field } from '@terrasmith/core';
+import {
+  BUILDINGS,
+  SLOPE_CELL_ELMOS,
+  engineSlopeMap,
+  fieldRange,
+  largestFlatPad,
+  moveDef,
+  passabilityMask,
+  reachableRegions,
+  resampleField,
+  slopeMapToDegrees,
+  type Field,
+  type RegionMap,
+} from '@terrasmith/core';
 import {
   Evaluator,
   TEMPLATES,
@@ -37,17 +61,45 @@ const PALETTES = new Set([
   'mars-red',
 ]);
 
-/**
- * `maxHeightDif` for a factory: `40 * tan(15°)`, the rule immobile units are
- * tested against (`RE:rts/Sim/Units/UnitDef.cpp:423-427`). A pad is buildable
- * when every square under the footprint is within this of the platform height,
- * so the full spread across the footprint may be twice it.
- */
-const LAB_HEIGHT_DIF = 40 * Math.tan((15 * Math.PI) / 180);
-/** Bot lab footprint: 6x6 build squares, and build squares are 16 elmos. */
-const LAB_FOOTPRINT_ELMOS = 96;
 /** §4.4: a main base wants a contiguous pad about this wide. */
 const BASE_PAD_ELMOS = 400;
+
+/**
+ * How much of the map each class has to be able to reach in one piece.
+ *
+ * A per-template table rather than one number, because "enough" is a different
+ * quantity on a naval map and on a flat one. The values sit roughly a fifth
+ * below what the templates currently manage, so retuning has room and a
+ * template that goes back to being cut in half fails loudly.
+ *
+ * The history these guard against is specific. Every terraced or belt-shaped
+ * template here once had *no* vehicle route across its barrier at all: the
+ * ramps and passes looked right in a render and measured 40 degrees, which bots
+ * walk and vehicles never do. Highland basin was two separate vehicle maps, rim
+ * and basin; mountain range was two foothills with a wall between them;
+ * volcanic shelf was a thousand disconnected pockets, the largest of them a
+ * twenty-fifth of the map.
+ */
+interface Reach {
+  /** Largest connected vehicle-passable region, as a fraction of the map. */
+  vehicle: number;
+  /** Same for bots. */
+  bot: number;
+}
+
+const REACH: Readonly<Record<string, Reach>> = {
+  'rolling-hills': { vehicle: 0.7, bot: 0.85 },
+  'mountain-range': { vehicle: 0.5, bot: 0.85 },
+  // Naval: the largest vehicle region is the largest island, and that is the
+  // point of the map rather than a defect in it.
+  'island-cluster': { vehicle: 0.3, bot: 0.32 },
+  'canyon-lanes': { vehicle: 0.32, bot: 0.8 },
+  'highland-basin': { vehicle: 0.8, bot: 0.9 },
+  'flat-start': { vehicle: 0.95, bot: 0.95 },
+  // The deliberately hostile one. Vehicles hold shelf systems rather than the
+  // map, but they have to hold something bigger than a car park.
+  'volcanic-shelf': { vehicle: 0.18, bot: 0.6 },
+};
 
 const registry = createDefaultRegistry();
 
@@ -56,6 +108,24 @@ function contextFor(template: Template, resolution: number): EvalContext {
   return {
     width: aspect >= 1 ? resolution : Math.round(resolution * aspect),
     height: aspect >= 1 ? Math.round(resolution / aspect) : resolution,
+    worldWidth: template.sizeX * 512,
+    worldHeight: template.sizeZ * 512,
+    seed: 1,
+    quality: 'final',
+  };
+}
+
+/**
+ * The grid the exporter actually writes: SMF stores a corner heightmap of
+ * `(mapx + 1) x (mapy + 1)` samples eight elmos apart, and every BAR rule in
+ * `@terrasmith/core/bar` is written against that shape. Judging movement on a
+ * 384-wide preview instead means reading slopes over 21-elmo cells, which
+ * smooths away exactly the walls the rules are about.
+ */
+function engineContextFor(template: Template): EvalContext {
+  return {
+    width: template.sizeX * 64 + 1,
+    height: template.sizeZ * 64 + 1,
     worldWidth: template.sizeX * 512,
     worldHeight: template.sizeZ * 512,
     seed: 1,
@@ -84,94 +154,44 @@ function meanHeight(field: Field): number {
   return sum / field.data.length;
 }
 
-/**
- * The side, in elmos, of the largest square-equivalent patch of dry ground flat
- * enough to build a factory on.
- *
- * A sample counts when the tallest and shortest points within a lab footprint
- * around it differ by no more than `2 * maxHeightDif`, which is the engine's
- * per-square test applied to the worst pair in the window. Then the largest
- * 4-connected run of such samples is reported as the side of a square of the
- * same area, because "a 400x400 pad" is how the design rules are written.
- */
-function largestBuildablePad(field: Field, cellSize: number): number {
-  const { width, height, data } = field;
-  const half = Math.max(1, Math.round(LAB_FOOTPRINT_ELMOS / cellSize / 2));
+/** What a move class can reach, and how much of the map it is. */
+interface Movement {
+  /** Cells the class can stand on, as a fraction of the map. */
+  passable: number;
+  /** The biggest single region of those, as a fraction of the map. */
+  largest: number;
+  regions: RegionMap;
+}
 
-  // Separable sliding window: horizontal pass, then vertical, so the cost does
-  // not grow with the square of the window.
-  const rowMin = new Float32Array(width * height);
-  const rowMax = new Float32Array(width * height);
-  for (let y = 0; y < height; y++) {
-    for (let x = 0; x < width; x++) {
-      let lo = Infinity;
-      let hi = -Infinity;
-      for (let k = -half; k <= half; k++) {
-        const v = data[y * width + Math.min(width - 1, Math.max(0, x + k))];
-        if (v < lo) lo = v;
-        if (v > hi) hi = v;
-      }
-      rowMin[y * width + x] = lo;
-      rowMax[y * width + x] = hi;
-    }
-  }
-
-  const ok = new Uint8Array(width * height);
-  for (let y = 0; y < height; y++) {
-    for (let x = 0; x < width; x++) {
-      let lo = Infinity;
-      let hi = -Infinity;
-      for (let k = -half; k <= half; k++) {
-        const row = Math.min(height - 1, Math.max(0, y + k)) * width;
-        if (rowMin[row + x] < lo) lo = rowMin[row + x];
-        if (rowMax[row + x] > hi) hi = rowMax[row + x];
-      }
-      // Dry as well as flat: a level patch of sea bed is not a base.
-      ok[y * width + x] = hi - lo <= 2 * LAB_HEIGHT_DIF && data[y * width + x] >= 0 ? 1 : 0;
-    }
-  }
-
-  // Largest 4-connected component, flood filled with an explicit stack so a
-  // map-sized region cannot blow the call stack.
-  const seen = new Uint8Array(ok.length);
-  const stack = new Int32Array(ok.length);
-  let best = 0;
-  for (let start = 0; start < ok.length; start++) {
-    if (!ok[start] || seen[start]) continue;
-    let top = 0;
-    stack[top++] = start;
-    seen[start] = 1;
-    let size = 0;
-    while (top > 0) {
-      const i = stack[--top];
-      size++;
-      const x = i % width;
-      const y = (i / width) | 0;
-      if (x > 0 && ok[i - 1] && !seen[i - 1]) { seen[i - 1] = 1; stack[top++] = i - 1; }
-      if (x < width - 1 && ok[i + 1] && !seen[i + 1]) { seen[i + 1] = 1; stack[top++] = i + 1; }
-      if (y > 0 && ok[i - width] && !seen[i - width]) { seen[i - width] = 1; stack[top++] = i - width; }
-      if (y < height - 1 && ok[i + width] && !seen[i + width]) { seen[i + width] = 1; stack[top++] = i + width; }
-    }
-    if (size > best) best = size;
-  }
-  return Math.sqrt(best) * cellSize;
+function movementOf(slopeMap: Field, height: Field, moveDefId: string): Movement {
+  const mask = passabilityMask(slopeMap, height, moveDef(moveDefId));
+  const regions = reachableRegions(mask);
+  const cells = mask.data.length;
+  let passable = 0;
+  for (let i = 0; i < cells; i++) passable += mask.data[i];
+  const biggest = regions.regions[regions.largestRegionId];
+  return {
+    passable: passable / cells,
+    largest: biggest ? biggest.cellCount / cells : 0,
+    regions,
+  };
 }
 
 /** Share of the map in each of the four bands a BAR player can read off the ground. */
-function slopeBands(field: Field, cellSize: number) {
-  const slope = slopeDegreesField(field, { cellSize });
+function slopeBands(slopeMap: Field) {
+  const degrees = slopeMapToDegrees(slopeMap);
   let vehicle = 0;
   let hover = 0;
   let bot = 0;
   let impassable = 0;
-  for (let i = 0; i < slope.data.length; i++) {
-    const s = slope.data[i];
+  for (let i = 0; i < degrees.data.length; i++) {
+    const s = degrees.data[i];
     if (s <= 27) vehicle++;
     else if (s <= 33) hover++;
     else if (s <= 54) bot++;
     else impassable++;
   }
-  const n = slope.data.length;
+  const n = degrees.data.length;
   return {
     vehicle: vehicle / n,
     hover: hover / n,
@@ -193,6 +213,15 @@ describe('the shipped templates', () => {
     expect(water.length).toBeGreaterThanOrEqual(2);
     expect(new Set(TEMPLATES.map((t) => t.palette)).size).toBeGreaterThanOrEqual(5);
   });
+
+  it('each declare how much of the map an army has to be able to reach', () => {
+    // The table below is the only place a template's playability is written
+    // down, so a new template that forgets to add itself should fail here
+    // rather than silently ship untested.
+    for (const template of TEMPLATES) {
+      expect(REACH[template.id], `${template.id} has no entry in REACH`).toBeDefined();
+    }
+  });
 });
 
 describe.each(TEMPLATES.map((t) => [t.id, t] as const))('%s', (_id, template) => {
@@ -201,12 +230,21 @@ describe.each(TEMPLATES.map((t) => [t.id, t] as const))('%s', (_id, template) =>
   let graph: Graph;
   let previewField: Field;
   let buildField: Field;
+  /** The heightfield at the exact grid the .smf carries. */
+  let engineField: Field;
+  let slopeMap: Field;
+  let vehicles: Movement;
+  let bots: Movement;
 
   beforeAll(async () => {
     graph = template.build();
     previewField = await heightOf(graph, preview);
     buildField = await heightOf(graph, build);
-  }, 120_000);
+    engineField = await heightOf(graph, engineContextFor(template));
+    slopeMap = engineSlopeMap(engineField, template.sizeX * 64, template.sizeZ * 64);
+    vehicles = movementOf(slopeMap, engineField, 'TANK3');
+    bots = movementOf(slopeMap, engineField, 'BOT3');
+  }, 180_000);
 
   it('describes itself in terms someone can choose from', () => {
     expect(template.name.length).toBeGreaterThan(2);
@@ -267,26 +305,69 @@ describe.each(TEMPLATES.map((t) => [t.id, t] as const))('%s', (_id, template) =>
     expect(underwaterFraction(buildField)).toBeCloseTo(declared, 1);
   });
 
-  it('keeps its height range inside what the output node declares', () => {
+  it('declares a height range that fits the terrain and does not waste it', () => {
     const out = graph.nodes.find((n) => n.type === 'output.height')!;
     if (out.params.autoRange !== false) return;
+    const low = out.params.minHeight as number;
+    const high = out.params.maxHeight as number;
+    const range = fieldRange(engineField);
     // Declaring a range the terrain does not fit inside is BAR mapping mistake
-    // number three: the engine quantises the map into 65536 steps across it,
-    // and anything outside is clipped flat.
-    const range = fieldRange(buildField);
-    expect(range.min).toBeGreaterThanOrEqual(out.params.minHeight as number);
-    expect(range.max).toBeLessThanOrEqual(out.params.maxHeight as number);
+    // number three: anything outside it is clipped flat on export.
+    expect(range.min).toBeGreaterThanOrEqual(low);
+    expect(range.max).toBeLessThanOrEqual(high);
+    // And mistake number four is declaring one far wider than the terrain. The
+    // engine cuts the map into 65536 steps across whatever is written here, so
+    // padding the range throws away vertical resolution for nothing, and it
+    // shows first on the gentle ground a base sits on. Sixty per cent leaves
+    // room for real headroom and still catches a range that is mostly air.
+    expect((range.max - range.min) / (high - low)).toBeGreaterThan(0.6);
   });
 
-  it('has somewhere to put a factory', () => {
+  it('has somewhere to put a factory, and it is somewhere an army can reach', () => {
     // The single most common fatal flaw in a first BAR map: beautiful terrain
-    // with no 96x96 pad anywhere near a start position.
-    const cellSize = build.worldWidth / build.width;
-    expect(largestBuildablePad(buildField, cellSize)).toBeGreaterThan(BASE_PAD_ELMOS);
+    // with no 96x96 pad anywhere near a start position. `largestFlatPad` is the
+    // core BAR rule — a genuine square whose height spread fits a lab — not the
+    // area of a connected blob, which a winding ribbon of flat ground passes.
+    const pads = largestFlatPad(engineField, {
+      building: 'lab',
+      maxSizeElmos: 1024,
+      count: 4,
+      // A level patch of sea bed is not a base.
+      maxWaterDepth: 0,
+    });
+    expect(pads.length).toBeGreaterThan(0);
+    expect(pads[0].sizeElmos).toBeGreaterThanOrEqual(BASE_PAD_ELMOS);
+    expect(pads[0].spread).toBeLessThanOrEqual(2 * BUILDINGS.lab.maxHeightDif);
+
+    // A pad nothing can drive to is a helipad. At least one of the best sites
+    // has to sit inside the region vehicles actually occupy.
+    const inMainRegion = pads.some((pad) => {
+      const cx = Math.floor(pad.x / SLOPE_CELL_ELMOS);
+      const cz = Math.floor(pad.z / SLOPE_CELL_ELMOS);
+      return vehicles.regions.labels[cz * slopeMap.width + cx] === vehicles.regions.largestRegionId;
+    });
+    expect(inMainRegion, 'none of the four best base sites is in the main vehicle region').toBe(
+      true,
+    );
+  });
+
+  it('lets an army cross it in one piece', () => {
+    // The test the first version of these templates did not have, and the one
+    // that would have caught every serious defect in them. Passable area says
+    // nothing on its own: a terraced map is passable nearly everywhere and can
+    // still be a stack of rings no unit can move between.
+    const expected = REACH[template.id];
+    expect(vehicles.largest).toBeGreaterThanOrEqual(expected.vehicle);
+    expect(bots.largest).toBeGreaterThanOrEqual(expected.bot);
+
+    // And the drivable ground must not be confetti: most of what a vehicle can
+    // stand on has to be joined to the main region, or the map is a set of
+    // islands whether or not there is water between them.
+    expect(vehicles.largest / Math.max(vehicles.passable, 1e-9)).toBeGreaterThan(0.4);
   });
 
   it('leaves most of the land where an army can go', () => {
-    const bands = slopeBands(buildField, build.worldWidth / build.width);
+    const bands = slopeBands(slopeMap);
     // Even the deliberately hostile maps have to be mostly traversable by
     // something: past roughly a third impassable the map is scenery with a
     // path through it.
@@ -315,4 +396,23 @@ describe.each(TEMPLATES.map((t) => [t.id, t] as const))('%s', (_id, template) =>
     }
     expect(sum / coarse.data.length / span).toBeLessThan(0.06);
   });
+
+  it('draws the same terrain in preview quality as in build quality', async () => {
+    // The other half of that promise, and the half that is easy to break by
+    // accident. The erosion solvers pick their own simulation grid from the
+    // world distance they are given, and that grid is capped lower for a
+    // preview than for a build (`nodes/simulate.ts`). A talus or valley scale
+    // that asks for a finer grid than the preview cap therefore silently gets
+    // two different simulations, and every cliff in the editor moves when the
+    // map is exported. Keeping the requested grid under the preview cap is a
+    // template's job, not the solver's.
+    const quick = await heightOf(graph, { ...build, quality: 'preview' });
+    const span = fieldRange(buildField).max - fieldRange(buildField).min;
+    let worst = 0;
+    for (let i = 0; i < quick.data.length; i++) {
+      const d = Math.abs(quick.data[i] - buildField.data[i]);
+      if (d > worst) worst = d;
+    }
+    expect(worst / span).toBeLessThan(0.005);
+  }, 120_000);
 });

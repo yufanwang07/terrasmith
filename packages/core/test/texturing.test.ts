@@ -225,7 +225,25 @@ describe('generateSatmap', () => {
       lighting: false,
       fallbackColor: [0.25, 0.5, 0.75],
     });
-    expect(texelRgb(map, 0, 0)).toEqual([0.25, 0.5, 0.75]);
+    // Not exact equality: the sRGB transfer curve is tabulated rather than
+    // evaluated, so a colour that goes out to linear light and back comes home
+    // within a thousandth of one 8-bit step rather than bit for bit.
+    const texel = texelRgb(map, 0, 0);
+    for (const [i, expected] of [0.25, 0.5, 0.75].entries()) {
+      expect(texel[i]).toBeCloseTo(expected, 5);
+    }
+  });
+
+  it('round-trips an authored colour to well inside a quantisation step', () => {
+    // What the tabulated curve costs, stated as a number. One 8-bit step is
+    // 1/255; the whole point is that the error stays orders of magnitude under
+    // it, so no exported byte can move by more than the odd boundary case.
+    let worst = 0;
+    for (let i = 0; i <= 2000; i++) {
+      const c = i / 2000;
+      worst = Math.max(worst, Math.abs(linearToSrgb(srgbToLinear(c)) - c));
+    }
+    expect(worst).toBeLessThan(0.01 / 255);
   });
 
   it('writes opaque texels inside 0..1 for every shipped palette', () => {

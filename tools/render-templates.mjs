@@ -98,7 +98,9 @@ for (const template of templates) {
       }),
     },
     palette,
-    { cellSize, waterLevel: 0, lighting: { occlusionStrength: 0.55, hillshadeStrength: 0.12 } },
+    // No lighting overrides: the contact sheet has to show what a default
+    // build produces, not a darker setting nobody ships.
+    { cellSize, waterLevel: 0 },
   );
 
   // A separate, stronger hillshade for the relief view: the baked texture only

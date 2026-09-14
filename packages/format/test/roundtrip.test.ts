@@ -28,9 +28,11 @@ import {
   decodeTile,
   encodeBc1,
   encodeLzma1,
+  linearToSrgbByte,
   readDds,
   readSmf,
   readSmt,
+  srgbByteToLinear,
   writeDds,
   writeSmf,
   MINIMAP_SIZE,
@@ -804,5 +806,43 @@ describe('LZMA encode then decode', () => {
     // The range coder's overhead on incompressible input is a fraction of a
     // percent; anything more means a modelling bug.
     expect(encodeLzma1(noise).packed.length).toBeLessThan(noise.length * 1.02);
+  });
+});
+
+describe('the sRGB transfer curve', () => {
+  /** The definition, straight from IEC 61966-2-1, with no table in sight. */
+  const exactByte = (v: number): number => {
+    const c = v <= 0.0031308 ? v * 12.92 : 1.055 * Math.pow(v, 1 / 2.4) - 0.055;
+    const b = Math.round(c * 255);
+    return b < 0 ? 0 : b > 255 ? 255 : b;
+  };
+
+  it('matches the definition exactly across the range', () => {
+    // The table alone is only accurate to a fraction of a byte; what makes the
+    // result exact is the correction against the byte edges. A sweep fine
+    // enough to land near every one of the 255 boundaries is the only way to
+    // see that the correction is right in both directions.
+    let mismatches = 0;
+    for (let i = 0; i <= 400_000; i++) {
+      const v = i / 400_000;
+      if (linearToSrgbByte(v) !== exactByte(v)) mismatches++;
+    }
+    expect(mismatches).toBe(0);
+  });
+
+  it('lands exactly on every byte boundary from the other direction', () => {
+    // Round-trip: every byte, turned into linear and back, must come home.
+    for (let b = 0; b < 256; b++) {
+      expect(linearToSrgbByte(srgbByteToLinear(b))).toBe(b);
+    }
+  });
+
+  it('pins the ends and the linear segment', () => {
+    expect(linearToSrgbByte(0)).toBe(0);
+    expect(linearToSrgbByte(1)).toBe(255);
+    expect(linearToSrgbByte(-1)).toBe(0);
+    expect(linearToSrgbByte(2)).toBe(255);
+    // NaN is not a colour; 0 is what a Uint8Array store would have made of it.
+    expect(linearToSrgbByte(NaN)).toBe(0);
   });
 });

@@ -12,6 +12,14 @@
  * middle can only be reached by air is not a map. So a handful of stretches of
  * the rim are smoothed back into long slopes — those are the ramps, and where
  * they are is the most important thing on this map.
+ *
+ * The ramps are the part worth measuring rather than eyeballing. A 565-elmo
+ * drop needs about 1 100 elmos of run to come inside the 27 degrees that stops
+ * a vehicle, and a Gaussian smooth spreads a step over roughly two sigma, so
+ * the radius has to be near 1 900 elmos before a tank can use the result. At
+ * the 800-elmo radius that looks right in a render the ramps come out around
+ * 40 degrees: bots walk down them, vehicles never do, and the whole middle of
+ * the map is closed to the unit class most players open with.
  */
 
 import { GraphBuilder, type Template } from './shared.js';
@@ -22,8 +30,8 @@ export const HIGHLAND_BASIN: Template = {
   tagline: 'High ground all round an open middle',
   description:
     'Bases on raised ground around the edge, looking down into a flat basin nobody starts in. The rim ' +
-    'is too steep to drive down except at the ramps, so expanding into the middle means holding one, ' +
-    'which is what makes big team games on this shape work.',
+    'is too steep to drive down except at the two or three ramps, so expanding into the middle means ' +
+    'holding one, which is what makes big team games on this shape work.',
   sizeX: 20,
   sizeZ: 20,
   symmetry: 'rotate180',
@@ -89,24 +97,40 @@ export const HIGHLAND_BASIN: Template = {
     g.node('land', 'combiner.combine', { mode: 'add', factor: 1 }, 720, 300);
 
     // The ramps. Selecting the high parts of the same noise that bent the rim
-    // marks four or five stretches of it, and smoothing hard through that mask
-    // pulls the cliff there out into a slope about 1 800 elmos long — a grade
-    // of roughly 17 degrees, comfortably inside the 27 that stops vehicles.
-    // Everywhere else the cliff is left alone.
-    g.node('passes', 'selector.height', { low: 85, high: 2000, falloff: 50, soften: 160 }, 720, 520);
-    g.node('ramps', 'filter.smooth', { radius: 820, strength: 1 }, 940, 380);
+    // marks a few stretches of it, and smoothing through that mask pulls the
+    // cliff there out into a slope a vehicle can take. Everywhere else the
+    // cliff is left alone.
+    //
+    // Both numbers here were measured rather than guessed. The radius sets the
+    // grade — 1 900 elmos puts the steepest part of the ramp around 22 degrees,
+    // 820 puts it near 40, which is bots only. The threshold sets how many
+    // ramps there are: at 85 the mask crosses the rim in one place, at 60 in
+    // two or three, and past about 150 it never crosses it and the basin is
+    // sealed off from everything but air.
+    g.node('passes', 'selector.height', { low: 60, high: 2000, falloff: 50, soften: 160 }, 720, 520);
+    g.node('ramps', 'filter.smooth', { radius: 1900, strength: 1 }, 940, 380);
 
-    // Scree at the foot of the rim, and the guarantee that its faces sit at one
-    // angle rather than wherever the terrace happened to leave them.
-    g.node('slump', 'natural.thermal', { angle: 58, amount: 1 }, 1140, 380);
+    // Scree at the foot of the rim, and a ceiling of 58 degrees on the cliff
+    // faces rather than wherever the terrace happened to leave them.
+    //
+    // The amount is set from the map size, not from taste. Talus travels
+    // `amount * 400` elmos, and the solver picks its grid from that distance;
+    // below about `mapWidth / 6400` the grid it wants is finer than the preview
+    // is allowed to run, so the preview and the build disagree along every
+    // cliff. On a 10 240-elmo map that floor is 1.6.
+    g.node('slump', 'natural.thermal', { angle: 58, amount: 1.6 }, 1140, 380);
 
     // A lake in the lowest part of the basin: something to see from the rim,
     // and a reason to want one side of the middle rather than the other.
     g.node('sea', 'filter.seaLevel', { mode: 'coverage', coverage: 0.06 }, 1340, 380);
+    // The terrain runs about -45..625. A range much wider than the terrain
+    // wastes the 65536 quantisation steps the engine spreads across it, and on
+    // a map whose selling point is two large flat surfaces that shows up as
+    // terracing on ground that should read as level.
     g.node('out', 'output.height', {
       autoRange: false,
-      minHeight: -110,
-      maxHeight: 700,
+      minHeight: -80,
+      maxHeight: 660,
     }, 1540, 380);
 
     return g

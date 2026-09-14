@@ -21,11 +21,56 @@ for (let i = 0; i < 256; i++) {
   SRGB_TO_LINEAR[i] = c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
 }
 
-/** Convert a linear [0,1] value back to an sRGB byte. */
+/**
+ * Where each output byte begins, in linear light.
+ *
+ * `BYTE_EDGE[b]` is the smallest linear value that rounds to byte `b`, so a
+ * candidate byte can be checked and corrected with two comparisons. Mip
+ * generation calls this once per channel per texel of every level, and the
+ * `Math.pow` it replaces is the single most expensive operation in the chain.
+ */
+const BYTE_EDGE = new Float64Array(256);
+for (let b = 1; b < 256; b++) {
+  // Invert the transfer curve at the midpoint between b-1 and b.
+  const c = (b - 0.5) / 255;
+  BYTE_EDGE[b] = c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+}
+
+/**
+ * The curve itself, sampled uniformly in linear light and interpolated.
+ *
+ * Only ever accurate to within a fraction of a byte — which is why the result
+ * is corrected against {@link BYTE_EDGE} rather than trusted.
+ */
+const SRGB_CURVE_SAMPLES = 4096;
+const SRGB_CURVE = new Float32Array(SRGB_CURVE_SAMPLES + 1);
+for (let i = 0; i <= SRGB_CURVE_SAMPLES; i++) {
+  const v = i / SRGB_CURVE_SAMPLES;
+  SRGB_CURVE[i] = v <= 0.0031308 ? v * 12.92 : 1.055 * Math.pow(v, 1 / 2.4) - 0.055;
+}
+
+/**
+ * Convert a linear [0,1] value back to an sRGB byte.
+ *
+ * Exact: the table gives a byte that is at most one out, and the two
+ * comparisons against the byte edges settle which side of the boundary the
+ * value is really on.
+ *
+ * A NaN comes back as 0 rather than as NaN. The old arithmetic returned NaN,
+ * which a `Uint8Array` store silently turned into 0 anyway; saying so is better
+ * than relying on it.
+ */
 export function linearToSrgbByte(v: number): number {
-  const c = v <= 0.0031308 ? v * 12.92 : 1.055 * Math.pow(v, 1 / 2.4) - 0.055;
-  const b = Math.round(c * 255);
-  return b < 0 ? 0 : b > 255 ? 255 : b;
+  if (!(v > 0)) return 0;
+  if (v >= 1) return 255;
+  const x = v * SRGB_CURVE_SAMPLES;
+  const i = x | 0;
+  const lo = SRGB_CURVE[i];
+  let b = ((lo + (SRGB_CURVE[i + 1] - lo) * (x - i)) * 255 + 0.5) | 0;
+  if (b > 255) b = 255;
+  if (b > 0 && v < BYTE_EDGE[b]) b--;
+  else if (b < 255 && v >= BYTE_EDGE[b + 1]) b++;
+  return b;
 }
 
 /** Convert an sRGB byte to linear [0,1]. */

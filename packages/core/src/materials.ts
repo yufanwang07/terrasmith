@@ -208,33 +208,135 @@ function smoothstep(edge0: number, edge1: number, x: number): number {
  * blanks the material, which is a miserable bug to find in an 8192² image.
  */
 export function evaluateBand(value: number, band: Band | undefined): number {
-  if (band === undefined) return 1;
-  const blend = Math.max(band.blend ?? 0, 0);
-  let w = 1;
-  if (band.min !== undefined) {
-    const half = Math.max(band.blendMin ?? blend, 0) * 0.5;
-    w = smoothstep(band.min - half, band.min + half, value);
-  }
-  if (w > 0 && band.max !== undefined) {
-    const half = Math.max(band.blendMax ?? blend, 0) * 0.5;
-    w *= 1 - smoothstep(band.max - half, band.max + half, value);
-  }
-  return w;
+  const compiled = compileBand(band);
+  return compiled === null ? 1 : bandWeight(value, compiled);
 }
 
 /** Multiplier a mask value applies to a material's weight, 0..1. */
 export function evaluateInfluence(value: number, influence: Influence | undefined): number {
-  if (influence === undefined) return 1;
+  const compiled = compileInfluence(influence);
+  return compiled === null ? 1 : influenceWeight(value, compiled);
+}
+
+// --- Compiled conditions ---------------------------------------------------
+
+/*
+ * A rule is authored as optional properties in whatever units suit it, and read
+ * back once per material per texel — 67 million times over an 8192 square
+ * diffuse, times a palette of eight, times eight channels. Resolving
+ * `band.blendMin ?? band.blend ?? 0` at each of those was a third of the whole
+ * bake: every read is an optional-property load off an object whose shape
+ * differs from layer to layer, and none of the arithmetic depends on the texel.
+ *
+ * So a rule is compiled once, into objects that are all the same shape and hold
+ * only numbers. The inner loop then does arithmetic and nothing else.
+ * {@link evaluateBand} and {@link evaluateInfluence} stay as they were for
+ * one-off callers and are defined in terms of the same pair of functions, so
+ * there is one description of what a condition means rather than two.
+ */
+
+/** A {@link Band} with its feather edges resolved. */
+export interface CompiledBand {
+  /** Lower feather: 0 below `minLo`, 1 above `minHi`. */
+  readonly minLo: number;
+  readonly minHi: number;
+  /** Upper feather: 1 below `maxLo`, 0 above `maxHi`. */
+  readonly maxLo: number;
+  readonly maxHi: number;
+  /** Set when the band has no edge on that side, which contributes 1. */
+  readonly noMin: boolean;
+  readonly noMax: boolean;
+}
+
+/** An {@link Influence} with its ramp and strength resolved. */
+export interface CompiledInfluence {
+  readonly from: number;
+  /** `1 / (to - from)`, or 0 when the two coincide and the ramp is a step. */
+  readonly invSpan: number;
+  readonly amount: number;
+  /** `1 - amount`: what the material keeps when the mask says no. */
+  readonly base: number;
+}
+
+/** Resolve a band's feathers. Returns null for "no condition", so callers skip it. */
+export function compileBand(band: Band | undefined): CompiledBand | null {
+  if (band === undefined) return null;
+  const blend = Math.max(band.blend ?? 0, 0);
+  const noMin = band.min === undefined;
+  const noMax = band.max === undefined;
+  if (noMin && noMax) return null;
+  const minHalf = Math.max(band.blendMin ?? blend, 0) * 0.5;
+  const maxHalf = Math.max(band.blendMax ?? blend, 0) * 0.5;
+  const min = band.min ?? 0;
+  const max = band.max ?? 0;
+  return {
+    minLo: min - minHalf,
+    minHi: min + minHalf,
+    maxLo: max - maxHalf,
+    maxHi: max + maxHalf,
+    noMin,
+    noMax,
+  };
+}
+
+/** Resolve an influence's ramp. Returns null for "no condition". */
+export function compileInfluence(influence: Influence | undefined): CompiledInfluence | null {
+  if (influence === undefined) return null;
   let amount = influence.amount ?? 1;
   if (amount < 0) amount = 0;
   else if (amount > 1) amount = 1;
-  const t =
-    influence.to === influence.from
-      ? value >= influence.from
-        ? 1
-        : 0
-      : smoothstep(0, 1, (value - influence.from) / (influence.to - influence.from));
-  return 1 - amount + amount * t;
+  const span = influence.to - influence.from;
+  return {
+    from: influence.from,
+    invSpan: span === 0 ? 0 : 1 / span,
+    amount,
+    base: 1 - amount,
+  };
+}
+
+/** Weight of a value inside a compiled band, 0..1. */
+export function bandWeight(value: number, band: CompiledBand): number {
+  let w = 1;
+  if (!band.noMin) w = smoothstep(band.minLo, band.minHi, value);
+  if (w > 0 && !band.noMax) w *= 1 - smoothstep(band.maxLo, band.maxHi, value);
+  return w;
+}
+
+/** Multiplier a mask value applies through a compiled influence, 0..1. */
+export function influenceWeight(value: number, influence: CompiledInfluence): number {
+  // A zero span is a hard step at `from`, the degenerate case the type
+  // documents. Written without smoothstep because there is no ramp to shape.
+  if (influence.invSpan === 0) return value >= influence.from ? 1 : influence.base;
+  let t = (value - influence.from) * influence.invSpan;
+  if (t < 0) t = 0;
+  else if (t > 1) t = 1;
+  return influence.base + influence.amount * t * t * (3 - 2 * t);
+}
+
+/** Every condition of one rule, compiled. A null field is a condition the rule omits. */
+export interface CompiledRule {
+  readonly height: CompiledBand | null;
+  readonly slope: CompiledBand | null;
+  readonly flow: CompiledInfluence | null;
+  readonly deposition: CompiledInfluence | null;
+  readonly wear: CompiledInfluence | null;
+  readonly curvature: CompiledInfluence | null;
+  readonly wetness: CompiledInfluence | null;
+  readonly occlusion: CompiledInfluence | null;
+}
+
+/** Compile a whole rule, once, before the texel loop. */
+export function compileRule(rule: MaterialRule): CompiledRule {
+  return {
+    height: compileBand(rule.height),
+    slope: compileBand(rule.slope),
+    flow: compileInfluence(rule.flow),
+    deposition: compileInfluence(rule.deposition),
+    wear: compileInfluence(rule.wear),
+    curvature: compileInfluence(rule.curvature),
+    wetness: compileInfluence(rule.wetness),
+    occlusion: compileInfluence(rule.occlusion),
+  };
 }
 
 // --- Gradients -------------------------------------------------------------
