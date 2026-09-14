@@ -294,6 +294,24 @@ textarea {
   background: var(--bg-0);
 }
 
+/*
+ * The two panes of the centre column.
+ *
+ * `flex: 1` is what makes a pane fill the column when it is the only one there.
+ * Without it a pane is a flex item with no basis, so it takes its content's
+ * height: the graph came out zero-high and showed nothing at all in Nodes view,
+ * and the viewport stopped short of the bottom of the window in Terrain view.
+ * Grid items ignore `flex`, so the split layout below is unaffected.
+ */
+.terrain-pane,
+.graph-wrap {
+  flex: 1;
+  min-height: 0;
+}
+.terrain-pane {
+  position: relative;
+}
+
 .center-split {
   display: grid;
   grid-template-rows: 1fr 6px minmax(120px, var(--graph-height, 340px));

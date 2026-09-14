@@ -263,7 +263,7 @@ function TerrainPane({
   const project = useEditor((s) => s.project);
 
   return (
-    <div style={{ position: 'relative', minHeight: 0 }}>
+    <div className="terrain-pane">
       <Viewport
         preview={preview}
         overlay={overlay}

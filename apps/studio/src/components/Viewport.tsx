@@ -231,6 +231,7 @@ function createViewport(mount: HTMLElement, handlers: ViewportHandlers): Viewpor
     renderer.setSize(width, height, false);
     camera.aspect = width / height;
     camera.updateProjectionMatrix();
+    orbit.refit();
   };
   const observer = new ResizeObserver(resize);
   observer.observe(mount);
@@ -409,6 +410,17 @@ class OrbitController {
   private target = new THREE.Vector3();
   private spherical = new THREE.Spherical(6000, Math.PI * 0.32, Math.PI * 0.25);
   private dragging: 'orbit' | 'pan' | null = null;
+  /**
+   * Whether the user has moved the camera since the last {@link frame}.
+   *
+   * Until they have, a change of viewport shape refits; after, it does not.
+   * Switching from the split layout to the graph-only one doubles the pane's
+   * height, and refitting a view someone had lined up deliberately is worse
+   * than leaving it slightly off.
+   */
+  private adjusted = false;
+  /** The map the last {@link frame} fitted, so a resize can refit the same one. */
+  private framed: { worldWidth: number; worldHeight: number; relief: number } | null = null;
   private lastX = 0;
   private lastY = 0;
   private readonly onPointerDown: (e: PointerEvent) => void;
@@ -435,6 +447,7 @@ class OrbitController {
       const dy = e.clientY - this.lastY;
       this.lastX = e.clientX;
       this.lastY = e.clientY;
+      this.adjusted = true;
       if (this.dragging === 'orbit') {
         this.spherical.theta -= dx * 0.005;
         this.spherical.phi -= dy * 0.005;
@@ -459,6 +472,7 @@ class OrbitController {
       e.preventDefault();
       // Multiplicative zoom: each notch changes the distance by a fixed
       // proportion, which feels the same whether you are 500 or 50000 elmos out.
+      this.adjusted = true;
       this.spherical.radius *= Math.exp(e.deltaY * 0.0012);
       this.spherical.radius = Math.max(80, Math.min(160000, this.spherical.radius));
     };
@@ -471,12 +485,48 @@ class OrbitController {
     element.addEventListener('contextmenu', this.onContextMenu);
   }
 
-  /** Point the camera at a map of the given extent. */
+  /**
+   * Point the camera at a map of the given extent, filling the viewport.
+   *
+   * The distance used to be a flat fraction of the map's longest side, which
+   * ignores the shape of the pane it is being drawn into: a wide pane wasted
+   * half its width and a narrow one cut the corners off. Working back from the
+   * camera's own field of view fits either.
+   */
   frame(worldWidth: number, worldHeight: number, relief: number): void {
     this.target.set(0, relief * 0.15, 0);
-    this.spherical.radius = Math.max(worldWidth, worldHeight) * 0.95;
     this.spherical.phi = Math.PI * 0.33;
     this.spherical.theta = Math.PI * 0.25;
+    this.framed = { worldWidth, worldHeight, relief };
+    this.adjusted = false;
+    this.fit();
+  }
+
+  /** Refit the framed map to the viewport, unless the user has moved the camera. */
+  refit(): void {
+    if (this.adjusted || this.framed === null) return;
+    this.fit();
+  }
+
+  private fit(): void {
+    const map = this.framed;
+    if (map === null) return;
+    const halfFovY = (this.camera.fov * Math.PI) / 360;
+    const halfFovX = Math.atan(Math.tan(halfFovY) * this.camera.aspect);
+    // Seen from an elevation angle rather than straight down, the map's depth
+    // foreshortens: only its `sin(elevation)` shows in the vertical direction,
+    // and its relief stands up in the same direction at full height.
+    const elevation = Math.PI / 2 - this.spherical.phi;
+    const spanY = map.worldHeight * Math.sin(elevation) + Math.max(0, map.relief);
+    const spanX = map.worldWidth;
+    // A tenth of margin, so the corners are not against the edge of the pane.
+    this.spherical.radius = Math.min(
+      160000,
+      Math.max(
+        80,
+        Math.max(spanY / (2 * Math.tan(halfFovY)), spanX / (2 * Math.tan(halfFovX))) * 1.1,
+      ),
+    );
   }
 
   update(): void {
