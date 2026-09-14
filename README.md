@@ -157,10 +157,13 @@ Being concrete about this is more useful than a roadmap.
   covered end to end by tests.
 - **Everything runs on the CPU.** The WebGPU acceleration the architecture describes does not exist. A
   full-resolution erosion pass on a 24x24 map is minutes, not seconds.
-- **Features are placed by hand, not generated.** Metal spots, start positions and geothermal vents are
-  placed in the viewport and read by the exporter, and `gameplay.metalSpots` will lay out a symmetric
-  metal map for you. Trees and rocks are in the project model and in the archive writer, but nothing
-  generates or edits them, so a map ships bare.
+- **Only trees are generated; rocks are not.** Metal spots, start positions and geothermal vents are
+  placed in the viewport, `gameplay.metalSpots` lays out a symmetric metal map, and the Objects panel
+  plants trees on the ground that could hold a wood — above water, under 24 degrees, mirrored by the
+  map's own symmetry and clear of the bases. Only the `TreeType0`..`TreeType15` the engine resolves on
+  its own, because a name from a game's content is dropped with an error when that game is not the one
+  running. Rocks and wreckage are exactly that kind of name, so a map that wants them still needs them
+  placed by hand against the game it is for.
 - **The terrain reads as terrain, not yet as a place.** The palettes and the templates have had a pass
   and `samples/renders/` is worth judging for yourself, but the ridged generator puts a quarter of a map
   in the bottom tenth of its range at the default sharpness — flat-floored valleys with ridges out of
