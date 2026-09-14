@@ -236,7 +236,7 @@ export function hydraulicErosionDroplet(
         // outflow — scour out into pits that no amount of parameter tuning
         // fixes.
         if (sediment > 0) {
-          depositBilinear(h, deposition.data, width, nodeX, nodeY, offsetX, offsetY, sediment);
+          depositBrush(h, deposition.data, brush, width, height, nodeX, nodeY, sediment);
           sediment = 0;
         }
         break;
@@ -288,9 +288,7 @@ export function hydraulicErosionDroplet(
         // Same reasoning as the out-of-bounds case: a droplet that dries up
         // leaves its load behind.
         if (sediment > 0) {
-          const nx = Math.floor(posX);
-          const ny = Math.floor(posY);
-          depositBilinear(h, deposition.data, width, nx, ny, posX - nx, posY - ny, sediment);
+          depositBrush(h, deposition.data, brush, width, height, Math.floor(posX), Math.floor(posY), sediment);
           sediment = 0;
         }
         break;
@@ -300,9 +298,7 @@ export function hydraulicErosionDroplet(
     // A droplet that simply ran out of lifetime still has to put down whatever
     // it was carrying.
     if (sediment > 0 && posX >= 1 && posX < width - 2 && posY >= 1 && posY < height - 2) {
-      const nx = Math.floor(posX);
-      const ny = Math.floor(posY);
-      depositBilinear(h, deposition.data, width, nx, ny, posX - nx, posY - ny, sediment);
+      depositBrush(h, deposition.data, brush, width, height, Math.floor(posX), Math.floor(posY), sediment);
     }
   }
 
@@ -333,6 +329,55 @@ function heightAndGradient(
     gradX: (ne - nw) * (1 - v) + (se - sw) * v,
     gradY: (sw - nw) * (1 - u) + (se - ne) * u,
   };
+}
+
+/**
+ * Put a droplet's whole remaining load down, spread over the erosion brush.
+ *
+ * The three places a droplet ends — off the edge, dried up, out of lifetime —
+ * hand over everything they are still carrying at once, and a full load is not
+ * a step's worth of deposition. Through a 2x2 bilinear that built a spike: on a
+ * gentle 26-elmo map, one cell took 16.8 elmos, most of the map's relief in a
+ * single sample. Through the same brush the erosion uses, it becomes a low
+ * mound of the width the erosion works at.
+ *
+ * The weights are renormalised over whatever falls inside the map, because the
+ * whole reason these deposits exist is that a droplet must not destroy what it
+ * is carrying; clipping part of the brush away and keeping the rest would put
+ * the loss straight back in at the edges.
+ */
+function depositBrush(
+  h: Float32Array,
+  dep: Float32Array,
+  brush: ErosionBrush,
+  width: number,
+  height: number,
+  nodeX: number,
+  nodeY: number,
+  amount: number,
+): void {
+  const cellIndex = nodeY * width + nodeX;
+  let inBounds = 0;
+  for (let i = 0; i < brush.offset.length; i++) {
+    const bx = nodeX + brush.dx[i];
+    const by = nodeY + brush.dy[i];
+    if (bx < 0 || by < 0 || bx >= width || by >= height) continue;
+    inBounds += brush.weight[i];
+  }
+  if (inBounds <= 0) {
+    // The centre itself is off the map; there is nowhere to put it.
+    return;
+  }
+  const scale = amount / inBounds;
+  for (let i = 0; i < brush.offset.length; i++) {
+    const bx = nodeX + brush.dx[i];
+    const by = nodeY + brush.dy[i];
+    if (bx < 0 || by < 0 || bx >= width || by >= height) continue;
+    const idx = cellIndex + brush.offset[i];
+    const give = brush.weight[i] * scale;
+    h[idx] += give;
+    dep[idx] += give;
+  }
 }
 
 function depositBilinear(
