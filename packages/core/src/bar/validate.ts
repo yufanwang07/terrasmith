@@ -420,6 +420,20 @@ export function checkSlopeBands(ctx: MapContext): MapIssue[] {
   return issues;
 }
 
+/**
+ * Share of a class's standable ground that has to be reachable in one piece
+ * before the map stops reading as crossable.
+ *
+ * Three quarters rather than a half: a map with a quarter of its drivable
+ * ground behind a wall is already one where a quarter of the expansions are
+ * decided by which side you spawned on. Below {@link SEVERED_SHARE} it is not a
+ * judgement call any more — the map is in halves.
+ */
+const CROSSABLE_SHARE = 0.75;
+
+/** How many individual cut-off regions per class are worth naming. */
+const MAX_POCKETS_REPORTED = 3;
+
 /** Pockets of terrain no unit of a given class can reach from a start position. */
 export function checkReachability(ctx: MapContext): MapIssue[] {
   const issues: MapIssue[] = [];
@@ -427,6 +441,7 @@ export function checkReachability(ctx: MapContext): MapIssue[] {
   const seeds = ctx.startPositions;
   // 400x400 elmos: the size of a base. Smaller pockets are scenery, not lost map.
   const significantArea = 400 * 400;
+
 
   for (const classId of classes) {
     const def = moveDef(classId);
@@ -464,7 +479,61 @@ export function checkReachability(ctx: MapContext): MapIssue[] {
       }
     }
 
-    for (const pocket of unreachablePockets(mask, { seeds, minAreaElmos: significantArea })) {
+    // Is the map crossable at all for this class?
+    //
+    // This is a different question from "is there an unreachable pocket", and
+    // it is the one that goes wrong when someone rerolls the seed: a pocket
+    // reads as a dead corner, while a map split down the middle is the map
+    // failing at what it is for, and both used to come out as the same warning
+    // about square elmos. So the share of the class's own standable ground that
+    // sits in one piece is reported directly.
+    //
+    // Land classes only. A naval map is *supposed* to be a scatter of islands,
+    // and telling its author their vehicles cannot cross the sea is noise.
+    let severed = false;
+    if (def.family !== 'ship' && def.family !== 'hover') {
+      const biggest = regions.regions[regions.largestRegionId];
+      const inOnePiece = biggest ? biggest.cellCount / passableCells : 0;
+      const others = regions.regions
+        .filter((r) => r.id !== regions.largestRegionId && r.areaElmos >= significantArea)
+        .sort((a, b) => b.areaElmos - a.areaElmos);
+      severed = inOnePiece < CROSSABLE_SHARE && others.length > 0;
+      if (severed) {
+        const totalArea = mask.data.length * SLOPE_CELL_ELMOS * SLOPE_CELL_ELMOS;
+        // A warning rather than an error however bad the number is, because
+        // whether a split matters is a question about where the players start
+        // and not about the terrain: `pathing.startsDisconnected` is the error,
+        // and it fires on the same map once there are start positions to check.
+        // Some maps are split on purpose — volcanic shelf exists to be — so the
+        // share goes in the title where it can be judged at a glance instead of
+        // being turned into a verdict here.
+        issues.push({
+          severity: 'warning',
+          code: 'pathing.severed',
+          title:
+            `${classId} can only cross ${(inOnePiece * 100).toFixed(0)}% of this map in one piece`,
+          detail:
+            `The rest of the ground a ${classId} can stand on is in ${others.length} separate ` +
+            `${others.length === 1 ? 'region' : 'regions'}, the largest of them ` +
+            `${((others[0].areaElmos / totalArea) * 100).toFixed(0)}% of the map. An army that starts ` +
+            `in one of them can never reach the others on the ground. That is a real design on a ` +
+            `shelf or island map and a broken one everywhere else.`,
+          where: { x: others[0].centroid.x, z: others[0].centroid.z },
+          fix:
+            `Cut a route between them under ${def.maxSlopeDegrees} degrees — the Carve ramp node does ` +
+            `exactly this — or make the barrier deliberate and say so in the map description.`,
+        });
+      }
+    }
+
+    // A severed map has already been reported as one piece of news. Listing its
+    // fifteen fragments underneath buries it: on a split coastal map the
+    // per-pocket warnings outnumbered every other issue on the map put together
+    // and said, fifteen times, something the one error above says once.
+    if (severed) continue;
+
+    const pockets = unreachablePockets(mask, { seeds, minAreaElmos: significantArea });
+    for (const pocket of pockets.slice(0, MAX_POCKETS_REPORTED)) {
       issues.push({
         severity: 'warning',
         code: 'pathing.pocket',
@@ -475,6 +544,20 @@ export function checkReachability(ctx: MapContext): MapIssue[] {
           `Players will see terrain they can never use, and any metal on it is dead.`,
         where: { x: pocket.centroid.x, z: pocket.centroid.z },
         fix: `Add a ramp under ${def.maxSlopeDegrees} degrees into this region, or make it clearly impassable so it reads as scenery.`,
+      });
+    }
+    if (pockets.length > MAX_POCKETS_REPORTED) {
+      const rest = pockets.slice(MAX_POCKETS_REPORTED);
+      const area = rest.reduce((sum, r) => sum + r.areaElmos, 0);
+      issues.push({
+        severity: 'warning',
+        code: 'pathing.pocket',
+        title: `${rest.length} more ${classId} regions are cut off, ${(area / 1e6).toFixed(2)} million elmos squared between them`,
+        detail:
+          `Only the largest ${MAX_POCKETS_REPORTED} are listed individually. A map with this many ` +
+          `separate regions usually has one cause rather than ${pockets.length}.`,
+        where: { x: rest[0].centroid.x, z: rest[0].centroid.z },
+        fix: `Look at the passability overlay rather than at this list: the shape of what is cut off is the clue.`,
       });
     }
   }

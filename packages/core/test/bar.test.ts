@@ -633,6 +633,72 @@ describe('validateMap', () => {
     expect(pocket?.where).toHaveProperty('x');
   });
 
+  it('says how much of the map an army can cross when a wall cuts it in two', () => {
+    // A wall straight down the middle, which is the shape a template takes on
+    // when its pass closes: not a pocket in a corner, two halves.
+    const halved = heights(mapx, mapx, (x) => (x >= 126 && x <= 130 ? 900 : 100));
+    const issues = validateMap({
+      ...baseInput(),
+      height: halved,
+      startPositions: [],
+      metalMap: undefined,
+      moveClasses: ['TANK3'],
+    });
+    const severed = issues.find((i) => i.code === 'pathing.severed');
+    expect(severed, 'a map in two halves should say so').toBeDefined();
+    // The share goes in the title so it can be judged at a glance: half a map
+    // and a tenth of one are the same code and very different news.
+    expect(severed?.title).toMatch(/TANK3 can only cross \d+% of this map in one piece/);
+    expect(severed?.where).toHaveProperty('x');
+    // One piece of news, not one per fragment.
+    expect(issues.filter((i) => i.code === 'pathing.pocket')).toHaveLength(0);
+  });
+
+  it('leaves a crossable map alone however many dead corners it has', () => {
+    const walled = heights(mapx, mapx, (x, z) => {
+      const inRing = x >= 100 && x <= 180 && z >= 100 && z <= 180;
+      const onWall = inRing && (x <= 106 || x >= 174 || z <= 106 || z >= 174);
+      return onWall ? 600 : 100;
+    });
+    const issues = validateMap({
+      ...baseInput(),
+      height: walled,
+      startPositions: [],
+      metalMap: undefined,
+      moveClasses: ['TANK3'],
+    });
+    expect(codes(issues)).not.toContain('pathing.severed');
+  });
+
+  it('names only the largest cut-off regions and counts the rest', () => {
+    // Nine walled basins on a map big enough that they are dead corners rather
+    // than the map itself — so this is the not-severed path, where the pockets
+    // are still worth listing. Listing all nine buries whatever else the map
+    // has to say.
+    const wide = 512;
+    const pitted = heights(wide, wide, (x, z) => {
+      const cx = x % 170;
+      const cz = z % 170;
+      const onWall = cx <= 76 && cz <= 76 && (cx <= 8 || cx >= 68 || cz <= 8 || cz >= 68);
+      return onWall ? 600 : 100;
+    });
+    const issues = validateMap({
+      mapx: wide,
+      mapy: wide,
+      height: pitted,
+      minHeight: 0,
+      maxHeight: 700,
+      startPositions: [],
+      playerCount: 2,
+      symmetry: 'rotate180',
+      moveClasses: ['TANK3'],
+    });
+    expect(codes(issues)).not.toContain('pathing.severed');
+    const pockets = issues.filter((i) => i.code === 'pathing.pocket');
+    expect(pockets.length).toBeLessThanOrEqual(4);
+    expect(pockets.some((i) => /more TANK3 regions are cut off/.test(i.title))).toBe(true);
+  });
+
   it('flags a map with no room for a factory', () => {
     const rough = heights(mapx, mapx, (x, z) => 100 + ((x * 37 + z * 91) % 5) * 25);
     const issues = validateMap({ ...baseInput(), height: rough });
