@@ -76,6 +76,34 @@ export const DEFAULT_TERRAIN_TYPES: Record<number, TerrainType> = {
  */
 export const DEFAULT_SUN_DIR: readonly [number, number, number, number] = [0.8, 1.0, -0.7, 1e9];
 
+/**
+ * `groundAmbientColor`. Flat — the engine adds it whatever way a face points,
+ * and never shadows it, so it is the floor every unlit surface sits on.
+ */
+export const DEFAULT_GROUND_AMBIENT: readonly [number, number, number] = [0.4, 0.4, 0.4];
+
+/** `groundDiffuseColor`, scaled by `N·L` and by how much shadow is on the face. */
+export const DEFAULT_GROUND_DIFFUSE: readonly [number, number, number] = [0.9, 0.9, 0.85];
+
+/** `groundSpecularColor`, against `specularExponent`. */
+export const DEFAULT_GROUND_SPECULAR: readonly [number, number, number] = [0.7, 0.7, 0.7];
+
+/** `groundShadowDensity`: how much of the diffuse term a full shadow removes. */
+export const DEFAULT_GROUND_SHADOW_DENSITY = 0.85;
+
+/** `lighting.specularExponent`, the Blinn-Phong power the ground uses. */
+export const DEFAULT_SPECULAR_EXPONENT = 100.0;
+
+/** `atmosphere.fogColor`. */
+export const DEFAULT_FOG_COLOR: readonly [number, number, number] = [0.7, 0.7, 0.8];
+
+/**
+ * `atmosphere.fogStart` / `fogEnd`, as fractions of the camera's far plane —
+ * not as distances. The engine's ground fog is linear between the two.
+ */
+export const DEFAULT_FOG_START = 0.1;
+export const DEFAULT_FOG_END = 1.0;
+
 export function createMapInfo(options: {
   name: string;
   shortname?: string;
@@ -149,9 +177,9 @@ export function createMapInfo(options: {
     atmosphere: {
       minWind: options.minWind ?? 5,
       maxWind: options.maxWind ?? 25,
-      fogStart: 0.1,
-      fogEnd: 1.0,
-      fogColor: [0.7, 0.7, 0.8],
+      fogStart: DEFAULT_FOG_START,
+      fogEnd: DEFAULT_FOG_END,
+      fogColor: [...DEFAULT_FOG_COLOR],
       skyColor: [0.1, 0.15, 0.7],
       sunColor: [1.0, 1.0, 1.0],
       cloudColor: [1.0, 1.0, 1.0],
@@ -172,15 +200,15 @@ export function createMapInfo(options: {
       // A high, slightly off-axis sun reads well on terrain: low enough for
       // long shadows to show relief, high enough that valleys are not black.
       sunDir: [...DEFAULT_SUN_DIR],
-      groundAmbientColor: [0.4, 0.4, 0.4],
-      groundDiffuseColor: [0.9, 0.9, 0.85],
-      groundSpecularColor: [0.7, 0.7, 0.7],
-      groundShadowDensity: 0.85,
+      groundAmbientColor: [...DEFAULT_GROUND_AMBIENT],
+      groundDiffuseColor: [...DEFAULT_GROUND_DIFFUSE],
+      groundSpecularColor: [...DEFAULT_GROUND_SPECULAR],
+      groundShadowDensity: DEFAULT_GROUND_SHADOW_DENSITY,
       unitAmbientColor: [0.5, 0.5, 0.55],
       unitDiffuseColor: [0.99, 0.99, 0.95],
       unitSpecularColor: [0.8, 0.6, 0.6],
       unitShadowDensity: 0.9,
-      specularExponent: 100.0,
+      specularExponent: DEFAULT_SPECULAR_EXPONENT,
     },
 
     water: {

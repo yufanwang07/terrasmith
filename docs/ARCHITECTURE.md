@@ -60,6 +60,48 @@ Erosion is the exception — a simulation does depend on grid spacing — so ero
 parameters are expressed as densities and world distances rather than iteration
 counts and pixel radii, and the engine scales them by the evaluation resolution.
 
+## What the preview is for
+
+The viewport's job is to predict `SMFFragProg.glsl`, not to look good. Recoil's
+ground shader is not a physically based one, and every place three.js would do
+the modern, correct thing is a place the preview would stop agreeing with the
+game — so the studio reproduces the engine's equation instead of approximating
+it with three's lights.
+
+Three properties of that equation drive the whole design, and each of them was
+a visible bug before it was understood:
+
+- **The lighting multiply happens in gamma space.** There is no sRGB decode
+  anywhere in the engine's map path, and the diffuse is uploaded as the
+  non-sRGB `GL_COMPRESSED_RGBA_S3TC_DXT1_EXT`. Lighting in linear and encoding
+  on the way out — what three does by default — compresses contrast rather than
+  shifting it: with the engine's own light values it leaves ambient-only ground
+  91% too bright and drops the ratio between lit and shadowed ground from 2.06
+  to 1.48.
+- **The ambient term is flat.** It does not vary with the normal and it is never
+  shadowed, so a vertical cliff gets exactly as much of it as the plateau above.
+  A `HemisphereLight` — a sky gradient the engine has no term for — halves it on
+  the steep faces an RTS author most needs to judge.
+- **Shading is not clamped.** `(0.4 + 0.9) x 0.8235` is 1.07 on a face square to
+  the sun, so sun-facing slopes clip. That is a true warning about the declared
+  lighting, not something to tune away, and `collectMapInfoProblems` says so
+  when a block's peak goes further.
+
+`packages/format/src/mapinfo/lighting.ts` is the tested reference for the
+arithmetic; `apps/studio/src/components/groundMaterial.ts` reproduces it in
+GLSL. GLSL cannot be unit-tested from Node, so the studio serves a
+`shader-parity.html` in development that reads its own framebuffer back and
+checks it against values taken off the engine's shader — run `npm run dev` in
+`apps/studio` and open `/shader-parity.html`.
+
+The same rule decides what the preview does *not* do. No runtime ambient
+occlusion, because the bake already has it and a second pass would darken twice
+and would change when the camera moved. No stochastic tiling to hide the detail
+textures' repetition, because that repetition is a real property of the map
+about to be exported and hiding it removes the author's only chance to see it.
+No triplanar mapping on cliffs, because the engine samples detail on world XZ
+and the vertical smear it produces is what the game will show.
+
 ## Evaluation
 
 The graph is pull-based and memoised on content. Each node's result is keyed by

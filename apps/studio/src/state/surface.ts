@@ -18,9 +18,21 @@ import type { SurfaceRequest, SurfaceWorkerResponse } from '../workers/surface.w
 /** How long the terrain must be still before painting starts. */
 const IDLE_MS = 220;
 
+/** The three images the engine's ground shader reads, on one grid. */
+export interface SurfaceImage {
+  width: number;
+  height: number;
+  /** Diffuse. */
+  rgba: Uint8Array;
+  /** Splat distribution: which detail-normal tile applies where. */
+  splat: Uint8Array;
+  /** Specular colour, with the Blinn-Phong exponent over sixteen in alpha. */
+  specular: Uint8Array;
+}
+
 export interface SurfaceState {
-  /** RGBA8 over the same grid as the height field it was painted from. */
-  image: { width: number; height: number; rgba: Uint8Array } | null;
+  /** Over the same grid as the height field it was painted from. */
+  image: SurfaceImage | null;
   painting: boolean;
   elapsedMs: number;
 }
@@ -48,7 +60,13 @@ export function useSurface(project: Project, preview: PreviewState, enabled: boo
         return;
       }
       setState({
-        image: { width: message.width, height: message.height, rgba: message.rgba },
+        image: {
+          width: message.width,
+          height: message.height,
+          rgba: message.rgba,
+          splat: message.splat,
+          specular: message.specular,
+        },
         painting: false,
         elapsedMs: message.elapsedMs,
       });

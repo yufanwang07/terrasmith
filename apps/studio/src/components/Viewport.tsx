@@ -18,16 +18,34 @@ import type { OverlayKind } from '../state/store.js';
 import { symmetryErrorField, type SymmetryKind } from '@terrasmith/core';
 import { overlayColorFor } from './overlays.js';
 import { DEFAULT_DETAIL_LAYERS, generateDetailNormal } from '@terrasmith/build';
+import {
+  DEFAULT_FOG_COLOR,
+  DEFAULT_FOG_END,
+  DEFAULT_FOG_START,
+  DEFAULT_GROUND_AMBIENT,
+  DEFAULT_GROUND_DIFFUSE,
+  DEFAULT_GROUND_SHADOW_DENSITY,
+  DEFAULT_SUN_DIR,
+} from '@terrasmith/format';
 import { FeatureLayer, type DrawnFeature } from './Features.js';
 import { MarkerLayer, type Marker } from './Markers.js';
+import {
+  DETAIL_LAYERS,
+  SMF_INTENSITY_MULT,
+  createGroundMaterial,
+  setGroundDetail,
+  setGroundFog,
+  setGroundTexture,
+} from './groundMaterial.js';
+import type { SurfaceImage } from '../state/surface.js';
 
 interface Props {
   preview: PreviewState;
   overlay: OverlayKind;
   /** The symmetry the map declares, for the overlay that checks it. */
   symmetry: SymmetryKind;
-  /** The painted map texture, once the surface worker has one. */
-  surface?: { width: number; height: number; rgba: Uint8Array } | null;
+  /** The painted map textures, once the surface worker has them. */
+  surface?: SurfaceImage | null;
   /** World extent in elmos, used for the grid and the camera framing. */
   worldWidth: number;
   worldHeight: number;
@@ -70,6 +88,29 @@ interface Props {
  * 8 elmos is where BAR's own ships float, and 220 is about where a sea bed
  * stops being visible through clear water at map scale.
  */
+/**
+ * Edge length of each tiling detail-normal tile, in texels.
+ *
+ * The same 512 the exporter ships. It was 256 here, which is half the frequency
+ * the map will actually have — a preview that promises less detail than it is
+ * previewing, which is the one direction the error must not go.
+ */
+const DETAIL_TILE_SIZE = 512;
+
+/**
+ * `splats.texMults` as `buildExtraTextures` writes it.
+ *
+ * The master strength dial on each detail layer. The engine multiplies the
+ * splat distribution by these to get the per-layer weight, so rock's 1.1 means
+ * the rock tile shows a tenth harder than its share of the distribution.
+ */
+const EXPORTED_TEX_MULTS = [0.9, 0.8, 1.1, 0.5] as const;
+
+/** An engine 0..1 colour triple, for `Color.setRGB`. */
+function engineRgb(color: readonly number[]): [number, number, number] {
+  return [color[0] ?? 0, color[1] ?? 0, color[2] ?? 0];
+}
+
 const WATER_SHALLOW = new THREE.Color(0x3f7f92);
 const WATER_DEEP = new THREE.Color(0x152c42);
 const WATER_OPAQUE_DEPTH = 220;
@@ -167,8 +208,8 @@ interface ViewportInternals {
     exaggeration: number,
     symmetry: SymmetryKind,
   ): void;
-  /** The painted map texture, or null to go back to plain vertex colours. */
-  setSurface(image: { width: number; height: number; rgba: Uint8Array } | null): void;
+  /** The painted map textures, or null to go back to plain vertex colours. */
+  setSurface(image: SurfaceImage | null): void;
   /** The trees standing on the map. Drawn instanced, so thousands are one call. */
   setFeatures(
     features: readonly DrawnFeature[],
@@ -199,7 +240,10 @@ function createViewport(mount: HTMLElement, handlers: ViewportHandlers): Viewpor
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
   renderer.setClearColor(0x0a0c0f);
   renderer.shadowMap.enabled = true;
-  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  // 2x2 hardware PCF, which is what `ShadowHandler.cpp` asks for. `PCFSoft` is
+  // a much wider kernel: it looks nicer and over-softens every contact shadow
+  // relative to the game, which is the one thing this preview must not do.
+  renderer.shadowMap.type = THREE.PCFShadowMap;
   // The scene only changes when the terrain does, and a shadow map over an
   // eight-thousand-elmo map is not cheap. Rendered on demand instead of on
   // every frame, so orbiting the camera costs nothing extra.
@@ -207,18 +251,25 @@ function createViewport(mount: HTMLElement, handlers: ViewportHandlers): Viewpor
   mount.appendChild(renderer.domElement);
 
   const scene = new THREE.Scene();
-  // Distance haze, scaled to the map when one arrives. The fixed 8 000 this
-  // started at is inside an ordinary 16x16 map, so a fifth of the terrain was
-  // being washed toward the background colour — which reads as a rendering
-  // fault rather than as distance.
-  scene.fog = new THREE.Fog(0x0a0c0f, 40000, 160000);
+  // Distance haze. The terrain does its own, in gamma space and after specular,
+  // because that is the order the engine fogs in and `THREE.Fog` cannot be made
+  // to do either. This one exists so the trees, the water and the markers fade
+  // with the ground they stand on rather than hanging unhazed over a hazed
+  // map — same colour, same distances, mixed in linear space, which for a tree
+  // forty elmos tall is a difference nobody can see.
+  //
+  // It starts at the exported `atmosphere` colour rather than at the clear
+  // colour. Fogging toward a colour the sky does not have is what made the old
+  // preview read as a rendering fault: three colours, three different answers.
+  scene.fog = new THREE.Fog(new THREE.Color().setRGB(...engineRgb(DEFAULT_FOG_COLOR), THREE.SRGBColorSpace), 2000, 20000);
+  renderer.setClearColor(scene.fog.color);
 
   const camera = new THREE.PerspectiveCamera(45, 1, 10, 120000);
 
   // The sky. A flat background colour makes every map look like it is floating
   // in a room; a horizon does more for the impression of a landscape than any
   // amount of work on the terrain itself, and it costs one sphere.
-  const sky = buildSky();
+  const sky = buildSky(DEFAULT_FOG_COLOR);
   // Comfortably inside the far plane and centred on the camera every frame.
   // Sized from the map it was, at twelve times the diagonal, which on a 16x16
   // map is past the 120 000 far plane — so the sky was being clipped away and
@@ -226,10 +277,17 @@ function createViewport(mount: HTMLElement, handlers: ViewportHandlers): Viewpor
   sky.scale.setScalar(camera.far * 0.45);
   scene.add(sky);
 
-  // A key light roughly where BAR's default sun sits, plus enough fill that
-  // north faces stay readable rather than going black.
-  const sun = new THREE.DirectionalLight(0xfff4e6, 2.1);
-  sun.position.set(0.8, 1.0, -0.7).normalize();
+  // The sun the exported `mapinfo.lua` declares.
+  //
+  // Its brightness here lights the *props* — trees, markers, the water — and
+  // nothing else. The terrain takes only the shadow map from it and computes
+  // its own shading from the engine's equation, so changing this intensity does
+  // not move the ground a single value. The numbers are `unitDiffuseColor` and
+  // `unitAmbientColor` from the same `mapinfo` block, times the engine's
+  // intensity multiplier, times pi — three's lights are irradiances and its
+  // Lambert BRDF divides by pi on the way back out.
+  const sun = new THREE.DirectionalLight(0xffffff, 0.99 * SMF_INTENSITY_MULT * Math.PI);
+  sun.position.set(...DEFAULT_SUN_DIR.slice(0, 3) as [number, number, number]).normalize();
   // Shadows are what make a ridge read as a ridge from above. The map is
   // static between edits, so the shadow map is rendered once per change rather
   // than per frame — see `renderer.shadowMap.autoUpdate` below.
@@ -239,37 +297,49 @@ function createViewport(mount: HTMLElement, handlers: ViewportHandlers): Viewpor
   sun.shadow.normalBias = 12;
   scene.add(sun);
   scene.add(sun.target);
-  scene.add(new THREE.HemisphereLight(0x9fb4cc, 0x2a2a24, 1.0));
+  // Flat, not a hemisphere. The engine has no sky-gradient term anywhere: a
+  // `HemisphereLight` gave the preview a warm-sun / cool-shadow split that is
+  // not in the game, and halved the fill on vertical faces where the engine
+  // gives them exactly as much as the flat ground above.
+  scene.add(new THREE.AmbientLight(0xffffff, 0.5 * SMF_INTENSITY_MULT * Math.PI));
 
+  // The ground, shaded by the engine's own equation rather than by three's.
   // Vertex colours multiply against the map texture, which is what lets the
   // overlays keep working on top of a painted surface: with no texture the
   // vertex colour *is* the surface, and with one it tints it.
-  const terrainMaterial = new THREE.MeshStandardMaterial({
-    vertexColors: true,
-    roughness: 0.95,
-    metalness: 0.0,
-    flatShading: false,
+  const terrainMaterial = createGroundMaterial({
+    lighting: {
+      sunDir: DEFAULT_SUN_DIR,
+      ambient: DEFAULT_GROUND_AMBIENT,
+      diffuse: DEFAULT_GROUND_DIFFUSE,
+      shadowDensity: DEFAULT_GROUND_SHADOW_DENSITY,
+    },
+    fog: { color: DEFAULT_FOG_COLOR, start: 2000, end: 20000 },
   });
   // Close-range detail.
   //
-  // The painted surface is one texel per ten elmos at preview resolution, so a
-  // close camera sees a smooth wash however good the palette is — and the
+  // The painted surface is one texel per twenty elmos at preview resolution, so
+  // a close camera sees a smooth wash however good the palette is — and the
   // export paints at one texel per elmo, which means the preview is smoother
-  // than the map it is previewing. A tiling normal map puts the missing
-  // roughness back without pretending to know its colour: it is the same
-  // generator the exporter uses for the detail-normal set the engine applies,
-  // at the same world repeat, so what it suggests up close is what the map will
-  // actually have.
-  terrainMaterial.normalMap = buildDetailNormal();
-  terrainMaterial.normalScale = new THREE.Vector2(2, 2);
+  // than the map it is previewing. The tiling detail normals put the missing
+  // roughness back without pretending to know its colour: they are the same
+  // four tiles the exporter ships, at the same world repeats and the same
+  // resolution, blended by the same splat distribution, so what they suggest up
+  // close is what the map will actually have.
+  const detailTiles = DEFAULT_DETAIL_LAYERS.map((layer, i) => ({
+    texture: buildDetailNormal(layer, i, renderer.capabilities.getMaxAnisotropy()),
+    repeatElmos: layer.repeatElmos,
+    tileSize: DETAIL_TILE_SIZE,
+  }));
+  setGroundDetail(terrainMaterial, detailTiles, EXPORTED_TEX_MULTS);
 
   const terrain = new THREE.Mesh(new THREE.BufferGeometry(), terrainMaterial);
   terrain.castShadow = true;
   terrain.receiveShadow = true;
   scene.add(terrain);
 
-  /** The painted map texture, rebuilt whenever the surface worker lands one. */
-  let surfaceTexture: THREE.DataTexture | null = null;
+  /** The painted map textures, rebuilt whenever the surface worker lands a set. */
+  let surfaceTextures: THREE.DataTexture[] = [];
   /**
    * Everything the last {@link ViewportInternals.setTerrain} was given.
    *
@@ -370,7 +440,7 @@ function createViewport(mount: HTMLElement, handlers: ViewportHandlers): Viewpor
   /** Rebuild the terrain's vertex colours for the current painted state. */
   const repaintVertexColors = (): void => {
     if (!lastTerrain) return;
-    const geometry = buildTerrainGeometry(...lastTerrain, surfaceTexture !== null);
+    const geometry = buildTerrainGeometry(...lastTerrain, surfaceTextures.length > 0);
     terrain.geometry.dispose();
     terrain.geometry = geometry;
   };
@@ -392,11 +462,35 @@ function createViewport(mount: HTMLElement, handlers: ViewportHandlers): Viewpor
     renderer.setSize(width, height, false);
     camera.aspect = width / height;
     camera.updateProjectionMatrix();
+    // Elmos one *device* pixel covers at unit distance, which is what decides
+    // when a detail tile's texels drop below a pixel and have to be faded out.
+    // It is a property of the pane, not of the map, so it moves when the pane
+    // does — a 900px-tall view and a 1400px one fade at different radii — and
+    // it has to be the drawing buffer's height rather than the CSS one, or a
+    // retina display fades its detail out at twice the right distance.
+    terrainMaterial.uniforms.pixelScale.value =
+      (2 * Math.tan((camera.fov * Math.PI) / 360)) / (height * renderer.getPixelRatio());
     orbit.refit();
   };
   const observer = new ResizeObserver(resize);
   observer.observe(mount);
   resize();
+
+  /**
+   * How far out the engine will put its far plane, in elmos.
+   *
+   * `fogStart` and `fogEnd` in `mapinfo.lua` are fractions of the camera's far
+   * plane, not distances, and the engine grows that plane as the camera pulls
+   * back — so the haze *retreats* when you zoom out. That is counter-intuitive,
+   * it is what the game does, and it is the thing an author most needs to see
+   * before shipping a map with the default `fogStart: 0.1`.
+   *
+   * The engine derives its wanted range from the camera in a way this has not
+   * pinned down; 2.5x the orbit distance matches it closely enough at the
+   * heights people actually build at, and `maxViewRange` is a hard 32768.
+   */
+  const engineViewRange = (): number =>
+    Math.min(32768, Math.max(8000, orbit.distance * 2.5));
 
   let running = true;
   const frame = () => {
@@ -405,6 +499,16 @@ function createViewport(mount: HTMLElement, handlers: ViewportHandlers): Viewpor
     // The sky is infinitely far away, so it rides with the camera rather than
     // sitting somewhere the camera can approach.
     sky.position.copy(camera.position);
+
+    const range = engineViewRange();
+    const fogNear = range * DEFAULT_FOG_START;
+    const fogFar = range * DEFAULT_FOG_END;
+    setGroundFog(terrainMaterial, { color: DEFAULT_FOG_COLOR, start: fogNear, end: fogFar });
+    const fog = scene.fog as THREE.Fog;
+    fog.near = fogNear;
+    fog.far = fogFar;
+    (terrainMaterial.uniforms.cameraPos.value as THREE.Vector3).copy(camera.position);
+
     renderer.render(scene, camera);
     requestAnimationFrame(frame);
   };
@@ -415,6 +519,10 @@ function createViewport(mount: HTMLElement, handlers: ViewportHandlers): Viewpor
   return {
     setTerrain(result, worldWidth, worldHeight, overlay, exaggeration, symmetry) {
       lastTerrain = [result, worldWidth, worldHeight, overlay, exaggeration, symmetry];
+      // An overlay ramp is a display colour, not an albedo. Shading it would
+      // make the bands unreadable and would predict nothing — the engine never
+      // draws a slope ramp. Only "no overlay, painted" is a prediction.
+      terrainMaterial.uniforms.unlit.value = overlay === 'none' ? 0 : 1;
       const geometry = buildTerrainGeometry(
         result,
         worldWidth,
@@ -422,7 +530,7 @@ function createViewport(mount: HTMLElement, handlers: ViewportHandlers): Viewpor
         overlay,
         exaggeration,
         symmetry,
-        surfaceTexture !== null,
+        surfaceTextures.length > 0,
       );
       terrain.geometry.dispose();
       terrain.geometry = geometry;
@@ -460,16 +568,13 @@ function createViewport(mount: HTMLElement, handlers: ViewportHandlers): Viewpor
       sun.target.position.set(0, 0, 0);
       sun.target.updateMatrixWorld();
       renderer.shadowMap.needsUpdate = true;
-      const fog = scene.fog as THREE.Fog;
-      fog.near = diagonal * 1.2;
-      fog.far = diagonal * 4;
-
-      const detail = terrainMaterial.normalMap;
-      if (detail) {
-        const repeatElmos = (detail.userData.repeatElmos as number) || 130;
-        detail.repeat.set(worldWidth / repeatElmos, worldHeight / repeatElmos);
-        detail.needsUpdate = true;
-      }
+      // Fog is not scaled to the map. The engine scales it to the camera's far
+      // plane, which is a property of how far back the player has pulled and
+      // not of how big the map is, and the frame loop keeps it in step.
+      //
+      // Detail normals need no per-map repeat either: they are sampled on world
+      // XZ at the exported `texScales`, exactly as the engine samples them, so
+      // one repeat is ninety to a hundred and seventy elmos on every map.
 
       if (!framed) {
         orbit.frame(worldWidth, worldHeight, result.max - result.min);
@@ -478,31 +583,43 @@ function createViewport(mount: HTMLElement, handlers: ViewportHandlers): Viewpor
     },
 
     setSurface(image) {
-      const wasPainted = surfaceTexture !== null;
-      surfaceTexture?.dispose();
+      const wasPainted = surfaceTextures.length > 0;
+      for (const texture of surfaceTextures) texture.dispose();
+      surfaceTextures = [];
       renderer.shadowMap.needsUpdate = true;
       if (!image) {
-        surfaceTexture = null;
-        terrainMaterial.map = null;
-        terrainMaterial.needsUpdate = true;
+        setGroundTexture(terrainMaterial, 'map', null);
+        setGroundTexture(terrainMaterial, 'splatMap', null);
+        setGroundTexture(terrainMaterial, 'specularMap', null);
         if (wasPainted) repaintVertexColors();
         return;
       }
-      const texture = new THREE.DataTexture(image.rgba, image.width, image.height, THREE.RGBAFormat);
-      // The map's texture is authored in sRGB, and so is everything the palette
-      // put in it; telling three.js otherwise washes the whole map out.
-      texture.colorSpace = THREE.SRGBColorSpace;
-      // Clamped, not wrapped: the terrain's UVs run exactly 0..1 and a wrapped
-      // sampler bleeds the far edge of the map into the near one.
-      texture.wrapS = THREE.ClampToEdgeWrapping;
-      texture.wrapT = THREE.ClampToEdgeWrapping;
-      texture.minFilter = THREE.LinearFilter;
-      texture.magFilter = THREE.LinearFilter;
-      texture.generateMipmaps = false;
-      texture.needsUpdate = true;
-      surfaceTexture = texture;
-      terrainMaterial.map = texture;
-      terrainMaterial.needsUpdate = true;
+      // Every one of these is bound with no colour space. The diffuse is the
+      // one that matters: the engine multiplies its bytes as they are, with no
+      // sRGB decode anywhere in the map path, and the ground shader reproduces
+      // that — so letting three decode it here would be decoding it twice. The
+      // other two were never colours to begin with.
+      const build = (data: Uint8Array): THREE.DataTexture => {
+        const texture = new THREE.DataTexture(data, image.width, image.height, THREE.RGBAFormat);
+        texture.colorSpace = THREE.NoColorSpace;
+        // Clamped, not wrapped: the terrain's UVs run exactly 0..1 and a
+        // wrapped sampler bleeds the far edge of the map into the near one.
+        texture.wrapS = THREE.ClampToEdgeWrapping;
+        texture.wrapT = THREE.ClampToEdgeWrapping;
+        texture.minFilter = THREE.LinearMipmapLinearFilter;
+        texture.magFilter = THREE.LinearFilter;
+        // Mipped and anisotropic. Unmipped is fine while the camera is high and
+        // the texture is magnified, and aliases the moment it drops toward the
+        // horizon — which is exactly when someone is checking a shoreline.
+        texture.generateMipmaps = true;
+        texture.anisotropy = renderer.capabilities.getMaxAnisotropy();
+        texture.needsUpdate = true;
+        surfaceTextures.push(texture);
+        return texture;
+      };
+      setGroundTexture(terrainMaterial, 'map', build(image.rgba));
+      setGroundTexture(terrainMaterial, 'splatMap', build(image.splat));
+      setGroundTexture(terrainMaterial, 'specularMap', build(image.specular));
       if (!wasPainted) repaintVertexColors();
     },
 
@@ -553,8 +670,8 @@ function createViewport(mount: HTMLElement, handlers: ViewportHandlers): Viewpor
       featureLayer.dispose();
       sky.geometry.dispose();
       (sky.material as THREE.Material).dispose();
-      surfaceTexture?.dispose();
-      terrainMaterial.normalMap?.dispose();
+      for (const texture of surfaceTextures) texture.dispose();
+      for (const tile of detailTiles) tile.texture.dispose();
       terrain.geometry.dispose();
       (terrain.material as THREE.Material).dispose();
       water.geometry.dispose();
@@ -683,6 +800,11 @@ function buildTerrainGeometry(
 class OrbitController {
   private target = new THREE.Vector3();
   private spherical = new THREE.Spherical(6000, Math.PI * 0.32, Math.PI * 0.25);
+
+  /** How far the camera sits from what it is looking at, in elmos. */
+  get distance(): number {
+    return this.spherical.radius;
+  }
   private dragging: 'orbit' | 'pan' | null = null;
   /**
    * Whether the user has moved the camera since the last {@link frame}.
@@ -1029,9 +1151,22 @@ function buildWaterGeometry(
  * fixed repeat would make the detail four times coarser on a 32x32 map than on
  * a 16x16 one.
  */
-function buildDetailNormal(): THREE.DataTexture {
-  const layer = DEFAULT_DETAIL_LAYERS[1];
-  const image = generateDetailNormal(layer, 256, 1);
+/**
+ * One of the four tiling detail-normal tiles, generated exactly as the exporter
+ * generates the one it ships under the same name.
+ *
+ * Same generator, same size, same seed rule — so the plaid the preview shows at
+ * these repeats is the plaid the map will have, and an author who does not like
+ * it can fix it in `texScales` before exporting rather than after loading the
+ * game. Hiding the repetition here with stochastic tiling would remove their
+ * only chance to see it.
+ */
+function buildDetailNormal(
+  layer: (typeof DEFAULT_DETAIL_LAYERS)[number],
+  seed: number,
+  anisotropy: number,
+): THREE.DataTexture {
+  const image = generateDetailNormal(layer, DETAIL_TILE_SIZE, seed);
   const texture = new THREE.DataTexture(image.data, image.width, image.height, THREE.RGBAFormat);
   // A normal map is not a colour, so it must not be decoded as one.
   texture.colorSpace = THREE.NoColorSpace;
@@ -1040,9 +1175,8 @@ function buildDetailNormal(): THREE.DataTexture {
   texture.minFilter = THREE.LinearMipmapLinearFilter;
   texture.magFilter = THREE.LinearFilter;
   texture.generateMipmaps = true;
-  texture.anisotropy = 4;
+  texture.anisotropy = anisotropy;
   texture.needsUpdate = true;
-  texture.userData.repeatElmos = layer.repeatElmos;
   return texture;
 }
 
@@ -1055,12 +1189,21 @@ function buildDetailNormal(): THREE.DataTexture {
  * amount of further work on the terrain. Vertex colours rather than a shader so
  * there is nothing to keep in step with three.js's own.
  */
-function buildSky(): THREE.Mesh {
+function buildSky(fogColor: readonly number[]): THREE.Mesh {
   const geometry = new THREE.SphereGeometry(1, 24, 16);
   const position = geometry.attributes.position;
   const colors = new Float32Array(position.count * 3);
   const zenith = new THREE.Color(0x1d3550);
-  const horizon = new THREE.Color(0x6d7f8c);
+  // The horizon is the colour the terrain fades to, because that is what a
+  // horizon is. Driving it from anywhere else leaves the ground dissolving into
+  // a colour the sky does not have, which reads as a rendering fault rather
+  // than as distance — and it is what this preview did for a long time.
+  const horizon = new THREE.Color().setRGB(
+    fogColor[0] ?? 0.7,
+    fogColor[1] ?? 0.7,
+    fogColor[2] ?? 0.8,
+    THREE.SRGBColorSpace,
+  );
   const ground = new THREE.Color(0x14171c);
   const color = new THREE.Color();
 

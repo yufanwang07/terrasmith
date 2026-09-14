@@ -8,9 +8,22 @@
  * any of that against grey means exporting and loading the game.
  *
  * So this runs the same palette shader the exporter runs, at preview
- * resolution, and hands back an RGBA image the viewport puts straight onto the
- * terrain. It is the export's own `generateSatmap`, not an approximation of it:
- * what the preview shows is what the `.smf` will carry, at a coarser grid.
+ * resolution, and hands back images the viewport puts straight onto the
+ * terrain. It is the export's own `generateSatmap`, `generateSplatWeights` and
+ * `specularRecipe`, not approximations of them: what the preview shows is what
+ * the `.smf` will carry, at a coarser grid.
+ *
+ * Three images come back, because the engine's ground shader reads three:
+ *
+ *   - the **diffuse**, which is the albedo it multiplies the light into;
+ *   - the **splat distribution**, which decides which detail-normal tile
+ *     applies where and therefore what the ground looks like up close;
+ *   - the **specular**, whose alpha is the Blinn-Phong exponent over sixteen.
+ *
+ * All three are resolved from one pass over the derived channels. The ambient
+ * occlusion in particular is a horizon search per texel and is the most
+ * expensive thing here by a wide margin; computing it once and handing it to
+ * all three consumers is most of why this stayed interactive.
  *
  * It gets its own worker for the same reason the thumbnails do. Painting is
  * several hundred milliseconds at 768 squared and the height preview is what
@@ -21,14 +34,19 @@ import {
   DEFAULT_HILLSHADE_STRENGTH,
   DEFAULT_OCCLUSION_STRENGTH,
   TEMPERATE,
+  channelsUsedBy,
   findPalettePreset,
   generateSatmap,
+  generateSplatWeights,
   enforceSlopeBands,
   rescalePaletteHeights,
+  resolveTextureInputs,
   sunDirToLighting,
   type Field,
   type MaterialPalette,
+  type TextureChannel,
 } from '@terrasmith/core';
+import { specularRecipe } from '@terrasmith/build';
 import { DEFAULT_SUN_DIR } from '@terrasmith/format';
 
 /** Paint one heightfield. */
@@ -62,8 +80,12 @@ export interface SurfaceResponse {
   id: number;
   width: number;
   height: number;
-  /** RGBA8, ready for a `DataTexture`. */
+  /** RGBA8 diffuse, ready for a `DataTexture`. */
   rgba: Uint8Array;
+  /** RGBA8 splat distribution — weights, not a picture, so no sRGB encode. */
+  splat: Uint8Array;
+  /** RGB specular colour with the exponent over sixteen in alpha. */
+  specular: Uint8Array;
   elapsedMs: number;
 }
 
@@ -82,16 +104,20 @@ self.onmessage = (event: MessageEvent<SurfaceRequest>) => {
 
   try {
     const field: Field = { width: request.width, height: request.height, data: request.data };
-    const rgba = paint(field, request);
+    const painted = paint(field, request);
     const response: SurfaceResponse = {
       kind: 'surface',
       id: request.id,
       width: request.width,
       height: request.height,
-      rgba,
+      ...painted,
       elapsedMs: performance.now() - started,
     };
-    (self as unknown as Worker).postMessage(response, [rgba.buffer]);
+    (self as unknown as Worker).postMessage(response, [
+      painted.rgba.buffer,
+      painted.splat.buffer,
+      painted.specular.buffer,
+    ]);
   } catch (error) {
     const response: SurfaceErrorResponse = {
       kind: 'error',
@@ -102,7 +128,10 @@ self.onmessage = (event: MessageEvent<SurfaceRequest>) => {
   }
 };
 
-function paint(field: Field, request: SurfaceRequest): Uint8Array {
+function paint(
+  field: Field,
+  request: SurfaceRequest,
+): { rgba: Uint8Array; splat: Uint8Array; specular: Uint8Array } {
   let min = Infinity;
   let max = -Infinity;
   for (let i = 0; i < field.data.length; i++) {
@@ -124,40 +153,65 @@ function paint(field: Field, request: SurfaceRequest): Uint8Array {
   // across. Saying so is what keeps every distance in the palette's rules — a
   // shoreline's width, a channel's — the same distance it will be in the build.
   const cellSize = request.worldWidth / Math.max(1, field.width - 1);
+  const common = { cellSize, waterLevel: request.waterLevel, mode: 'clamp' as const };
 
-  const color = generateSatmap(
-    { height: field },
-    palette,
-    {
-      cellSize,
-      waterLevel: request.waterLevel,
-      lighting: {
-        occlusionStrength: clamp01(request.occlusion, DEFAULT_OCCLUSION_STRENGTH),
-        hillshadeStrength: clamp01(request.shading, DEFAULT_HILLSHADE_STRENGTH),
-        // The same sun the exporter bakes from, which is the one the generated
-        // `mapinfo.lua` declares. A preview lit from the cartographic north-west
-        // while the map ships lit from bearing 049 disagrees with itself about
-        // which side of every ridge is bright.
-        ...sunDirToLighting(DEFAULT_SUN_DIR),
-      },
+  // Resolve every channel any of the three consumers needs, once. The palette
+  // says what its own rules read; the specular recipe adds slope and occlusion,
+  // and the baked occlusion term adds occlusion again if it is switched on.
+  const need = new Set<TextureChannel>(channelsUsedBy(palette));
+  need.add('slopeDegrees');
+  need.add('occlusion');
+  const resolved = resolveTextureInputs({ height: field }, { ...common, need });
+
+  const color = generateSatmap({ ...resolved }, palette, {
+    ...common,
+    lighting: {
+      occlusionStrength: clamp01(request.occlusion, DEFAULT_OCCLUSION_STRENGTH),
+      hillshadeStrength: clamp01(request.shading, DEFAULT_HILLSHADE_STRENGTH),
+      // The same sun the exporter bakes from, which is the one the generated
+      // `mapinfo.lua` declares. A preview lit from the cartographic north-west
+      // while the map ships lit from bearing 049 disagrees with itself about
+      // which side of every ridge is bright.
+      ...sunDirToLighting(DEFAULT_SUN_DIR),
     },
-  );
+  });
+
+  const distribution = generateSplatWeights({ ...resolved }, palette, common);
 
   const n = field.width * field.height;
   const rgba = new Uint8Array(n * 4);
+  const splat = new Uint8Array(n * 4);
+  const specular = new Uint8Array(n * 4);
   const grain = Math.max(0, Math.min(1, request.grain));
+
   for (let i = 0; i < n; i++) {
+    const o = i * 4;
     // Grain is per-texel at build resolution and would be per-several-texels
     // here, which reads as mottling rather than as grain — so the preview
     // carries a gentler version of it, enough to stop a flat colour looking
     // like plastic without pretending to be the real thing.
     const jitter = grain > 0 ? 1 + (hash(i, request.seed) - 0.5) * grain * 0.35 : 1;
-    rgba[i * 4] = toByte(color.data[i * 4] * jitter);
-    rgba[i * 4 + 1] = toByte(color.data[i * 4 + 1] * jitter);
-    rgba[i * 4 + 2] = toByte(color.data[i * 4 + 2] * jitter);
-    rgba[i * 4 + 3] = 255;
+    rgba[o] = toByte(color.data[o] * jitter);
+    rgba[o + 1] = toByte(color.data[o + 1] * jitter);
+    rgba[o + 2] = toByte(color.data[o + 2] * jitter);
+    rgba[o + 3] = 255;
+
+    splat[o] = toByte(distribution.data[o]);
+    splat[o + 1] = toByte(distribution.data[o + 1]);
+    splat[o + 2] = toByte(distribution.data[o + 2]);
+    splat[o + 3] = toByte(distribution.data[o + 3]);
+
+    const [sr, sg, sb, exponent] = specularRecipe(
+      resolved.height.data[i],
+      resolved.slopeDegrees.data[i],
+      resolved.occlusion.data[i],
+    );
+    specular[o] = toByte(sr);
+    specular[o + 1] = toByte(sg);
+    specular[o + 2] = toByte(sb);
+    specular[o + 3] = toByte(exponent);
   }
-  return rgba;
+  return { rgba, splat, specular };
 }
 
 function clamp01(v: number, fallback: number): number {

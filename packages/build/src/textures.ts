@@ -114,7 +114,7 @@ export function buildExtraTextures(
   // --- Specular ---------------------------------------------------------
   report('Writing specular map', 0);
   const specSize = ddsDimensionsForMap(plan.mapx, plan.mapy, 'specular');
-  const specular = buildSpecular(inputs, specSize.width, specSize.height, plan);
+  const specular = buildSpecular(inputs, specSize.width, specSize.height);
   entries.push({
     path: `maps/${baseName}_specular.dds`,
     data: writeSpecularDds(specular, { mapx: plan.mapx, mapy: plan.mapy }),
@@ -194,6 +194,47 @@ export function buildExtraTextures(
 }
 
 /**
+ * How shiny one texel of ground is, and how tight its highlight.
+ *
+ * Pulled out of the texture writer because the preview has to shade with the
+ * same numbers. A preview that invents its own specular is not predicting the
+ * map — it is guessing at it, and the guess is the thing the author would then
+ * be tuning against. One function, two callers, no way for them to drift.
+ *
+ * Returns `[r, g, b, exponent]`, all 0..1. The engine reads the alpha back as
+ * `specularColor.a * 16`, so an exponent of 0.25 is a Blinn-Phong power of 4 —
+ * a very broad wash rather than a glint, which is what ground at map scale
+ * should have.
+ */
+export function specularRecipe(
+  /** Height in elmos; negative is below the water line. */
+  heightElmos: number,
+  slopeDegrees: number,
+  /** Ambient occlusion, 0..1. 1 is fully open sky. */
+  shelter: number,
+): [number, number, number, number] {
+  // Rock shows above the vehicle threshold, which is also roughly where soil
+  // stops holding on a real slope.
+  const rock = clamp01((slopeDegrees - 20) / 22);
+  // Underwater ground is wet, and wet is the strongest specular cue there is.
+  // The transition is over 40 elmos so the shoreline is not a hard line.
+  const wet = clamp01(-heightElmos / 40);
+
+  const intensity = 0.06 + rock * 0.22 + wet * 0.45;
+  // Sheltered ground is duller: less sky to reflect.
+  const shaded = intensity * (0.55 + 0.45 * shelter);
+  // A slight cool tint on wet surfaces, which is what water actually does to a
+  // reflection.
+  return [
+    shaded * (1 - wet * 0.15),
+    shaded * (1 - wet * 0.05),
+    shaded,
+    // Exponent: broad and soft on rough rock, tight and glossy when wet.
+    0.25 + wet * 0.5 + rock * 0.1,
+  ];
+}
+
+/**
  * The specular map.
  *
  * RGB is the specular colour and alpha times sixteen is the exponent, so this
@@ -203,11 +244,10 @@ export function buildExtraTextures(
  * and anything below the water line is wet and therefore shinier than it would
  * be dry.
  */
-function buildSpecular(
+export function buildSpecular(
   inputs: { height: Field; slopeDegrees: Field; occlusion?: Field },
   width: number,
   height: number,
-  plan: BuildPlan,
 ): Rgba8Image {
   const image = createImage(width, height);
   const sx = inputs.height.width / width;
@@ -221,24 +261,7 @@ function buildSpecular(
       const slope = sampleBilinear(inputs.slopeDegrees, u, v);
       const shelter = inputs.occlusion ? sampleBilinear(inputs.occlusion, u, v) : 1;
 
-      // Rock shows above the vehicle threshold, which is also roughly where
-      // soil stops holding on a real slope.
-      const rock = clamp01((slope - 20) / 22);
-      // Underwater ground is wet, and wet is the strongest specular cue there
-      // is. The transition is over 40 elmos so the shoreline is not a hard line.
-      const wet = clamp01(-z / 40);
-
-      const intensity = 0.06 + rock * 0.22 + wet * 0.45;
-      // Sheltered ground is duller: less sky to reflect.
-      const shaded = intensity * (0.55 + 0.45 * shelter);
-      // A slight cool tint on wet surfaces, which is what water actually does
-      // to a reflection.
-      const r = shaded * (1 - wet * 0.15);
-      const g = shaded * (1 - wet * 0.05);
-      const b = shaded;
-      // Exponent: broad and soft on rough rock, tight and glossy when wet.
-      const exponent = 0.25 + wet * 0.5 + rock * 0.1;
-
+      const [r, g, b, exponent] = specularRecipe(z, slope, shelter);
       const o = (y * width + x) * 4;
       image.data[o] = toByte(r);
       image.data[o + 1] = toByte(g);

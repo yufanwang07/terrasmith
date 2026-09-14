@@ -1,0 +1,201 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>ground shader parity</title>
+<body style="margin:0;background:#111;color:#ddd;font:13px monospace">
+<pre id="out">running…</pre>
+<script type="module">
+// Reads the ground shader's own framebuffer back and checks it against numbers
+// taken off `SMFFragProg.glsl`, not off this implementation. Serve the studio
+// and open /shader-parity.html.
+import * as THREE from 'three';
+import { createGroundMaterial, setGroundTexture, setGroundFog, setGroundDetail } from '/src/components/groundMaterial.ts';
+import { DEFAULT_DETAIL_LAYERS, generateDetailNormal } from '@terrasmith/build';
+import {
+  DEFAULT_SUN_DIR, DEFAULT_GROUND_AMBIENT, DEFAULT_GROUND_DIFFUSE,
+  DEFAULT_GROUND_SHADOW_DENSITY, DEFAULT_FOG_COLOR, SMF_INTENSITY_MULT,
+} from '@terrasmith/format';
+
+// Big enough that one pixel is well under one detail texel close up; the
+// footprint fade is a function of the pane's pixel count, so a 32-pixel pane
+// would fade the detail out at arm's length and make that check vacuous.
+const SIZE = 256;
+const ALBEDO = 128;
+const NO_FOG = { color: DEFAULT_FOG_COLOR, start: 1e8, end: 1e9 };
+
+const renderer = new THREE.WebGLRenderer({ antialias: false, preserveDrawingBuffer: true });
+renderer.setSize(SIZE, SIZE, false);
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFShadowMap;
+document.body.appendChild(renderer.domElement);
+
+const material = createGroundMaterial({
+  lighting: {
+    sunDir: DEFAULT_SUN_DIR,
+    ambient: DEFAULT_GROUND_AMBIENT,
+    diffuse: DEFAULT_GROUND_DIFFUSE,
+    shadowDensity: DEFAULT_GROUND_SHADOW_DENSITY,
+  },
+  fog: NO_FOG,
+});
+// Detail and specular off: these check the shading arithmetic alone.
+material.uniforms.texMults.value.set(0, 0, 0, 0);
+
+const pixel = new Uint8Array(4);
+pixel.set([ALBEDO, ALBEDO, ALBEDO, 255]);
+const map = new THREE.DataTexture(pixel, 1, 1, THREE.RGBAFormat);
+map.colorSpace = THREE.NoColorSpace;
+map.needsUpdate = true;
+setGroundTexture(material, 'map', map);
+
+const geometry = new THREE.PlaneGeometry(4000, 4000);
+geometry.setAttribute('color', new THREE.BufferAttribute(new Float32Array(12).fill(1), 3));
+const quad = new THREE.Mesh(geometry, material);
+quad.receiveShadow = true;
+
+const scene = new THREE.Scene();
+scene.add(quad);
+
+const sun = new THREE.Vector3(...DEFAULT_SUN_DIR.slice(0, 3)).normalize();
+const UP = new THREE.Vector3(0, 1, 0);
+const FORWARD = new THREE.Vector3(0, 0, 1);
+
+const light = new THREE.DirectionalLight(0xffffff, 0);
+light.position.copy(sun).multiplyScalar(20000);
+light.castShadow = true;
+light.shadow.mapSize.set(1024, 1024);
+const shadowCamera = light.shadow.camera;
+shadowCamera.left = -4000;
+shadowCamera.right = 4000;
+shadowCamera.top = 4000;
+shadowCamera.bottom = -4000;
+shadowCamera.near = 1;
+shadowCamera.far = 40000;
+shadowCamera.updateProjectionMatrix();
+scene.add(light, light.target);
+
+// Casts into the shadow map and paints nothing, because it stands between the
+// camera and the texel being measured.
+const blocker = new THREE.Mesh(
+  new THREE.PlaneGeometry(6000, 6000),
+  // DoubleSide because three renders the shadow pass with the side flipped, so
+  // a single-sided plane facing the light casts nothing at all.
+  new THREE.MeshBasicMaterial({ colorWrite: false, depthWrite: false, side: THREE.DoubleSide }),
+);
+blocker.position.copy(sun).multiplyScalar(2000);
+blocker.quaternion.setFromUnitVectors(FORWARD, sun);
+blocker.castShadow = true;
+blocker.visible = false;
+scene.add(blocker);
+
+const camera = new THREE.PerspectiveCamera(45, 1, 1, 100000);
+const gl = renderer.getContext();
+
+/** Point the quad's face at `normal`, look straight down it, read the middle. */
+function sample(normal) {
+  quad.quaternion.setFromUnitVectors(FORWARD, normal.clone().normalize());
+  camera.position.copy(normal).normalize().multiplyScalar(6000);
+  camera.lookAt(0, 0, 0);
+  camera.updateMatrixWorld();
+  material.uniforms.cameraPos.value.copy(camera.position);
+  renderer.render(scene, camera);
+  const buf = new Uint8Array(4);
+  gl.readPixels(SIZE >> 1, SIZE >> 1, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, buf);
+  return [buf[0], buf[1], buf[2]];
+}
+
+/** The engine's shade, per channel, as `groundShade` computes it. */
+function shade(ndotl, visibility) {
+  const lit = 1 - DEFAULT_GROUND_SHADOW_DENSITY * (1 - visibility);
+  return [0, 1, 2].map(
+    (i) => (DEFAULT_GROUND_AMBIENT[i] + DEFAULT_GROUND_DIFFUSE[i] * ndotl * lit) * SMF_INTENSITY_MULT,
+  );
+}
+
+const byte = (v) => Math.round(Math.min(1, (ALBEDO / 255) * v) * 255);
+
+const lines = [];
+let ok = true;
+function check(label, got, want, tolerance = 1) {
+  const pass = got.every((v, i) => Math.abs(v - want[i]) <= tolerance);
+  ok = ok && pass;
+  lines.push(`${pass ? 'PASS' : 'FAIL'}  ${label.padEnd(26)} got ${got.join(',')}  want ${want.join(',')}`);
+}
+
+check('flat ground, lit', sample(UP), shade(sun.y, 1).map(byte));
+check('face normal to the sun', sample(sun.clone()), shade(1, 1).map(byte));
+check('facing away from the sun', sample(sun.clone().negate()), shade(0, 1).map(byte));
+
+// Linear on eye distance, mixed last: at 6000 between 2000 and 10000, half the
+// colour is the fog colour.
+setGroundFog(material, { color: DEFAULT_FOG_COLOR, start: 2000, end: 10000 });
+{
+  const f = (10000 - 6000) / (10000 - 2000);
+  const want = shade(sun.y, 1).map((s, i) =>
+    Math.round(255 * (DEFAULT_FOG_COLOR[i] * (1 - f) + (ALBEDO / 255) * s * f)),
+  );
+  check('half-fogged flat ground', sample(UP), want);
+}
+setGroundFog(material, NO_FOG);
+
+// The shadow cuts the sun's contribution to 1 - groundShadowDensity and leaves
+// the ambient alone, which is the property a physically based renderer does not
+// have and the one that keeps a shadowed slope readable.
+blocker.visible = true;
+check('flat ground, in shadow', sample(UP), shade(sun.y, 0).map(byte));
+blocker.visible = false;
+
+// --- detail, and the footprint it fades on -----------------------------
+// Four tiles at their exported scales, weighted by an even distribution. Close
+// up the tile texels are bigger than a pixel and the detail has to show; at map
+// view they are a fortieth of one and it has to be gone, because that is what a
+// correctly filtered sample of a zero-mean texture gives.
+{
+  const tiles = DEFAULT_DETAIL_LAYERS.map((layer, i) => {
+    const image = generateDetailNormal(layer, 512, i);
+    const texture = new THREE.DataTexture(image.data, 512, 512, THREE.RGBAFormat);
+    texture.colorSpace = THREE.NoColorSpace;
+    texture.wrapS = texture.wrapT = THREE.RepeatWrapping;
+    texture.minFilter = THREE.LinearMipmapLinearFilter;
+    texture.generateMipmaps = true;
+    texture.anisotropy = renderer.capabilities.getMaxAnisotropy();
+    texture.needsUpdate = true;
+    return { texture, repeatElmos: layer.repeatElmos, tileSize: 512 };
+  });
+  setGroundDetail(material, tiles, [0.9, 0.8, 1.1, 0.5]);
+  material.uniforms.pixelScale.value = (2 * Math.tan((camera.fov * Math.PI) / 360)) / SIZE;
+
+  const flat = shade(sun.y, 1).map(byte);
+  const target = new THREE.Vector3();
+  const at = (distance) => {
+    quad.quaternion.setFromUnitVectors(FORWARD, UP);
+    camera.position.set(target.x, distance, target.z);
+    camera.lookAt(target);
+    camera.updateMatrixWorld();
+    material.uniforms.cameraPos.value.copy(camera.position);
+    renderer.render(scene, camera);
+    const buf = new Uint8Array(4);
+    gl.readPixels(SIZE >> 1, SIZE >> 1, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, buf);
+    return [buf[0], buf[1], buf[2]];
+  };
+
+  // Sample a spread of world positions close up: a single texel could sit
+  // anywhere in the tile, including on its mean.
+  let moved = 0;
+  const probes = [];
+  for (let i = 0; i < 9; i++) {
+    target.set(i * 7.3, 0, i * 11.7);
+    const got = at(120);
+    probes.push(got[0] - flat[0]);
+    if (Math.abs(got[0] - flat[0]) > 2) moved++;
+  }
+  target.set(0, 0, 0);
+  lines.push(`      detail offsets near: ${probes.join(', ')}`);
+  check('detail shows at 120 elmos', [moved >= 6 ? 1 : 0], [1], 0);
+  check('detail gone at 9000 elmos', at(9000), flat);
+}
+
+lines.push(ok ? 'ALL PASS' : 'FAILED');
+document.getElementById('out').textContent = lines.join('\n');
+window.__parity = { ok, lines };
+</script>
+</body>

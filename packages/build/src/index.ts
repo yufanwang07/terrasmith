@@ -19,6 +19,8 @@ export {
 export {
   buildExtraTextures,
   generateDetailNormal,
+  specularRecipe,
+  buildSpecular,
   DEFAULT_DETAIL_LAYERS,
   type DetailLayer,
   type ExtraTextureOptions,
