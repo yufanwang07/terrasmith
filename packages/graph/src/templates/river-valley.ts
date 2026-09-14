@@ -279,28 +279,28 @@ export const RIVER_VALLEY: Template = {
     // 781 elmos of relief. Nobody measures that. They lose to it and say the
     // map is unfair.
     //
-    // **Last, where the other two templates with cut routes cannot put it.**
-    // Their crossings come out of a mask taken from noise, so a half turn
-    // applied after the cut keeps the north half's routes, throws the south's
-    // away, and the routes pinch shut on the join. Here the crossings are drawn
-    // as three lines whose partners are also crossings, so a copy cannot lose
-    // one: the south half of the ford at x = 1 680 becomes the rotation of the
-    // north half of the ford at 8 560, which is a ford of the same width at the
-    // same height, one grid sample out of line. The copy improves the map
-    // rather than damaging it, for the reason canyon-lanes found — every
-    // approach it keeps, it keeps twice. Before the turn the largest area a
-    // vehicle can cross in one piece is 39% of the map, because some of the
-    // southern approaches are bluffs; after it, 77%.
+    // **Last, where a template whose routes come out of noise cannot put it.**
+    // A crossing selected from a mask has no partner, so a half turn applied
+    // after the cut keeps the north half's routes, throws the south's away, and
+    // the routes pinch shut on the join — which is what mountain-range measured
+    // before it started drawing its passes too. Here the crossings are drawn as
+    // three lines whose partners are also crossings, so a copy cannot lose one:
+    // the south half of the ford at x = 1 680 becomes the rotation of the north
+    // half of the ford at 8 512, which is a ford of the same width at the same
+    // height. The copy improves the map rather than damaging it, for the reason
+    // canyon-lanes found — every approach it keeps, it keeps twice. Before the
+    // turn the largest area a vehicle can cross in one piece is 39% of the map,
+    // because some of the southern approaches are bluffs; after it, 77%.
     //
-    // Putting it before the carve was measured, and it fails at the one thing
-    // this map is not allowed to fail. The layout nodes work in world elmos and
-    // this node permutes grid samples, and the two disagree about where the
-    // middle of the map is: on a grid of N samples spanning W elmos the
-    // rotation centre sits at sample (N-1)/2, which is half a sample — 4.0
-    // elmos on both axes at the export grid — short of W/2. So a drawing
-    // symmetric about the middle of the map is not symmetric about the grid's
-    // own centre, and a carve applied after the fix puts the error back: 1.2
-    // elmos RMS and 12 at the worst point, against 0.000 and 0.000 here.
+    // Putting it before the carve would also work now, and did not when this was
+    // written: the graph layer used to place sample k at k * worldWidth/N rather
+    // than k * worldWidth/(N-1), so the map's own centre fell half a sample —
+    // 4.0 elmos on both axes at the export grid — short of the grid's, and a
+    // drawing symmetric about the middle of the map came out 1.2 elmos RMS off.
+    // With that fixed a symmetric route set survives a carve on either side of
+    // the half turn. Last is still the better place, because it is the only
+    // arrangement where the *unfair* part of the terrain — the valley sides the
+    // noise made — is reconciled after everything drawn has been cut into it.
     //
     // **Copying one half rather than blending.** Every blend costs the map
     // something it cannot spare. Averaging softens each disagreement, which

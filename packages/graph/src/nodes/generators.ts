@@ -136,7 +136,8 @@ export const noiseNode: NodeDefinition<NoiseParams> = {
     }),
     num('sharpness', 'Ridge sharpness', 0.625, {
       min: 0.25,
-      max: 1.5,
+      max: 3,
+      softMax: 1.5,
       step: 0.05,
       visibleWhen: (p) => p.fractal === 'ridged',
       description:
@@ -144,8 +145,9 @@ export const noiseNode: NodeDefinition<NoiseParams> = {
         'knife edges with wide valleys between them. Past about 1 it stops sharpening the crest and ' +
         'starts flattening everything else: a seventh of the map is clamped dead at every detail ' +
         'level, so it has no detail at any scale while the rest has all of it, which is what makes a ' +
-        'map look like two terrains stuck together. The old slider went to 3, where more than half ' +
-        'the map is clamped.',
+        'map look like two terrains stuck together. The slider stops at 1.5 for that reason; the ' +
+        'range goes to 3 because a map built on wide flat mesas with narrow channels between them ' +
+        'wants exactly that clamping, and Canyon lanes is one.',
     }),
     choice(
       'type',

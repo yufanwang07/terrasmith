@@ -18,10 +18,18 @@ import {
 } from '../src/nodes/layout.js';
 
 /** A 16x16 BAR map (8192 elmos) at whatever grid resolution a test asks for. */
-function ctx(width: number, overrides: Partial<EvalContext> = {}): EvalContext {
+/**
+ * A grid of `squares + 1` samples, which is the shape a heightfield actually
+ * has: a 16x16 map is 1024 squares of 8 elmos and 1025 samples, the first on
+ * the near edge and the last on the far one. Passing the square count rather
+ * than the sample count keeps the numbers in these tests round — `ctx(256)` is
+ * 32 elmos a sample on an 8192-elmo map, exactly — and it is what makes the
+ * map's centre land on a sample instead of between two.
+ */
+function ctx(squares: number, overrides: Partial<EvalContext> = {}): EvalContext {
   return {
-    width,
-    height: width,
+    width: squares + 1,
+    height: squares + 1,
     worldWidth: 8192,
     worldHeight: 8192,
     seed: 11,
@@ -84,13 +92,14 @@ function analyticTerrain(c: EvalContext): Field {
  *
  * Sample `i` of the coarse grid sits at the same world position as sample
  * `i * ratio` of the fine one, because both grids place sample `k` at
- * `k * cellSize` and cellSize is the world width divided by the sample count.
- * Anything the layout layer produces is a function of world position alone, so
- * those samples must agree — if they do not, the layout is secretly measured in
- * texels and the preview is lying about the build.
+ * `k * cellSize` and cellSize is the world width divided by the number of
+ * *intervals* — one fewer than the number of samples. Anything the layout layer
+ * produces is a function of world position alone, so those samples must agree —
+ * if they do not, the layout is secretly measured in texels and the preview is
+ * lying about the build.
  */
 function compareResolutions(coarse: Field, fine: Field, tolerance: number): number {
-  const ratio = fine.width / coarse.width;
+  const ratio = (fine.width - 1) / (coarse.width - 1);
   let worst = 0;
   for (let iz = 0; iz < coarse.height; iz++) {
     for (let ix = 0; ix < coarse.width; ix++) {

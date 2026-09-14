@@ -89,7 +89,9 @@ interface Reach {
 
 const REACH: Readonly<Record<string, Reach>> = {
   'rolling-hills': { vehicle: 0.7, bot: 0.85 },
-  'mountain-range': { vehicle: 0.5, bot: 0.85 },
+  // Its passes are drawn rather than found, so this holds on every seed: across
+  // the first eight it measures 0.74 to 0.85 vehicle and 0.94 to 0.98 bot.
+  'mountain-range': { vehicle: 0.59, bot: 0.85 },
   // Naval: the largest vehicle region is the largest island, and that is the
   // point of the map rather than a defect in it.
   'island-cluster': { vehicle: 0.3, bot: 0.32 },

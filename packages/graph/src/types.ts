@@ -166,9 +166,23 @@ export interface EvalContext {
   onNodeProgress?: (nodeId: string, t: number) => void;
 }
 
-/** Distance between adjacent samples, in elmos. */
+/**
+ * Distance between adjacent samples, in elmos.
+ *
+ * `width - 1`, not `width`: a heightfield of N samples has N-1 intervals
+ * between them, with the first sample on the map's near edge and the last on
+ * its far edge. That is the engine's own convention — a 16x16 map is 1024
+ * squares of 8 elmos and 1025 samples — and it is what the exporter, the
+ * viewport and `engineSlopeMap` all use.
+ *
+ * Dividing by `width` instead, which this did, put every world coordinate about
+ * a tenth of a per cent short: a shape drawn at the far edge landed 8 elmos
+ * inside it, and — the reason it was found — the map's centre fell between two
+ * samples rather than on one, so a pair of drawn features placed as each
+ * other's half turn could not come out symmetric at any resolution.
+ */
 export function cellSize(ctx: EvalContext): number {
-  return ctx.worldWidth / ctx.width;
+  return ctx.worldWidth / Math.max(1, ctx.width - 1);
 }
 
 /** Arguments handed to a node's `evaluate`. */
