@@ -438,7 +438,9 @@ export const plateausNode: NodeDefinition<PlateauParams> = {
       min: 0,
       max: 1,
       step: 0.05,
-      description: 'How abruptly the sides drop away. 1 gives near-vertical cliffs.',
+      description:
+        'How steep the sides are. It steepens them by pulling the whole shape inward, ' +
+        'so 1 is a narrow spike rather than a wide flat top with a cliff round it.',
     }),
     seedParam(),
     num('margin', 'Edge margin', 0.08, {
@@ -478,8 +480,13 @@ export const plateausNode: NodeDefinition<PlateauParams> = {
           const dy = (y - cy) / ry;
           const d = Math.sqrt(dx * dx + dy * dy);
           if (d >= 1) continue;
-          // A power curve on the radius: higher sharpness keeps the top flat
-          // for longer before the sides fall away.
+          // A power curve on the radius. It does steepen the sides — the
+          // steepest gradient goes from 1.5 at sharpness 0 to 18 at 1 — but it
+          // does so by contracting the whole dome toward the centre, not by
+          // holding a flat top out to a cliff: the half-height point moves from
+          // half the radius to 3.5% of it. At 1 there is no plateau left at all,
+          // which is why every shipped template that wants a broad crater or
+          // mesa uses 0.
           const edge = Math.pow(1 - d, 1 / Math.max(0.05, 1 - params.edgeSharpness * 0.95));
           const w = edge * edge * (3 - 2 * edge);
           const idx = y * ctx.width + x;

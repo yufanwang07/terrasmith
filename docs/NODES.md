@@ -89,7 +89,7 @@ Overlapping plateaus merge into one platform rather than stacking into a tower.
 | Radius variation | number | 0 – 1 | 0.3 | How much the radii differ from each other. |
 | Height | elmos | −2000 – 2000 | 200 | How far above (or below) the surroundings the tops sit. |
 | Height variation | number | 0 – 1 | 0.2 | How much the heights differ. |
-| Edge sharpness | number | 0 – 1 | 0.6 | How abruptly the sides drop away. 1 gives near-vertical cliffs. |
+| Edge sharpness | number | 0 – 1 | 0.6 | How steep the sides are. It steepens them by shrinking the whole shape toward its centre, so 1 is a narrow spike, not a wide flat top with a cliff round it. Use 0 for a broad crater or mesa. |
 | Seed | seed | — | 0 | Rerolls the placement. |
 | Edge margin | number | 0 – 0.4 | 0.08 | *Advanced.* Keeps plateaus away from the map border, as a fraction of the map size. |
 

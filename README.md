@@ -142,7 +142,7 @@ every layer runs in a browser tab, in a worker, in Node and in CI.
 - **The node graph.** 50 node types across generators, layout, filters, combiners, selectors, natural processes, gameplay,
   outputs and utilities, with a pull-based evaluator memoised on content hashes. The CLI's `nodes` command
   prints the live list; [docs/NODES.md](docs/NODES.md) is the written reference.
-- **Seven templates** that are complete, buildable maps rather than empty graphs.
+- **Thirteen templates** that are complete, buildable maps rather than empty graphs.
 - **The build pipeline and CLI.** A project file becomes a loadable `.sd7` containing the `.smf`, the
   deduplicated `.smt`, a generated `mapinfo.lua`, the `maphelper` shim, a `maps-metadata` record and a
   metal layout Lua file.

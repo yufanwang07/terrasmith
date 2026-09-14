@@ -19,7 +19,7 @@ type is a real distance in the game.
 
 ## 1. Start from a template
 
-Do not start from an empty graph. Terrasmith ships seven complete, buildable maps, and changing one is a
+Do not start from an empty graph. Terrasmith ships thirteen complete, buildable maps, and changing one is a
 much better first hour than building one from nothing.
 
 | Template | Size | Players | What it is |
@@ -27,10 +27,16 @@ much better first hour than building one from nothing.
 | Rolling hills | 16x16 | 2–12 | Broad hills, wide flat valleys, a few lakes. Almost all of it drivable. |
 | Mountain range | 16x16 | 2–10 | High ground worth fighting for, with passes between. |
 | Island cluster | 20x20 | 4–16 | Naval, with contested shallows between the islands. |
-| Canyon lanes | 20x16 | 8–16 | Plateaus split by deep channels — a lane map. |
+| Canyon lanes | 20x16 | 6–16 | Plateaus split by deep channels — a lane map. |
 | Highland basin | 20x20 | 8–16 | A ring of high ground around an open middle. |
 | Almost flat | 12x12 | 2–8 | A blank slate. The one to learn the controls on. |
 | Volcanic shelf | 16x16 | 4–12 | Black rock, steep sides, a flooded caldera. |
+| River valley | 20x16 | 4–12 | A river down the length of it with three fords. Hold a crossing. |
+| Coastal shelf | 24x16 | 4–14 | Ridges falling to an open plain and a beach a navy can land on. |
+| Twin plateaus | 20x20 | 6–16 | A mesa each side, a basin between, three cut ramps a side. |
+| Frozen lake | 20x20 | 4–16 | Tundra hills round a great flat lake with no cover on it. |
+| Dune sea | 24x16 | 4–12 | Open dunes and salt pans. Nowhere to hide anything. |
+| Crater field | 20x20 | 6–16 | A Martian plain pocked with pits and dust-filled basins. |
 
 Pick one. Then find the **Seed** control and change it.
 

@@ -337,7 +337,15 @@ describe('claims that were retracted stay retracted', () => {
 });
 
 function numberWord(n: number): string {
-  return ['zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight'][n] ?? String(n);
+  // Only as far as the shipped set goes, and deliberately so: the next person
+  // to add a template gets a failure that names the number rather than a table
+  // that quietly starts counting in digits halfway down the docs.
+  return (
+    [
+      'zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight',
+      'nine', 'ten', 'eleven', 'twelve', 'thirteen', 'fourteen', 'fifteen', 'sixteen',
+    ][n] ?? String(n)
+  );
 }
 
 function capitalise(s: string): string {

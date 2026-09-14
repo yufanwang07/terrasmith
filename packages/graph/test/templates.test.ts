@@ -99,6 +99,15 @@ const REACH: Readonly<Record<string, Reach>> = {
   // The deliberately hostile one. Vehicles hold shelf systems rather than the
   // map, but they have to hold something bigger than a car park.
   'volcanic-shelf': { vehicle: 0.18, bot: 0.6 },
+  'river-valley': { vehicle: 0.62, bot: 0.68 },
+  // Half the map is sea, and the shelf is what is left. The dry half still has
+  // to be properly drivable.
+  'coastal-shelf': { vehicle: 0.45, bot: 0.62 },
+  'twin-plateaus': { vehicle: 0.7, bot: 0.78 },
+  'frozen-lake': { vehicle: 0.75, bot: 0.85 },
+  'dune-sea': { vehicle: 0.74, bot: 0.79 },
+  // Vehicles hold the plain between the craters; bots go down into them.
+  'crater-field': { vehicle: 0.53, bot: 0.79 },
 };
 
 const registry = createDefaultRegistry();

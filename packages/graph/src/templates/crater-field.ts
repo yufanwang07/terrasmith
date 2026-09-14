@@ -56,21 +56,38 @@ export const CRATER_FIELD: Template = {
     // Seven rather than more, because overlap is what stops them reading as
     // craters. Inside one node the deeper of two overlapping domes wins, and the
     // line where the two are equally deep is a straight crease, so a field of
-    // these at any density comes out as polygons. Twelve also takes the largest
-    // area a vehicle can hold in one piece from 66% of the map down to 60%, and
-    // pushes the centre seam from 3.2 elmos to 4.9 because more of them straddle
-    // it.
+    // these at any density comes out as polygons.
+    //
+    // Seven does not avoid that, and the file used to claim it did. Several
+    // creases hundreds of elmos long do cut across these walls — clearest on the
+    // two lobed central basins — and the `rims` pass below sharpens them. They
+    // are cosmetic and they are visible: no cell on either plateaus node exceeds
+    // that node's own steepest lone dome, and no crease shows up as a 27-degree
+    // line in the slope bands, so nothing a unit does changes at one. They are
+    // simply the first thing you see in a hillshade. More craters would be
+    // worse, and would also take the largest area a vehicle can hold in one
+    // piece from 66% of the map down to 60% at twelve, and push the centre seam
+    // from 3.2 elmos to 4.9 because more of them straddle it.
     //
     // 760 elmos of depth against the 420-elmo fill level below, and what lies
     // past the fill sets the wall angle and nothing else. The dome this node
     // draws is a smoothstep, whose steepest point is `1.5 * height / radius`, so
-    // the steepest cell the engine should read off one of these is
-    // `atan(1.5 * 760 / 1450)` = 38.2 degrees; measured on the exported grid it
-    // is 38.0. That is the number the map is built around: past 27, so a vehicle
-    // that drives into a filled basin stays there, and well under 54, so every
-    // bot and every commander walks out. At 620 the walls are 32.7 degrees and
-    // the largest vehicle region grows to 73% of the map; at 900 they are 43,
-    // it falls to 65%, and the best lab site on the whole map ends up inside a
+    // `atan(1.5 * height / radius)` is the wall angle of a lone crater.
+    //
+    // Note that is per crater, not for the class: `radiusVariation` and
+    // `heightVariation` are independent draws, so the nominal 38 degrees the
+    // parameters suggest is an angle no crater on this map actually has.
+    // Replaying the node's own generator, the seven come out at 47.0, 28.8,
+    // 29.7, 27.5, 44.9, 46.2 and 41.8 degrees — a spread of twenty, not a
+    // number. What matters is where that spread sits: every one of them is past
+    // 27, so a vehicle that drives into a filled basin stays there, and every
+    // one is well under 54, so every bot and every commander walks out. Two of
+    // the seven sit within two degrees of the vehicle line, which is why only
+    // four distinct floors are traps rather than all seven — the eight the fill
+    // comment counts below are those four and their mirrors. At 620 the walls
+    // are 32.7 degrees on average and
+    // the largest vehicle region grows to 73% of the map; at 900 it falls to
+    // 65%, and the best lab site on the whole map ends up inside a
     // crater no vehicle can reach — which is a map that fails its own base test
     // while looking better in a render.
     //
@@ -96,12 +113,20 @@ export const CRATER_FIELD: Template = {
     // which is the difference between a simple crater and a complex one, and it
     // comes free from the two classes having different depths.
     //
-    // The height variation is narrower than the radius variation on purpose.
-    // Both read the same random draw, so a crater that came out 55% wider came
-    // out only 40% deeper, and depth over radius falls as the crater grows:
-    // 26.3 degrees of wall on the smallest of this class against 22.3 on the
-    // largest. That spread is small, and the `rims` pass below is what turns it
-    // into the thing a player notices.
+    // The height variation is narrower than the radius variation, which is a
+    // choice about the *shape of the distribution* and not about any individual
+    // crater. `generator.plateaus` draws the radius and the height from two
+    // separate calls, so they are independent — measured correlation across
+    // these hundred is -0.089 — and a crater that came out 55% wider is as
+    // likely as not to have come out deeper too. What the narrower height
+    // variation buys is that the extremes of the two cannot compound: the
+    // steepest pock this class can produce is bounded by the widest height
+    // against the narrowest radius, and at these numbers the hundred run from
+    // 10.8 to 47.6 degrees of wall.
+    //
+    // That is already a wide spread — wider than the file used to claim, which
+    // read the two variations as one draw — and the `rims` pass below widens it
+    // further at the small end.
     g.node('pocks', 'generator.plateaus', {
       count: 100,
       radius: 380,
@@ -127,9 +152,9 @@ export const CRATER_FIELD: Template = {
     //
     // That asymmetry is the point. The radius is a fixed 240 elmos, so the
     // effect is strongest on craters near that size and fades on anything much
-    // larger, and the small class arrives here spread over four degrees of wall
-    // angle and leaves spread over twenty-four: 51.7 degrees at 420 elmos
-    // across, 36.8 at 760, 27.7 at 1 180. So the smallest craters are holes
+    // larger, so it steepens the small end of the pock class and barely touches
+    // the large end: 51.7 degrees at 420 elmos across, 36.8 at 760, 27.7 at
+    // 1 180. So the smallest craters are holes
     // nothing but a bot enters, the middle of the class stops vehicles, and the
     // largest of it sits on the 27-degree line — a tank gets into some of them
     // and not others, which is the reading a player has to make at a glance.
@@ -189,11 +214,19 @@ export const CRATER_FIELD: Template = {
     // largest 2.4% each. Without the fill there are two, because an unfilled
     // bowl narrows to a point and there is nothing inside it to be cut off.
     //
-    // The softness is what makes a pan buildable. At 0 the fill cuts a dead flat
-    // floor with a crease round it; above 0 the node approaches the limit
-    // asymptotically instead, which compresses rather than cuts — the 51 elmos
-    // the bowl falls between 128 and 256 elmos out come back as 3 — so the floor
-    // is flat enough for a factory and still meets its own wall without a step.
+    // The softness costs a little building ground and buys the join. A hard
+    // clamp is the better floor and it is worth saying so plainly: at 0 the pan
+    // is dead level — no rise at all over the first 512 elmos out — and the best
+    // lab site on the map is 1 024 elmos at a spread of 19.7. At 160 the floor
+    // rises 3.2 elmos between 128 and 256 out and the best site falls to 768 at
+    // 21.3, which is still inside the 21.4 the rule allows.
+    //
+    // What the 160 pays for is the crease. A hard clamp meets its own wall at a
+    // corner; approaching the limit asymptotically compresses instead of cutting
+    // — the 94 elmos the bowl falls between 128 and 256 out come back as 3 — and
+    // that removes a third of the ground past 54 degrees (1.9% to 1.5%) and two
+    // points of the bot-only band (15.2% to 13.1%). Flat floor or clean wall;
+    // this map takes the wall, because the floor it gives up still fits a lab.
     //
     // The level itself is the trade. At -300 the pans are shallow enough that
     // 84% of the map is drivable and the two biggest cut-off floors shrink from
