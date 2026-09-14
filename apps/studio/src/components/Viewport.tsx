@@ -17,6 +17,7 @@ import type { PreviewState } from '../state/preview.js';
 import type { OverlayKind } from '../state/store.js';
 import { symmetryErrorField, type SymmetryKind } from '@terrasmith/core';
 import { overlayColorFor } from './overlays.js';
+import { DEFAULT_DETAIL_LAYERS, generateDetailNormal } from '@terrasmith/build';
 import { FeatureLayer, type DrawnFeature } from './Features.js';
 import { MarkerLayer, type Marker } from './Markers.js';
 
@@ -192,7 +193,11 @@ function createViewport(mount: HTMLElement, handlers: ViewportHandlers): Viewpor
   mount.appendChild(renderer.domElement);
 
   const scene = new THREE.Scene();
-  scene.fog = new THREE.Fog(0x0a0c0f, 8000, 40000);
+  // Distance haze, scaled to the map when one arrives. The fixed 8 000 this
+  // started at is inside an ordinary 16x16 map, so a fifth of the terrain was
+  // being washed toward the background colour — which reads as a rendering
+  // fault rather than as distance.
+  scene.fog = new THREE.Fog(0x0a0c0f, 40000, 160000);
 
   const camera = new THREE.PerspectiveCamera(45, 1, 10, 120000);
 
@@ -212,6 +217,19 @@ function createViewport(mount: HTMLElement, handlers: ViewportHandlers): Viewpor
     metalness: 0.0,
     flatShading: false,
   });
+  // Close-range detail.
+  //
+  // The painted surface is one texel per ten elmos at preview resolution, so a
+  // close camera sees a smooth wash however good the palette is — and the
+  // export paints at one texel per elmo, which means the preview is smoother
+  // than the map it is previewing. A tiling normal map puts the missing
+  // roughness back without pretending to know its colour: it is the same
+  // generator the exporter uses for the detail-normal set the engine applies,
+  // at the same world repeat, so what it suggests up close is what the map will
+  // actually have.
+  terrainMaterial.normalMap = buildDetailNormal();
+  terrainMaterial.normalScale = new THREE.Vector2(2, 2);
+
   const terrain = new THREE.Mesh(new THREE.BufferGeometry(), terrainMaterial);
   scene.add(terrain);
 
@@ -379,6 +397,20 @@ function createViewport(mount: HTMLElement, handlers: ViewportHandlers): Viewpor
       featureLayer.reground(heightAt);
       rebuildWater(worldWidth, worldHeight);
 
+      // Haze begins past the far corner of the map and is complete well beyond
+      // it, so the map itself is never fogged and the horizon still recedes.
+      const diagonal = Math.hypot(worldWidth, worldHeight);
+      const fog = scene.fog as THREE.Fog;
+      fog.near = diagonal * 1.2;
+      fog.far = diagonal * 4;
+
+      const detail = terrainMaterial.normalMap;
+      if (detail) {
+        const repeatElmos = (detail.userData.repeatElmos as number) || 130;
+        detail.repeat.set(worldWidth / repeatElmos, worldHeight / repeatElmos);
+        detail.needsUpdate = true;
+      }
+
       if (!framed) {
         orbit.frame(worldWidth, worldHeight, result.max - result.min);
         framed = true;
@@ -455,6 +487,7 @@ function createViewport(mount: HTMLElement, handlers: ViewportHandlers): Viewpor
       markerLayer.dispose();
       featureLayer.dispose();
       surfaceTexture?.dispose();
+      terrainMaterial.normalMap?.dispose();
       terrain.geometry.dispose();
       (terrain.material as THREE.Material).dispose();
       water.geometry.dispose();
@@ -917,4 +950,31 @@ function buildWaterGeometry(
   // ride at the same scale or a 3x view puts the sea under the sea bed.
   geometry.scale(1, exaggeration, 1);
   return geometry;
+}
+
+/**
+ * The tiling detail normal the terrain wears up close.
+ *
+ * Built once and shared: it is 512 squared of Perlin, a few tens of
+ * milliseconds, and it never changes — the layer is the ground one, which is
+ * the surface most of most maps are. The repeat is set against the map's own
+ * size when the terrain lands, because the UVs run 0..1 over the map and a
+ * fixed repeat would make the detail four times coarser on a 32x32 map than on
+ * a 16x16 one.
+ */
+function buildDetailNormal(): THREE.DataTexture {
+  const layer = DEFAULT_DETAIL_LAYERS[1];
+  const image = generateDetailNormal(layer, 256, 1);
+  const texture = new THREE.DataTexture(image.data, image.width, image.height, THREE.RGBAFormat);
+  // A normal map is not a colour, so it must not be decoded as one.
+  texture.colorSpace = THREE.NoColorSpace;
+  texture.wrapS = THREE.RepeatWrapping;
+  texture.wrapT = THREE.RepeatWrapping;
+  texture.minFilter = THREE.LinearMipmapLinearFilter;
+  texture.magFilter = THREE.LinearFilter;
+  texture.generateMipmaps = true;
+  texture.anisotropy = 4;
+  texture.needsUpdate = true;
+  texture.userData.repeatElmos = layer.repeatElmos;
+  return texture;
 }
