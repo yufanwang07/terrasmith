@@ -70,6 +70,17 @@ export interface StripTask {
   seed: number;
   /** Edge of the minimap this strip contributes to. */
   minimapSize: number;
+  /**
+   * Shade at one texel in `shadeScale`, then upsample to the texture grid.
+   *
+   * 1 is full resolution and what a real build uses. A draft sets 2: the
+   * heightfield, the tile grid and everything the engine validates stay exactly
+   * as they are, and only the colour is blurrier — which is the right trade
+   * when the question is "is the shape right", because shading is four fifths
+   * of a build and a draft that costs nine tenths of a release is not a draft.
+   * @default 1
+   */
+  shadeScale?: number;
 }
 
 export interface StripResult {
@@ -126,43 +137,60 @@ export function runStripTask(task: StripTask): StripResult {
   const paddedRows = task.rows + halo * 2;
   const slice = task.analysis;
 
+  // The grid the shading actually runs on. At scale 1 it is the texture grid;
+  // a draft halves it and the result is stretched back up at the end.
+  const scale = Math.max(1, Math.round(task.shadeScale ?? 1));
+  const shadeWidth = Math.max(1, Math.round(textureWidth / scale));
+  const shadeRows = Math.max(1, Math.round(paddedRows / scale));
+
   // Bilinear taps for this strip. Columns depend only on the texture width, but
   // recomputing them per strip is a few thousand operations against a few
   // million texels of work, and it keeps the task self-contained.
-  const columns = axisTable(textureWidth, slice.width / textureWidth, slice.width, 0);
+  const columns = axisTable(shadeWidth, slice.width / shadeWidth, slice.width, 0);
   const rows = axisTable(
-    paddedRows,
-    task.analysisHeight / task.textureHeight,
+    shadeRows,
+    task.analysisHeight / (task.textureHeight / scale),
     task.analysisHeight,
-    task.y - halo,
+    (task.y - halo) / scale,
     slice.rowOffset,
   );
 
   const fields = {
-    height: upsample(slice.height_, slice.width, slice.height, columns, rows, textureWidth, paddedRows),
-    slopeDegrees: upsample(slice.slopeDegrees, slice.width, slice.height, columns, rows, textureWidth, paddedRows),
-    flow: upsample(slice.flow, slice.width, slice.height, columns, rows, textureWidth, paddedRows),
-    deposition: upsample(slice.deposition, slice.width, slice.height, columns, rows, textureWidth, paddedRows),
-    wear: upsample(slice.wear, slice.width, slice.height, columns, rows, textureWidth, paddedRows),
-    occlusion: upsample(slice.occlusion, slice.width, slice.height, columns, rows, textureWidth, paddedRows),
-    curvature: upsample(slice.curvature, slice.width, slice.height, columns, rows, textureWidth, paddedRows),
-    wetness: upsample(slice.wetness, slice.width, slice.height, columns, rows, textureWidth, paddedRows),
+    height: upsample(slice.height_, slice.width, slice.height, columns, rows, shadeWidth, shadeRows),
+    slopeDegrees: upsample(slice.slopeDegrees, slice.width, slice.height, columns, rows, shadeWidth, shadeRows),
+    flow: upsample(slice.flow, slice.width, slice.height, columns, rows, shadeWidth, shadeRows),
+    deposition: upsample(slice.deposition, slice.width, slice.height, columns, rows, shadeWidth, shadeRows),
+    wear: upsample(slice.wear, slice.width, slice.height, columns, rows, shadeWidth, shadeRows),
+    occlusion: upsample(slice.occlusion, slice.width, slice.height, columns, rows, shadeWidth, shadeRows),
+    curvature: upsample(slice.curvature, slice.width, slice.height, columns, rows, shadeWidth, shadeRows),
+    wetness: upsample(slice.wetness, slice.width, slice.height, columns, rows, shadeWidth, shadeRows),
   };
 
   const asField = (data: Float32Array): Field => ({
-    width: textureWidth,
-    height: paddedRows,
+    width: shadeWidth,
+    height: shadeRows,
     data,
   });
 
   let color: ColorField;
   if (slice.color) {
+    // A colour map the graph supplied is resampled straight onto the texture
+    // grid: it is data, not shading, and halving it would throw away detail the
+    // author put there rather than detail the shader invented.
+    const fullColumns = axisTable(textureWidth, slice.width / textureWidth, slice.width, 0);
+    const fullRows = axisTable(
+      paddedRows,
+      task.analysisHeight / task.textureHeight,
+      task.analysisHeight,
+      task.y - halo,
+      slice.rowOffset,
+    );
     color = upsampleColor(
       slice.color,
       slice.width,
       slice.height,
-      columns,
-      rows,
+      fullColumns,
+      fullRows,
       textureWidth,
       paddedRows,
     );
@@ -181,8 +209,11 @@ export function runStripTask(task: StripTask): StripResult {
       task.palette,
       {
         // The diffuse is one texel per elmo at BAR's resolution, which is what
-        // makes every distance in the palette rules a real distance.
-        cellSize: 1,
+        // makes every distance in the palette rules a real distance — so a
+        // shading grid at half that has cells two elmos across, and saying so
+        // is what keeps a draft's palette rules measuring the same distances as
+        // the release's.
+        cellSize: scale,
         waterLevel: 0,
         lighting: {
           occlusionStrength: task.occlusionStrength,
@@ -192,6 +223,16 @@ export function runStripTask(task: StripTask): StripResult {
     );
   }
 
+  if (scale > 1 && !slice.color) {
+    // Back onto the texture grid. Bilinear, so the seam between two strips
+    // matches: both read the same shading samples through the same taps.
+    const outColumns = axisTable(textureWidth, shadeWidth / textureWidth, shadeWidth, 0);
+    const outRows = axisTable(paddedRows, shadeRows / paddedRows, shadeRows, 0);
+    color = upsampleColor(color.data, shadeWidth, shadeRows, outColumns, outRows, textureWidth, paddedRows);
+  }
+
+  // Grain stays on the texture grid whatever the shading ran at: it is
+  // per-texel noise, and stretching it would make it per-block mottling.
   if (task.grain > 0) {
     applyGrain(color, 0, task.y - halo, task.grain, task.grainScale, task.seed);
   }

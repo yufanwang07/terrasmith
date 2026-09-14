@@ -248,3 +248,34 @@ describe('generated detail normals', () => {
     expect(max - min).toBeGreaterThan(20);
   });
 });
+
+describe('the draft shading grid', () => {
+  const project = createProject();
+
+  it('coarsens only the shading, never the map', () => {
+    const draft = planBuild(project, { quality: 'draft' });
+    const standard = planBuild(project, { quality: 'standard' });
+    expect(draft.shadeScale).toBe(2);
+    expect(standard.shadeScale).toBe(1);
+    // A draft is still a real map: same squares, same heightfield, same tile
+    // grid, same texture. The engine validates all of those and none of them
+    // may move.
+    expect(draft.mapx).toBe(standard.mapx);
+    expect(draft.heightmapWidth).toBe(standard.heightmapWidth);
+    expect(draft.textureWidth).toBe(standard.textureWidth);
+    expect(draft.textureHeight).toBe(standard.textureHeight);
+  });
+
+  it('divides the shading grid evenly into the texture', () => {
+    // A scale that does not divide the strip leaves a partial row of shading
+    // samples, and the upsample then reads past the end of it.
+    for (const size of [8, 12, 16, 20, 24, 32]) {
+      const plan = planBuild(
+        createProject({ settings: { ...project.settings, sizeX: size, sizeZ: size } }),
+        { quality: 'draft' },
+      );
+      expect(plan.textureWidth % plan.shadeScale).toBe(0);
+      expect(plan.blockSize % plan.shadeScale).toBe(0);
+    }
+  });
+});

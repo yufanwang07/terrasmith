@@ -492,6 +492,10 @@ function buildStripTasks(
   explicitColor: ColorField | undefined,
   palette: MaterialPalette,
 ): StripTask[] {
+  // Two rows of context above and below, so the strip's shading reads the same
+  // neighbourhood a whole-map pass would. Even on purpose: a draft shades on a
+  // half-resolution grid and offsets into it by `y - halo`, which has to land
+  // on a sample.
   const halo = 2;
   const stripRows = Math.max(32, Math.floor(plan.blockSize / 32) * 32);
   const stripCount = Math.ceil(plan.textureHeight / stripRows);
@@ -530,6 +534,7 @@ function buildStripTasks(
       grainScale: 12,
       seed: project.settings.seed,
       minimapSize: MINIMAP_SIZE_PX,
+      shadeScale: plan.shadeScale,
     });
   }
   return tasks;

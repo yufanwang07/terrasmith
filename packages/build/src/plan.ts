@@ -50,6 +50,8 @@ export interface BuildPlan {
   blockSize: number;
   /** Peak bytes the texture stage will hold, for reporting and for warnings. */
   estimatedPeakBytes: number;
+  /** One shading sample per this many texels. See {@link SHADE_SCALE}. */
+  shadeScale: number;
 }
 
 /**
@@ -82,6 +84,22 @@ function stripRowsFor(textureWidth: number): number {
   // times the memory of a 16x16 one.
   return Math.max(32, Math.min(512, rows));
 }
+
+/**
+ * How far each quality level coarsens the shading grid.
+ *
+ * The texture is four fifths of a build, and dropping only the graph resolution
+ * made a draft take nine tenths as long as a release — which is not a draft.
+ * Halving the shading grid quarters that work; the heightfield, the tile grid
+ * and every invariant the engine checks are untouched, and the colour is
+ * blurrier, which is exactly what a build for "does this load and play" can
+ * afford to be.
+ */
+const SHADE_SCALE: Record<BuildQuality, number> = {
+  draft: 2,
+  standard: 1,
+  final: 1,
+};
 
 /** The largest graph resolution each quality level will evaluate at. */
 const MAX_GRAPH_RESOLUTION: Record<BuildQuality, number> = {
@@ -148,6 +166,7 @@ export function planBuild(project: Project, options: PlanOptions = {}): BuildPla
     graphHeight,
     blockSize,
     estimatedPeakBytes,
+    shadeScale: SHADE_SCALE[quality],
   };
 }
 

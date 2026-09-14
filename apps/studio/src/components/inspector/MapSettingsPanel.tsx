@@ -322,7 +322,9 @@ export function MapSettingsPanel() {
           />
           <div className="field-help">
             Fine colour variation. Also reduces the banding the map texture&rsquo;s DXT1 compression
-            produces across smooth gradients.
+            produces across smooth gradients. It costs file size out of proportion to the setting:
+            any grain at all makes every tile unique, so the archive shares none of them — about a
+            tenth larger on a varied map, and more than twice the size on a flat one.
           </div>
         </div>
 

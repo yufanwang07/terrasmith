@@ -23,7 +23,9 @@ type Quality = 'draft' | 'standard' | 'final';
 const QUALITY_INFO: Record<Quality, { label: string; detail: string }> = {
   draft: {
     label: 'Draft',
-    detail: 'Fast. Coarse terrain, for checking the map loads and plays.',
+    detail:
+      'About four times faster: coarser terrain and a softer texture, for checking the map ' +
+      'loads and plays. The same size and the same tiles as a release.',
   },
   standard: {
     label: 'Standard',
@@ -259,6 +261,7 @@ export function ExportDialog({ onClose }: { onClose(): void }) {
 
 function BuildSummary({ result }: { result: BuildDoneMessage }) {
   const previewRef = useRef<HTMLCanvasElement>(null);
+  const grain = useEditor((s) => s.project.texture.grain);
 
   useEffect(() => {
     const canvas = previewRef.current;
@@ -309,6 +312,14 @@ function BuildSummary({ result }: { result: BuildDoneMessage }) {
             label="Height precision"
             value={`${stats.quantizationStep.toFixed(3)} elmos per step`}
           />
+          {stats.deduplicationRatio < 0.01 && grain > 0 && (
+            <div className="field-help" style={{ marginTop: 8 }}>
+              No two tiles came out identical, which is what grain does: it is per-texel noise, so it
+              makes every tile unique and the archive cannot share any of them. Grain off is worth
+              about a tenth of the file on a varied map and well over half on a flat one — see Grain
+              under Map settings.
+            </div>
+          )}
           {stats.rangeUtilization < 0.5 && (
             <div className="field-help" style={{ color: 'var(--warn)', marginTop: 8 }}>
               The terrain fills only {Math.round(stats.rangeUtilization * 100)}% of the height range
