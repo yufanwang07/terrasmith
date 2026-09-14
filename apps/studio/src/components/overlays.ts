@@ -47,8 +47,24 @@ const BAND_COLORS = {
 /** Neutral grey used when no overlay is active, so lighting does the work. */
 const NEUTRAL: Rgb = [0.62, 0.6, 0.56];
 
-/** Colour for one sample under the given overlay. */
-export function overlayColorFor(overlay: OverlayKind, sample: OverlaySample): Rgb {
+/**
+ * Colour for one sample under the given overlay.
+ *
+ * `painted` says whether the terrain is carrying the map's own texture. It
+ * changes exactly one answer: with no overlay the vertex colour is the surface
+ * and has to be a believable ground colour, and with a texture under it the
+ * vertex colour multiplies, so anything but white darkens the map. Every other
+ * overlay is meant to replace the colour and does so either way — an overlay
+ * that let the texture show through would be a picture of two things at once.
+ */
+export function overlayColorFor(overlay: OverlayKind, painted: boolean, sample: OverlaySample): Rgb {
+  if (overlay === 'none' && painted) {
+    // Still tinted below the water line, because the map texture paints a sea
+    // bed and not water, and the viewport's water plane only covers what is
+    // under the sea *level* — a lake in a hollow reads as dry ground without
+    // this.
+    return sample.height < 0 ? shoreTint(sample.height, WHITE) : WHITE;
+  }
   switch (overlay) {
     case 'slope':
       return slopeRamp(sample.slopeDegrees);
@@ -86,10 +102,13 @@ function symmetryColor(error: number): Rgb {
 }
 
 /** A little blue below the water line, so a coastline is visible without an overlay. */
-function shoreTint(height: number): Rgb {
+function shoreTint(height: number, base: Rgb = NEUTRAL): Rgb {
   const t = Math.min(1, -height / 120);
-  return [NEUTRAL[0] * (1 - t * 0.6), NEUTRAL[1] * (1 - t * 0.35), NEUTRAL[2] * (1 - t * 0.05) + t * 0.25];
+  return [base[0] * (1 - t * 0.6), base[1] * (1 - t * 0.35), base[2] * (1 - t * 0.05) + t * 0.25];
 }
+
+/** No tint at all, for a vertex colour that multiplies against a real texture. */
+const WHITE: Rgb = [1, 1, 1];
 
 /** Continuous slope ramp, banded at the BAR thresholds so they stay readable. */
 function slopeRamp(degrees: number): Rgb {

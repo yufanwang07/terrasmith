@@ -12,7 +12,9 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { mapDimensionsOf } from '@terrasmith/graph';
 import { useEditor } from './state/store.js';
 import type { Marker } from './components/Markers.js';
+import type { DrawnFeature } from './components/Features.js';
 import { usePreview } from './state/preview.js';
+import { useSurface } from './state/surface.js';
 import { Toolbar } from './components/Toolbar.js';
 import { StatusBar } from './components/StatusBar.js';
 import { Viewport } from './components/Viewport.js';
@@ -28,6 +30,7 @@ import { useValidation } from './state/validation.js';
 import {
   GEO_VENT,
   MapObjectsPanel,
+  useDrawnFeatures,
   useMapMarkers,
   type PlacementMode,
 } from './components/MapObjects.js';
@@ -59,6 +62,11 @@ export function App() {
   }, [previewNodeId, project.graph.nodes]);
 
   const preview = usePreview(project, targetNodeId);
+  // Painted only when the preview is showing the map itself. Looking at one
+  // node's output means looking at a mask or a flow field, and painting a mask
+  // with a terrain palette would say something untrue about it.
+  const surface = useSurface(project, preview, previewNodeId === null);
+  const drawnFeatures = useDrawnFeatures();
   const dims = mapDimensionsOf(project.settings);
 
   useKeyboardShortcuts({
@@ -149,11 +157,13 @@ export function App() {
             >
               <TerrainPane
                 preview={preview}
+                surface={surface}
                 overlay={overlay}
                 dims={dims}
                 exaggeration={exaggeration}
                 onExaggeration={setExaggeration}
                 markers={markers}
+                features={drawnFeatures}
                 selectedMarker={selectedMarker}
                 onPlace={placeObject}
                 onSelectMarker={setSelectedMarker}
@@ -165,11 +175,13 @@ export function App() {
           ) : effectiveView === 'terrain' ? (
             <TerrainPane
               preview={preview}
+              surface={surface}
               overlay={overlay}
               dims={dims}
               exaggeration={exaggeration}
               onExaggeration={setExaggeration}
               markers={markers}
+              features={drawnFeatures}
               selectedMarker={selectedMarker}
               onPlace={placeObject}
               onSelectMarker={setSelectedMarker}
@@ -239,22 +251,26 @@ export function App() {
 
 function TerrainPane({
   preview,
+  surface,
   overlay,
   dims,
   exaggeration,
   onExaggeration,
   markers,
+  features,
   selectedMarker,
   onPlace,
   onSelectMarker,
   onMoveMarker,
 }: {
   preview: ReturnType<typeof usePreview>;
+  surface: ReturnType<typeof useSurface>;
   overlay: ReturnType<typeof useEditor.getState>['overlay'];
   dims: ReturnType<typeof mapDimensionsOf>;
   exaggeration: number;
   onExaggeration(v: number): void;
   markers: Marker[];
+  features: readonly DrawnFeature[];
   selectedMarker: string | null;
   onPlace?: (x: number, z: number) => void;
   onSelectMarker(id: string | null): void;
@@ -272,8 +288,10 @@ function TerrainPane({
         worldHeight={dims.worldHeight}
         showWater={!project.settings.voidWater}
         symmetry={project.settings.symmetry}
+        surface={surface.image}
         exaggeration={exaggeration}
         markers={markers}
+        features={features}
         selectedMarker={selectedMarker}
         onPlace={onPlace}
         onSelectMarker={onSelectMarker}

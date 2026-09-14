@@ -18,6 +18,7 @@ import {
   type StartPosition,
 } from '@terrasmith/graph';
 import { useEditor } from '../state/store.js';
+import type { DrawnFeature } from './Features.js';
 import type { Marker } from './Markers.js';
 
 /** What clicking the terrain does. */
@@ -36,6 +37,18 @@ let counter = 0;
 function nextId(prefix: string): string {
   counter += 1;
   return `${prefix}-${counter.toString(36)}-${Math.floor(performance.now()).toString(36)}`;
+}
+
+/** The trees the viewport draws as geometry. Everything that is not a vent. */
+export function useDrawnFeatures(): DrawnFeature[] {
+  const features = useEditor((s) => s.project.features);
+  return useMemo(
+    () =>
+      features
+        .filter((f) => f.name !== GEO_VENT)
+        .map((f) => ({ name: f.name, x: f.x, z: f.z, rotation: f.rotation })),
+    [features],
+  );
 }
 
 /** Build the marker set the viewport draws from the project's objects. */
@@ -67,9 +80,13 @@ export function useMapMarkers(): Marker[] {
       });
     }
     for (const feature of project.features) {
+      // Trees are drawn as geometry by the feature layer, not as markers: a
+      // marker is a thing you click and drag, and a map has thousands of trees
+      // and a handful of vents.
+      if (feature.name !== GEO_VENT) continue;
       markers.push({
         id: feature.id,
-        kind: feature.name === 'GeoVent' ? 'geo' : 'feature',
+        kind: 'geo',
         x: feature.x,
         z: feature.z,
         label: feature.name,

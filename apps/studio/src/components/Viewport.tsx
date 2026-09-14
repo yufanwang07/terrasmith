@@ -17,6 +17,7 @@ import type { PreviewState } from '../state/preview.js';
 import type { OverlayKind } from '../state/store.js';
 import { symmetryErrorField, type SymmetryKind } from '@terrasmith/core';
 import { overlayColorFor } from './overlays.js';
+import { FeatureLayer, type DrawnFeature } from './Features.js';
 import { MarkerLayer, type Marker } from './Markers.js';
 
 interface Props {
@@ -24,6 +25,8 @@ interface Props {
   overlay: OverlayKind;
   /** The symmetry the map declares, for the overlay that checks it. */
   symmetry: SymmetryKind;
+  /** The painted map texture, once the surface worker has one. */
+  surface?: { width: number; height: number; rgba: Uint8Array } | null;
   /** World extent in elmos, used for the grid and the camera framing. */
   worldWidth: number;
   worldHeight: number;
@@ -34,8 +37,10 @@ interface Props {
    * the passability overlay assume; anything higher is a viewing aid only.
    */
   exaggeration: number;
-  /** Metal spots, start positions and features to draw on the terrain. */
+  /** Metal spots, start positions and geo vents to draw on the terrain. */
   markers?: Marker[];
+  /** Trees, drawn as geometry rather than as markers. */
+  features?: readonly DrawnFeature[];
   /** Which marker is selected, if any. */
   selectedMarker?: string | null;
   /**
@@ -56,11 +61,13 @@ export function Viewport({
   preview,
   overlay,
   symmetry,
+  surface,
   worldWidth,
   worldHeight,
   showWater,
   exaggeration,
   markers,
+  features,
   selectedMarker,
   onPlace,
   onSelectMarker,
@@ -99,8 +106,16 @@ export function Viewport({
   }, [preview.result, worldWidth, worldHeight, overlay, exaggeration, symmetry]);
 
   useEffect(() => {
+    stateRef.current?.setSurface(surface ?? null);
+  }, [surface]);
+
+  useEffect(() => {
     stateRef.current?.setMarkers(markers ?? [], worldWidth, worldHeight);
   }, [markers, worldWidth, worldHeight, preview.result, exaggeration]);
+
+  useEffect(() => {
+    stateRef.current?.setFeatures(features ?? [], worldWidth, worldHeight);
+  }, [features, worldWidth, worldHeight, preview.result, exaggeration]);
 
   useEffect(() => {
     stateRef.current?.setSelectedMarker(selectedMarker ?? null);
@@ -134,6 +149,10 @@ interface ViewportInternals {
     exaggeration: number,
     symmetry: SymmetryKind,
   ): void;
+  /** The painted map texture, or null to go back to plain vertex colours. */
+  setSurface(image: { width: number; height: number; rgba: Uint8Array } | null): void;
+  /** The trees standing on the map. Drawn instanced, so thousands are one call. */
+  setFeatures(features: readonly DrawnFeature[], worldWidth: number, worldHeight: number): void;
   setWater(show: boolean, worldWidth: number, worldHeight: number): void;
   setMarkers(markers: Marker[], worldWidth: number, worldHeight: number): void;
   setSelectedMarker(id: string | null): void;
@@ -170,16 +189,30 @@ function createViewport(mount: HTMLElement, handlers: ViewportHandlers): Viewpor
   scene.add(sun);
   scene.add(new THREE.HemisphereLight(0x9fb4cc, 0x2a2a24, 1.0));
 
-  const terrain = new THREE.Mesh(
-    new THREE.BufferGeometry(),
-    new THREE.MeshStandardMaterial({
-      vertexColors: true,
-      roughness: 0.95,
-      metalness: 0.0,
-      flatShading: false,
-    }),
-  );
+  // Vertex colours multiply against the map texture, which is what lets the
+  // overlays keep working on top of a painted surface: with no texture the
+  // vertex colour *is* the surface, and with one it tints it.
+  const terrainMaterial = new THREE.MeshStandardMaterial({
+    vertexColors: true,
+    roughness: 0.95,
+    metalness: 0.0,
+    flatShading: false,
+  });
+  const terrain = new THREE.Mesh(new THREE.BufferGeometry(), terrainMaterial);
   scene.add(terrain);
+
+  /** The painted map texture, rebuilt whenever the surface worker lands one. */
+  let surfaceTexture: THREE.DataTexture | null = null;
+  /**
+   * Everything the last {@link ViewportInternals.setTerrain} was given.
+   *
+   * The paint arrives after the terrain it belongs to, and whether the terrain
+   * is carrying a texture changes what its vertex colours have to be — a
+   * ground colour when they *are* the surface, white when they tint one. So the
+   * geometry is rebuilt when that flips, which is once per paint rather than
+   * once per frame.
+   */
+  let lastTerrain: Parameters<ViewportInternals['setTerrain']> | null = null;
 
   const water = new THREE.Mesh(
     new THREE.PlaneGeometry(1, 1),
@@ -197,6 +230,9 @@ function createViewport(mount: HTMLElement, handlers: ViewportHandlers): Viewpor
 
   const markerLayer = new MarkerLayer({ worldWidth: 1, worldHeight: 1 });
   scene.add(markerLayer.group);
+
+  const featureLayer = new FeatureLayer({ worldWidth: 1, worldHeight: 1 });
+  scene.add(featureLayer.group);
 
   // The heightfield the markers stand on, kept so a marker can be dropped onto
   // the ground without ray-casting the mesh every frame.
@@ -217,6 +253,14 @@ function createViewport(mount: HTMLElement, handlers: ViewportHandlers): Viewpor
     const cx = Math.round(Math.max(0, Math.min(heightField.width - 1, u)));
     const cz = Math.round(Math.max(0, Math.min(heightField.height - 1, v)));
     return heightField.data[cz * heightField.width + cx] * heightField.exaggeration;
+  };
+
+  /** Rebuild the terrain's vertex colours for the current painted state. */
+  const repaintVertexColors = (): void => {
+    if (!lastTerrain) return;
+    const geometry = buildTerrainGeometry(...lastTerrain, surfaceTexture !== null);
+    terrain.geometry.dispose();
+    terrain.geometry = geometry;
   };
 
   const orbit = new OrbitController(camera, renderer.domElement);
@@ -255,6 +299,7 @@ function createViewport(mount: HTMLElement, handlers: ViewportHandlers): Viewpor
 
   return {
     setTerrain(result, worldWidth, worldHeight, overlay, exaggeration, symmetry) {
+      lastTerrain = [result, worldWidth, worldHeight, overlay, exaggeration, symmetry];
       const geometry = buildTerrainGeometry(
         result,
         worldWidth,
@@ -262,6 +307,7 @@ function createViewport(mount: HTMLElement, handlers: ViewportHandlers): Viewpor
         overlay,
         exaggeration,
         symmetry,
+        surfaceTexture !== null,
       );
       terrain.geometry.dispose();
       terrain.geometry = geometry;
@@ -274,6 +320,7 @@ function createViewport(mount: HTMLElement, handlers: ViewportHandlers): Viewpor
         exaggeration,
       };
       markerLayer.reground(heightAt);
+      featureLayer.reground(heightAt);
 
       if (!framed) {
         orbit.frame(worldWidth, worldHeight, result.max - result.min);
@@ -281,9 +328,42 @@ function createViewport(mount: HTMLElement, handlers: ViewportHandlers): Viewpor
       }
     },
 
+    setSurface(image) {
+      const wasPainted = surfaceTexture !== null;
+      surfaceTexture?.dispose();
+      if (!image) {
+        surfaceTexture = null;
+        terrainMaterial.map = null;
+        terrainMaterial.needsUpdate = true;
+        if (wasPainted) repaintVertexColors();
+        return;
+      }
+      const texture = new THREE.DataTexture(image.rgba, image.width, image.height, THREE.RGBAFormat);
+      // The map's texture is authored in sRGB, and so is everything the palette
+      // put in it; telling three.js otherwise washes the whole map out.
+      texture.colorSpace = THREE.SRGBColorSpace;
+      // Clamped, not wrapped: the terrain's UVs run exactly 0..1 and a wrapped
+      // sampler bleeds the far edge of the map into the near one.
+      texture.wrapS = THREE.ClampToEdgeWrapping;
+      texture.wrapT = THREE.ClampToEdgeWrapping;
+      texture.minFilter = THREE.LinearFilter;
+      texture.magFilter = THREE.LinearFilter;
+      texture.generateMipmaps = false;
+      texture.needsUpdate = true;
+      surfaceTexture = texture;
+      terrainMaterial.map = texture;
+      terrainMaterial.needsUpdate = true;
+      if (!wasPainted) repaintVertexColors();
+    },
+
     setMarkers(markers, worldWidth, worldHeight) {
       markerLayer.setWorld(worldWidth, worldHeight);
       markerLayer.set(markers, heightAt);
+    },
+
+    setFeatures(features, worldWidth, worldHeight) {
+      featureLayer.setWorld(worldWidth, worldHeight);
+      featureLayer.set(features, heightAt);
     },
 
     setSelectedMarker(id) {
@@ -312,6 +392,8 @@ function createViewport(mount: HTMLElement, handlers: ViewportHandlers): Viewpor
       orbit.dispose();
       picking.dispose();
       markerLayer.dispose();
+      featureLayer.dispose();
+      surfaceTexture?.dispose();
       terrain.geometry.dispose();
       (terrain.material as THREE.Material).dispose();
       water.geometry.dispose();
@@ -337,12 +419,15 @@ function buildTerrainGeometry(
   overlay: OverlayKind,
   exaggeration: number,
   symmetry: SymmetryKind,
+  painted: boolean,
 ): THREE.BufferGeometry {
   const { width, height, data } = result;
   const geometry = new THREE.BufferGeometry();
 
   const positions = new Float32Array(width * height * 3);
   const colors = new Float32Array(width * height * 3);
+  // The surface is painted over exactly this grid, so the UVs are the grid.
+  const uvs = new Float32Array(width * height * 2);
   const cellX = worldWidth / (width - 1);
   const cellZ = worldHeight / (height - 1);
   const halfX = worldWidth / 2;
@@ -381,8 +466,10 @@ function buildTerrainGeometry(
       // true no matter how the terrain is being displayed.
       positions[i * 3 + 1] = data[i] * exaggeration;
       positions[i * 3 + 2] = y * cellZ - halfZ;
+      uvs[i * 2] = x / (width - 1);
+      uvs[i * 2 + 1] = 1 - y / (height - 1);
 
-      const color = overlayColorFor(overlay, {
+      const color = overlayColorFor(overlay, painted, {
         height: data[i],
         slopeDegrees: slope[i],
         minHeight: result.min,
@@ -416,6 +503,7 @@ function buildTerrainGeometry(
 
   geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
   geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+  geometry.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
   geometry.setIndex(new THREE.BufferAttribute(indices, 1));
   geometry.computeVertexNormals();
   geometry.computeBoundingSphere();

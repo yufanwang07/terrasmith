@@ -1,0 +1,172 @@
+/**
+ * Painting the preview.
+ *
+ * The viewport used to draw the terrain in flat grey with an overlay ramp on
+ * top, which shows the shape and nothing else. A BAR map is its texture as much
+ * as its heightfield — a shoreline is where the sand stops, a plateau reads as
+ * a plateau because its top is a different colour from its sides — and judging
+ * any of that against grey means exporting and loading the game.
+ *
+ * So this runs the same palette shader the exporter runs, at preview
+ * resolution, and hands back an RGBA image the viewport puts straight onto the
+ * terrain. It is the export's own `generateSatmap`, not an approximation of it:
+ * what the preview shows is what the `.smf` will carry, at a coarser grid.
+ *
+ * It gets its own worker for the same reason the thumbnails do. Painting is
+ * several hundred milliseconds at 768 squared and the height preview is what
+ * the user is waiting for, so the two must never queue behind each other.
+ */
+
+import {
+  DEFAULT_HILLSHADE_STRENGTH,
+  DEFAULT_OCCLUSION_STRENGTH,
+  TEMPERATE,
+  findPalettePreset,
+  generateSatmap,
+  enforceSlopeBands,
+  rescalePaletteHeights,
+  type Field,
+  type MaterialPalette,
+} from '@terrasmith/core';
+
+/** Paint one heightfield. */
+export interface SurfaceRequest {
+  kind: 'surface';
+  /** Discards a stale reply. */
+  id: number;
+  width: number;
+  height: number;
+  /** Heights in elmos, row-major. */
+  data: Float32Array;
+  worldWidth: number;
+  worldHeight: number;
+  /** Palette preset id; an unknown one falls back to temperate. */
+  palette: string;
+  /** Sea level in elmos. */
+  waterLevel: number;
+  /** Per-texel colour noise, 0..1. */
+  grain: number;
+  /** Baked ambient occlusion, 0..1. */
+  occlusion: number;
+  /** Baked directional shading, 0..1. */
+  shading: number;
+  /** Force the three BAR slope bands to read distinctly. */
+  markSlopeBands: boolean;
+  seed: number;
+}
+
+export interface SurfaceResponse {
+  kind: 'surface';
+  id: number;
+  width: number;
+  height: number;
+  /** RGBA8, ready for a `DataTexture`. */
+  rgba: Uint8Array;
+  elapsedMs: number;
+}
+
+export interface SurfaceErrorResponse {
+  kind: 'error';
+  id: number;
+  message: string;
+}
+
+export type SurfaceWorkerResponse = SurfaceResponse | SurfaceErrorResponse;
+
+self.onmessage = (event: MessageEvent<SurfaceRequest>) => {
+  const request = event.data;
+  if (request.kind !== 'surface') return;
+  const started = performance.now();
+
+  try {
+    const field: Field = { width: request.width, height: request.height, data: request.data };
+    const rgba = paint(field, request);
+    const response: SurfaceResponse = {
+      kind: 'surface',
+      id: request.id,
+      width: request.width,
+      height: request.height,
+      rgba,
+      elapsedMs: performance.now() - started,
+    };
+    (self as unknown as Worker).postMessage(response, [rgba.buffer]);
+  } catch (error) {
+    const response: SurfaceErrorResponse = {
+      kind: 'error',
+      id: request.id,
+      message: error instanceof Error ? error.message : String(error),
+    };
+    (self as unknown as Worker).postMessage(response);
+  }
+};
+
+function paint(field: Field, request: SurfaceRequest): Uint8Array {
+  let min = Infinity;
+  let max = -Infinity;
+  for (let i = 0; i < field.data.length; i++) {
+    const v = field.data[i];
+    if (v < min) min = v;
+    if (v > max) max = v;
+  }
+  // A flat field has no range to rescale a palette against, and every band
+  // would collapse onto the same height. Give it a nominal one rather than
+  // dividing by zero.
+  if (!(max > min)) max = min + 1;
+
+  let palette: MaterialPalette =
+    findPalettePreset(request.palette)?.palette ?? TEMPERATE;
+  palette = rescalePaletteHeights(palette, { min, max });
+  if (request.markSlopeBands) palette = enforceSlopeBands(palette);
+
+  // The preview grid is coarser than the map, so a cell is several elmos
+  // across. Saying so is what keeps every distance in the palette's rules — a
+  // shoreline's width, a channel's — the same distance it will be in the build.
+  const cellSize = request.worldWidth / Math.max(1, field.width - 1);
+
+  const color = generateSatmap(
+    { height: field },
+    palette,
+    {
+      cellSize,
+      waterLevel: request.waterLevel,
+      lighting: {
+        occlusionStrength: clamp01(request.occlusion, DEFAULT_OCCLUSION_STRENGTH),
+        hillshadeStrength: clamp01(request.shading, DEFAULT_HILLSHADE_STRENGTH),
+      },
+    },
+  );
+
+  const n = field.width * field.height;
+  const rgba = new Uint8Array(n * 4);
+  const grain = Math.max(0, Math.min(1, request.grain));
+  for (let i = 0; i < n; i++) {
+    // Grain is per-texel at build resolution and would be per-several-texels
+    // here, which reads as mottling rather than as grain — so the preview
+    // carries a gentler version of it, enough to stop a flat colour looking
+    // like plastic without pretending to be the real thing.
+    const jitter = grain > 0 ? 1 + (hash(i, request.seed) - 0.5) * grain * 0.35 : 1;
+    rgba[i * 4] = toByte(color.data[i * 4] * jitter);
+    rgba[i * 4 + 1] = toByte(color.data[i * 4 + 1] * jitter);
+    rgba[i * 4 + 2] = toByte(color.data[i * 4 + 2] * jitter);
+    rgba[i * 4 + 3] = 255;
+  }
+  return rgba;
+}
+
+function clamp01(v: number, fallback: number): number {
+  if (!Number.isFinite(v)) return fallback;
+  return v < 0 ? 0 : v > 1 ? 1 : v;
+}
+
+function toByte(v: number): number {
+  const b = Math.round(v * 255);
+  return b < 0 ? 0 : b > 255 ? 255 : b;
+}
+
+/** A cheap deterministic hash, so the same preview grains the same way twice. */
+function hash(i: number, seed: number): number {
+  let h = (i * 0x9e3779b1) ^ (seed * 0x85ebca6b);
+  h = Math.imul(h ^ (h >>> 15), 0x2c1b3c6d);
+  h = Math.imul(h ^ (h >>> 13), 0x297a2d39);
+  return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
+}
