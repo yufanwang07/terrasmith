@@ -157,7 +157,7 @@ export const TWIN_PLATEAUS: Template = {
     g.node('out', 'output.height', {
       autoRange: false,
       minHeight: -200,
-      maxHeight: 640,
+      maxHeight: 660,
     }, 1300, 380);
 
     return g

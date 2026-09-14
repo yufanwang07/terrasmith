@@ -28,6 +28,8 @@ export interface DrawnFeature {
   z: number;
   /** Heading in degrees. */
   rotation: number;
+  /** Size against the species' usual, around 1. Defaults to 1. */
+  scale?: number;
 }
 
 /** Height of a drawn tree, in elmos. Roughly what BAR's own trees stand at. */
@@ -167,7 +169,7 @@ export class FeatureLayer {
       // Deterministic variation from the position, so a tree keeps its size and
       // its shade of green when the list is rebuilt around it.
       const r = hash(feature.x, feature.z);
-      const size = TREE_HEIGHT * (1 + (r - 0.5) * 2 * TREE_VARIATION);
+      const size = TREE_HEIGHT * (1 + (r - 0.5) * 2 * TREE_VARIATION) * (feature.scale ?? 1);
 
       position.set(feature.x - halfX, heightAt(feature.x, feature.z), feature.z - halfZ);
       quaternion.setFromAxisAngle(UP, (feature.rotation * Math.PI) / 180);

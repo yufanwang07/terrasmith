@@ -45,6 +45,16 @@ export interface ScatteredFeature {
   z: number;
   /** Heading in degrees. */
   rotation: number;
+  /**
+   * How big this one is against the species' usual size, around 1.
+   *
+   * The engine discards it — `relativeSize` in the `.smf` is read and thrown
+   * away by `FeatureHandler.cpp` — so it exists for the editor's own drawing.
+   * A wood that thins and shrinks as it climbs toward its limit is what the
+   * treeline of a real hillside looks like, and a wood that stops dead at a
+   * contour is what a generated one looks like.
+   */
+  scale: number;
 }
 
 export interface ScatterOptions {
@@ -245,6 +255,18 @@ export function scatterTrees(height: Field, options: ScatterOptions): ScatteredF
       }
       if (blocked) continue;
 
+      // Stunted near the limits. Trees at the top of their range are smaller
+      // than trees in the middle of it, and so are trees on the shore; without
+      // this a wood ends at a contour line with full-sized trees right up to
+      // it, which is the thing that reads as generated.
+      let stunt = 1;
+      if (maxHeight !== undefined) {
+        const headroom = (maxHeight - h) / Math.max(1, maxHeight - minHeight);
+        stunt = Math.min(stunt, 0.55 + 0.45 * clamp01(headroom / 0.35));
+      }
+      const steep = sampleWorld(slope, x, z, worldWidth, worldHeight) / maxSlopeDegrees;
+      stunt = Math.min(stunt, 0.7 + 0.3 * clamp01((1 - steep) / 0.4));
+
       out.push({
         // `pick` chose whether to plant; the type comes from the position, so
         // the same tree stands in the same place whatever the density says.
@@ -252,6 +274,7 @@ export function scatterTrees(height: Field, options: ScatterOptions): ScatteredF
         x,
         z,
         rotation: Math.floor(spin * 360),
+        scale: stunt,
       });
     }
   }
@@ -432,7 +455,7 @@ export function suggestGeoVents(height: Field, options: SuggestGeoOptions): Scat
       }
     }
     if (!clear) continue;
-    chosen.push({ name: GEO_VENT, x: site.x, z: site.z, rotation: 0 });
+    chosen.push({ name: GEO_VENT, x: site.x, z: site.z, rotation: 0, scale: 1 });
   }
 
   if (!symmetry || symmetry === 'none') return chosen;

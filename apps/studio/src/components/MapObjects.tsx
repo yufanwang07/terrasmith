@@ -52,7 +52,7 @@ export function useDrawnFeatures(): DrawnFeature[] {
     () =>
       features
         .filter((f) => f.name !== GEO_VENT)
-        .map((f) => ({ name: f.name, x: f.x, z: f.z, rotation: f.rotation })),
+        .map((f) => ({ name: f.name, x: f.x, z: f.z, rotation: f.rotation, scale: f.scale })),
     [features],
   );
 }
@@ -205,6 +205,7 @@ export function MapObjectsPanel({ mode, onMode, selected, onSelect, terrain }: P
         x: Math.round(t.x),
         z: Math.round(t.z),
         rotation: t.rotation,
+        scale: Number(t.scale.toFixed(3)),
       })),
     ]);
   };

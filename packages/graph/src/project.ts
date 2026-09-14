@@ -43,6 +43,15 @@ export interface PlacedFeature {
   z: number;
   /** Heading in degrees. */
   rotation: number;
+  /**
+   * Size against the species' usual, around 1.
+   *
+   * The engine reads `relativeSize` out of the `.smf` and discards it
+   * (`FeatureHandler.cpp`), so this is the editor's own record of how big a
+   * tree it drew — which is what lets a wood thin toward its treeline instead
+   * of stopping dead at a contour.
+   */
+  scale?: number;
 }
 
 /** A start box, in BAR's 0..200 normalised space. */

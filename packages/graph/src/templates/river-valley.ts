@@ -147,10 +147,10 @@ export const RIVER_VALLEY: Template = {
     // shoulders where positions are.
     g.node('land', 'generator.noise', {
       fractal: 'hybrid',
-      featureSize: 4600,
-      amplitude: 460,
+      featureSize: 3600,
+      amplitude: 540,
       octaves: 5,
-      gain: 0.48,
+      gain: 0.54,
       offset: 95,
       warpAmount: 900,
       warpSize: 5200,
