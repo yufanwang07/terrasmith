@@ -13,12 +13,13 @@ no single extractor can capture it.
 **[Open the editor](https://yufanwang07.github.io/terrasmith/)** — it runs entirely in the browser, builds
 the archive client-side, and needs no account.
 
-![The Terrasmith editor, showing a map with the passability overlay on](docs/images/studio-overlay.jpg)
+![The Terrasmith editor: a mountain range with the passability overlay on, over its node graph](docs/images/studio-overlay.jpg)
 
-*Above: the viewport with "who can go here" on — green is passable by the selected unit class, red is not.
-Below: the same map's node graph.*
+*The "Reachable" overlay on a 16x16 map: green is ground a vehicle can drive, pink is ground it cannot,
+so the passes through the range are the green threads across it. The graph that made it is underneath,
+each node showing what comes out of it.*
 
-![The node graph for the same map](docs/images/studio-graph.jpg)
+![The same map's node graph on its own](docs/images/studio-graph.jpg)
 
 ## Why this exists
 
