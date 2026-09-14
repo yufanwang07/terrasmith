@@ -17,6 +17,12 @@ export interface OverlaySample {
   slopeDegrees: number;
   minHeight: number;
   maxHeight: number;
+  /**
+   * How far this point is from its partner under the declared symmetry, in
+   * elmos, as a fraction of the map's relief. Zero where the map has no
+   * declared symmetry, which is also what the overlay paints as "matches".
+   */
+  symmetryError: number;
 }
 
 export type Rgb = [number, number, number];
@@ -52,10 +58,31 @@ export function overlayColorFor(overlay: OverlayKind, sample: OverlaySample): Rg
       return buildableColor(sample.slopeDegrees, sample.height);
     case 'height':
       return heightRamp(sample.height, sample.minHeight, sample.maxHeight);
+    case 'symmetry':
+      return symmetryColor(sample.symmetryError);
     case 'none':
     default:
       return sample.height < 0 ? shoreTint(sample.height) : NEUTRAL;
   }
+}
+
+/**
+ * How far this point is from matching its partner.
+ *
+ * Scaled against the map's own relief rather than against an absolute number of
+ * elmos: a 40-elmo difference is nothing on a mountain map and the whole story
+ * on a flat one. The first band is deliberately generous — a difference under a
+ * fiftieth of the relief is below what anyone can see, let alone play against —
+ * and everything past a tenth is the same alarming colour, because by then the
+ * question is not how bad it is but which half is wrong.
+ */
+function symmetryColor(error: number): Rgb {
+  if (error <= 0.02) return [0.32, 0.55, 0.42];
+  if (error <= 0.1) {
+    const t = (error - 0.02) / 0.08;
+    return mix([0.32, 0.55, 0.42], [0.85, 0.72, 0.3], t);
+  }
+  return [0.82, 0.28, 0.3];
 }
 
 /** A little blue below the water line, so a coastline is visible without an overlay. */

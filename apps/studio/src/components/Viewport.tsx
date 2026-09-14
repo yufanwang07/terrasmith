@@ -15,12 +15,15 @@ import { useEffect, useRef } from 'react';
 import * as THREE from 'three';
 import type { PreviewState } from '../state/preview.js';
 import type { OverlayKind } from '../state/store.js';
+import { symmetryErrorField, type SymmetryKind } from '@terrasmith/core';
 import { overlayColorFor } from './overlays.js';
 import { MarkerLayer, type Marker } from './Markers.js';
 
 interface Props {
   preview: PreviewState;
   overlay: OverlayKind;
+  /** The symmetry the map declares, for the overlay that checks it. */
+  symmetry: SymmetryKind;
   /** World extent in elmos, used for the grid and the camera framing. */
   worldWidth: number;
   worldHeight: number;
@@ -52,6 +55,7 @@ const WATER_COLOR = 0x2c4a5c;
 export function Viewport({
   preview,
   overlay,
+  symmetry,
   worldWidth,
   worldHeight,
   showWater,
@@ -91,8 +95,8 @@ export function Viewport({
     const internals = stateRef.current;
     if (!internals || !preview.result) return;
     if (preview.result.kind !== 'field') return;
-    internals.setTerrain(preview.result, worldWidth, worldHeight, overlay, exaggeration);
-  }, [preview.result, worldWidth, worldHeight, overlay, exaggeration]);
+    internals.setTerrain(preview.result, worldWidth, worldHeight, overlay, exaggeration, symmetry);
+  }, [preview.result, worldWidth, worldHeight, overlay, exaggeration, symmetry]);
 
   useEffect(() => {
     stateRef.current?.setMarkers(markers ?? [], worldWidth, worldHeight);
@@ -128,6 +132,7 @@ interface ViewportInternals {
     worldHeight: number,
     overlay: OverlayKind,
     exaggeration: number,
+    symmetry: SymmetryKind,
   ): void;
   setWater(show: boolean, worldWidth: number, worldHeight: number): void;
   setMarkers(markers: Marker[], worldWidth: number, worldHeight: number): void;
@@ -249,8 +254,15 @@ function createViewport(mount: HTMLElement, handlers: ViewportHandlers): Viewpor
   let framed = false;
 
   return {
-    setTerrain(result, worldWidth, worldHeight, overlay, exaggeration) {
-      const geometry = buildTerrainGeometry(result, worldWidth, worldHeight, overlay, exaggeration);
+    setTerrain(result, worldWidth, worldHeight, overlay, exaggeration, symmetry) {
+      const geometry = buildTerrainGeometry(
+        result,
+        worldWidth,
+        worldHeight,
+        overlay,
+        exaggeration,
+        symmetry,
+      );
       terrain.geometry.dispose();
       terrain.geometry = geometry;
       heightField = {
@@ -324,6 +336,7 @@ function buildTerrainGeometry(
   worldHeight: number,
   overlay: OverlayKind,
   exaggeration: number,
+  symmetry: SymmetryKind,
 ): THREE.BufferGeometry {
   const { width, height, data } = result;
   const geometry = new THREE.BufferGeometry();
@@ -334,6 +347,15 @@ function buildTerrainGeometry(
   const cellZ = worldHeight / (height - 1);
   const halfX = worldWidth / 2;
   const halfZ = worldHeight / 2;
+
+  // Only computed for the overlay that asks for it: it walks every point's
+  // whole orbit, which is several times the cost of the slope pass and wasted
+  // on a map nobody is checking the symmetry of.
+  const symmetryError =
+    overlay === 'symmetry' && symmetry !== 'none'
+      ? symmetryErrorField({ width, height, data }, symmetry)
+      : null;
+  const reliefScale = 1 / Math.max(1e-6, result.max - result.min);
 
   // Slope per vertex, in degrees, so the overlay and the shading agree with
   // what the engine would compute.
@@ -365,6 +387,7 @@ function buildTerrainGeometry(
         slopeDegrees: slope[i],
         minHeight: result.min,
         maxHeight: result.max,
+        symmetryError: symmetryError === null ? 0 : symmetryError.data[i] * reliefScale,
       });
       colors[i * 3] = color[0];
       colors[i * 3 + 1] = color[1];

@@ -412,11 +412,13 @@ Every node's reference page is in [NODES.md](NODES.md). The categories:
 
 | Category | What lives there |
 | --- | --- |
-| **Generator** | Where terrain comes from: Noise, Gradient, Plateaus, Constant. No inputs. |
+| **Generator** | Where terrain comes from: Noise, Gradient, Plateaus, Constant, and Import heightmap for anything made elsewhere. No inputs. |
+| **Layout** | Terrain from what you drew rather than from a seed: a Layout of shapes, and the nodes that turn it into a ridge, a river, a flat pad, a mask or a distance field. |
 | **Filter** | Reshaping existing terrain: Smooth, Sharpen, Terrace, Curve, Remap, Clamp, Transform, Warp, Flatten, Sea level. |
 | **Combiner** | Putting two terrains together: Combine, Blend, Height split. |
 | **Selector** | Turning terrain into a 0–1 mask: by height, slope, water flow, curvature or shelter. |
 | **Natural** | Simulations: Water erosion, Slumping, Snow. The expensive ones, and the ones that matter most. |
+| **Gameplay** | The nodes that know BAR's rules rather than just geometry: Symmetry, Passability, Build pads, Metal spots, Carve ramp. |
 | **Output** | What the exporter reads: Height, Texture, Metal, Terrain type, and the shading maps. |
 | **Utility** | Plumbing: Number, Math, Measure, Reroute. |
 

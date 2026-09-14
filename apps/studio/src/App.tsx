@@ -270,6 +270,7 @@ function TerrainPane({
         worldWidth={dims.worldWidth}
         worldHeight={dims.worldHeight}
         showWater={!project.settings.voidWater}
+        symmetry={project.settings.symmetry}
         exaggeration={exaggeration}
         markers={markers}
         selectedMarker={selectedMarker}
@@ -299,6 +300,7 @@ const OVERLAY_CHOICES = [
   { value: 'slope', label: 'Slope' },
   { value: 'passability', label: 'Reachable' },
   { value: 'buildable', label: 'Buildable' },
+  { value: 'symmetry', label: 'Fair' },
 ] as const;
 
 function OverlayPicker({
