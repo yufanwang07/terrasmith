@@ -54,8 +54,22 @@ interface Props {
   onMoveMarker?: (id: string, x: number, z: number) => void;
 }
 
-/** Colour of the water plane. Matches the mapinfo defaults closely enough to judge a coastline. */
-const WATER_COLOR = 0x2c4a5c;
+/**
+ * The water, as two colours and a depth.
+ *
+ * A single flat translucent plane is what this used to be, and it makes every
+ * body of water look the same: a puddle in a hollow and a thousand-elmo trench
+ * both read as one sheet of blue-grey. What tells them apart in any real map
+ * view is that shallow water shows the ground through it and deep water does
+ * not, so the surface is built over the terrain grid with its opacity coming
+ * from the depth beneath each vertex.
+ *
+ * 8 elmos is where BAR's own ships float, and 220 is about where a sea bed
+ * stops being visible through clear water at map scale.
+ */
+const WATER_SHALLOW = new THREE.Color(0x3f7f92);
+const WATER_DEEP = new THREE.Color(0x152c42);
+const WATER_OPAQUE_DEPTH = 220;
 
 export function Viewport({
   preview,
@@ -214,17 +228,36 @@ function createViewport(mount: HTMLElement, handlers: ViewportHandlers): Viewpor
    */
   let lastTerrain: Parameters<ViewportInternals['setTerrain']> | null = null;
 
-  const water = new THREE.Mesh(
+  // The sea beyond the map's own edges, so a coastal map does not end in space.
+  const ocean = new THREE.Mesh(
     new THREE.PlaneGeometry(1, 1),
     new THREE.MeshStandardMaterial({
-      color: WATER_COLOR,
+      color: WATER_DEEP,
       transparent: true,
-      opacity: 0.72,
-      roughness: 0.15,
+      opacity: 0.86,
+      roughness: 0.18,
       metalness: 0.1,
     }),
   );
-  water.rotation.x = -Math.PI / 2;
+  ocean.rotation.x = -Math.PI / 2;
+  ocean.visible = false;
+  scene.add(ocean);
+
+  // The water over the map itself, graded by what is underneath it.
+  const water = new THREE.Mesh(
+    new THREE.BufferGeometry(),
+    new THREE.MeshStandardMaterial({
+      vertexColors: true,
+      transparent: true,
+      roughness: 0.16,
+      metalness: 0.1,
+      side: THREE.DoubleSide,
+      // Water is drawn after the terrain and must not stop the terrain behind
+      // it from drawing: writing depth from a transparent surface leaves holes
+      // wherever the far bank shows through.
+      depthWrite: false,
+    }),
+  );
   water.visible = false;
   scene.add(water);
 
@@ -253,6 +286,29 @@ function createViewport(mount: HTMLElement, handlers: ViewportHandlers): Viewpor
     const cx = Math.round(Math.max(0, Math.min(heightField.width - 1, u)));
     const cz = Math.round(Math.max(0, Math.min(heightField.height - 1, v)));
     return heightField.data[cz * heightField.width + cx] * heightField.exaggeration;
+  };
+
+  /**
+   * Rebuild the water surface over the current terrain.
+   *
+   * Only the wet cells get triangles. A sheet over the whole map would be
+   * mostly invisible geometry, and — because the material does not write depth
+   * — every dry cell's worth of it would still be blended over the ground.
+   */
+  const rebuildWater = (worldWidth: number, worldHeight: number): void => {
+    water.geometry.dispose();
+    if (!heightField) {
+      water.geometry = new THREE.BufferGeometry();
+      return;
+    }
+    water.geometry = buildWaterGeometry(
+      heightField.data,
+      heightField.width,
+      heightField.height,
+      worldWidth,
+      worldHeight,
+      heightField.exaggeration,
+    );
   };
 
   /** Rebuild the terrain's vertex colours for the current painted state. */
@@ -321,6 +377,7 @@ function createViewport(mount: HTMLElement, handlers: ViewportHandlers): Viewpor
       };
       markerLayer.reground(heightAt);
       featureLayer.reground(heightAt);
+      rebuildWater(worldWidth, worldHeight);
 
       if (!framed) {
         orbit.frame(worldWidth, worldHeight, result.max - result.min);
@@ -377,8 +434,12 @@ function createViewport(mount: HTMLElement, handlers: ViewportHandlers): Viewpor
 
     setWater(show, worldWidth, worldHeight) {
       water.visible = show;
-      water.scale.set(worldWidth * 1.5, worldHeight * 1.5, 1);
-      water.position.set(0, 0, 0);
+      ocean.visible = show;
+      ocean.scale.set(worldWidth * 6, worldHeight * 6, 1);
+      // A hair below the map's own water, so the two do not z-fight across the
+      // whole horizon where they overlap.
+      ocean.position.set(0, -0.5, 0);
+      rebuildWater(worldWidth, worldHeight);
     },
 
     frameIfUnframed(worldWidth, worldHeight) {
@@ -398,6 +459,8 @@ function createViewport(mount: HTMLElement, handlers: ViewportHandlers): Viewpor
       (terrain.material as THREE.Material).dispose();
       water.geometry.dispose();
       (water.material as THREE.Material).dispose();
+      ocean.geometry.dispose();
+      (ocean.material as THREE.Material).dispose();
       renderer.dispose();
       mount.removeChild(renderer.domElement);
     },
@@ -772,4 +835,86 @@ class PickController {
     // map's corner.
     return { x: p.x + field.worldWidth / 2, z: p.z + field.worldHeight / 2 };
   }
+}
+
+/**
+ * The water surface over one heightfield.
+ *
+ * Flat at y = 0, which is where BAR's sea level is, and built only over the
+ * cells that are actually under it — a quad is emitted where all four of its
+ * corners are wet, so the sheet stops one cell short of the shoreline rather
+ * than climbing the beach. The gap that leaves is why the shallow colour is
+ * nearly transparent: the last visible water has to fade out rather than end.
+ *
+ * Colour and opacity come from the depth under each vertex, which is the whole
+ * point. A puddle in a hollow and a thousand-elmo trench are the same sheet of
+ * blue-grey without it.
+ */
+function buildWaterGeometry(
+  heights: Float32Array,
+  width: number,
+  height: number,
+  worldWidth: number,
+  worldHeight: number,
+  exaggeration: number,
+): THREE.BufferGeometry {
+  const cellX = worldWidth / (width - 1);
+  const cellZ = worldHeight / (height - 1);
+  const halfX = worldWidth / 2;
+  const halfZ = worldHeight / 2;
+
+  const positions: number[] = [];
+  const colors: number[] = [];
+  const indices: number[] = [];
+  // Maps a grid index to its vertex in the output, or -1 for a dry corner.
+  const vertexOf = new Int32Array(width * height).fill(-1);
+  const color = new THREE.Color();
+
+  const addVertex = (x: number, z: number): number => {
+    const i = z * width + x;
+    const existing = vertexOf[i];
+    if (existing >= 0) return existing;
+    const depth = -heights[i];
+    const t = Math.min(1, Math.max(0, depth / WATER_OPAQUE_DEPTH));
+    color.copy(WATER_SHALLOW).lerp(WATER_DEEP, t);
+    const index = positions.length / 3;
+    positions.push(x * cellX - halfX, 0, z * cellZ - halfZ);
+    // Alpha rides in the fourth component; three.js reads a 4-wide colour
+    // attribute as RGBA. Never fully opaque, so even deep water keeps a hint
+    // of the bed and the map does not turn into a hole.
+    colors.push(color.r, color.g, color.b, 0.34 + t * 0.55);
+    vertexOf[i] = index;
+    return index;
+  };
+
+  for (let z = 0; z < height - 1; z++) {
+    for (let x = 0; x < width - 1; x++) {
+      const a = z * width + x;
+      const b = a + 1;
+      const c = a + width;
+      const d = c + 1;
+      if (heights[a] >= 0 || heights[b] >= 0 || heights[c] >= 0 || heights[d] >= 0) continue;
+      const va = addVertex(x, z);
+      const vb = addVertex(x + 1, z);
+      const vc = addVertex(x, z + 1);
+      const vd = addVertex(x + 1, z + 1);
+      indices.push(va, vc, vb, vb, vc, vd);
+    }
+  }
+
+  const geometry = new THREE.BufferGeometry();
+  if (positions.length === 0) return geometry;
+  geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  geometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 4));
+  geometry.setIndex(indices);
+  // Flat and horizontal, so every normal is up; computing them would walk the
+  // whole surface to arrive at the same answer.
+  const normals = new Float32Array(positions.length);
+  for (let i = 1; i < normals.length; i += 3) normals[i] = 1;
+  geometry.setAttribute('normal', new THREE.BufferAttribute(normals, 3));
+  geometry.computeBoundingSphere();
+  // The exaggeration applies to the terrain's drawn height, so the water has to
+  // ride at the same scale or a 3x view puts the sea under the sea bed.
+  geometry.scale(1, exaggeration, 1);
+  return geometry;
 }
