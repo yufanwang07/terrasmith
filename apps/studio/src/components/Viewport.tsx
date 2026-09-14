@@ -30,6 +30,7 @@ import {
 } from '@terrasmith/format';
 import { FeatureLayer, type DrawnFeature } from './Features.js';
 import { MarkerLayer, type Marker } from './Markers.js';
+import { terrainUv } from './terrainUv.js';
 import {
   DETAIL_LAYERS,
   SMF_INTENSITY_MULT,
@@ -802,8 +803,9 @@ function buildTerrainGeometry(
       // true no matter how the terrain is being displayed.
       positions[i * 3 + 1] = data[i] * exaggeration;
       positions[i * 3 + 2] = y * cellZ - halfZ;
-      uvs[i * 2] = x / (width - 1);
-      uvs[i * 2 + 1] = 1 - y / (height - 1);
+      const [u, v] = terrainUv(x, y, width, height);
+      uvs[i * 2] = u;
+      uvs[i * 2 + 1] = v;
 
       const color = overlayColorFor(overlay, painted, {
         height: data[i],
