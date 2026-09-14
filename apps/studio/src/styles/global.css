@@ -601,8 +601,17 @@ input[type='checkbox'] {
   background: var(--bg-0);
 }
 
+/*
+ * A fixed width, not a minimum.
+ *
+ * Letting a node size to its summary line made a Water erosion node two and a
+ * half times the width of a Blend beside it, which overlapped its neighbour
+ * and made the columns unreadable. A graph is read by its shape, so every node
+ * is the same width and the summary is clipped to two lines instead; the full
+ * text is on the node's tooltip.
+ */
 .ts-node {
-  min-width: 168px;
+  width: 176px;
   background: var(--bg-2);
   border: 1px solid var(--line-strong);
   border-radius: var(--radius);
@@ -630,6 +639,11 @@ input[type='checkbox'] {
   background: var(--bg-3);
   border-bottom: 1px solid var(--line);
   font-weight: 550;
+  white-space: nowrap;
+}
+.ts-node-head > span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .ts-node-cat {
@@ -651,6 +665,11 @@ input[type='checkbox'] {
   padding: 0 9px;
   color: var(--text-2);
   font-size: 11px;
+  white-space: nowrap;
+}
+.ts-port > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .ts-port.out {
   justify-content: flex-end;
@@ -661,6 +680,14 @@ input[type='checkbox'] {
   color: var(--text-3);
   font-size: 11px;
   font-family: var(--mono);
+  /* Two lines, then an ellipsis — the fixed height autoLayout assumes. */
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  min-height: 26px;
 }
 
 .ts-node-preview {

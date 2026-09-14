@@ -105,7 +105,7 @@ export const MOUNTAIN_RANGE: Template = {
     // flattens valley floors and foothills locally without dragging them all to
     // one height. BAR has no terraform command: a base wants roughly 400x400
     // elmos within about 10 elmos of level, and it has to be in the map already.
-    g.node('gentle', 'selector.slope', { low: 0, high: 9, falloff: 5, soften: 180 }, 1120, 540);
+    g.node('gentle', 'selector.slope', { low: 0, high: 9, falloff: 5, soften: 180 }, 1120, 600);
     g.node('pads', 'filter.smooth', { radius: 260, strength: 0.8 }, 1340, 380);
 
     // A thin band of water in the deepest valleys. Enough to make the low

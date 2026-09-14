@@ -8,10 +8,11 @@
  * to use a graph.
  */
 
-import { memo } from 'react';
+import { memo, useEffect, useRef } from 'react';
 import { Handle, Position, type NodeProps } from '@xyflow/react';
 import type { NodeDefinition, PortDef } from '@terrasmith/graph';
 import { registry } from '../../state/store.js';
+import type { Thumbnail } from '../../state/thumbnails.js';
 
 export interface TerrainNodeData extends Record<string, unknown> {
   type: string;
@@ -20,8 +21,20 @@ export interface TerrainNodeData extends Record<string, unknown> {
   bypassed?: boolean;
   /** Set when the last evaluation failed inside this node. */
   error?: string;
-  /** A thumbnail of this node's output, drawn by the preview layer. */
-  thumbnail?: ImageBitmap | null;
+  /** A small render of this node's output. */
+  thumbnail?: Thumbnail;
+}
+
+/**
+ * Whether this kind of node gets a thumbnail strip.
+ *
+ * Decided from the definition rather than from whether a thumbnail has arrived,
+ * so the node is the same height before and after one renders. A node that
+ * grew by a strip's worth a second after the graph settled would shove its
+ * neighbours around every time the user changed a parameter.
+ */
+export function hasPreview(def: NodeDefinition<never>): boolean {
+  return def.outputs.some((port) => port.type === 'field' || port.type === 'color');
 }
 
 /** Vertical pitch of ports on a node, matching the `.ts-port` height in CSS. */
@@ -42,6 +55,7 @@ export const TerrainNode = memo(function TerrainNode({ data, selected }: NodePro
     );
   }
 
+  const summary = summarize(def, nodeData.params);
   const classes = ['ts-node'];
   if (selected) classes.push('selected');
   if (nodeData.bypassed) classes.push('bypassed');
@@ -84,15 +98,77 @@ export const TerrainNode = memo(function TerrainNode({ data, selected }: NodePro
           </div>
         ))}
 
-        <div className="ts-node-summary">{summarize(def, nodeData.params)}</div>
+        <div className="ts-node-summary" title={summary}>
+          {summary}
+        </div>
       </div>
+
+      {hasPreview(def) && <NodeThumbnail thumbnail={nodeData.thumbnail} />}
     </div>
   );
 });
 
+/**
+ * The node's own output, drawn small.
+ *
+ * Painted through a scratch canvas at the bitmap's real size and scaled up by
+ * the browser: `putImageData` ignores the transform, so drawing 48 pixels
+ * directly into a 170-pixel canvas would put them in the corner.
+ */
+function NodeThumbnail({ thumbnail }: { thumbnail?: Thumbnail }) {
+  const ref = useRef<HTMLCanvasElement>(null);
+
+  useEffect(() => {
+    const canvas = ref.current;
+    const ctx = canvas?.getContext('2d');
+    if (!canvas || !ctx) return;
+    if (!thumbnail) {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      return;
+    }
+    const scratch = document.createElement('canvas');
+    scratch.width = thumbnail.width;
+    scratch.height = thumbnail.height;
+    scratch
+      .getContext('2d')
+      ?.putImageData(new ImageData(thumbnail.data, thumbnail.width, thumbnail.height), 0, 0);
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    // Cover, so a non-square map fills the strip rather than leaving bars.
+    const scale = Math.max(canvas.width / thumbnail.width, canvas.height / thumbnail.height);
+    const w = thumbnail.width * scale;
+    const h = thumbnail.height * scale;
+    ctx.drawImage(scratch, (canvas.width - w) / 2, (canvas.height - h) / 2, w, h);
+  }, [thumbnail]);
+
+  return <canvas className="ts-node-preview" ref={ref} width={168} height={56} />;
+}
+
 /** Category accent, matching the CSS custom properties. */
 export function categoryColor(category: string): string {
   return `var(--cat-${category}, var(--cat-utility))`;
+}
+
+/**
+ * The same accent as a real colour.
+ *
+ * The minimap paints its nodes into an SVG `fill` attribute rather than into a
+ * style rule, where a `var()` resolves to nothing and every node comes out
+ * invisible — which is what the minimap did until this existed. Resolved from
+ * the stylesheet rather than duplicated so the two cannot drift, and cached
+ * because the minimap asks once per node per repaint.
+ */
+const resolvedCategoryColors = new Map<string, string>();
+
+export function categoryColorValue(category: string): string {
+  const cached = resolvedCategoryColors.get(category);
+  if (cached !== undefined) return cached;
+  const style = getComputedStyle(document.documentElement);
+  const value =
+    style.getPropertyValue(`--cat-${category}`).trim() ||
+    style.getPropertyValue('--cat-utility').trim() ||
+    '#7a8494';
+  resolvedCategoryColors.set(category, value);
+  return value;
 }
 
 /**

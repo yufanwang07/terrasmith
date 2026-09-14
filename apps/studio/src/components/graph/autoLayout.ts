@@ -14,21 +14,49 @@
 
 import type { Graph, NodeDefinition } from '@terrasmith/graph';
 import { registry } from '../../state/store.js';
+import { hasPreview } from './TerrainNode.js';
 
 /** Horizontal distance between columns, in graph units. */
 const COLUMN_GAP = 260;
 /** Vertical gap left between two nodes in the same column. */
 const ROW_GAP = 28;
-/** Node header plus the summary line, in graph units. */
-const NODE_CHROME = 54;
+/**
+ * Everything on a node that is not a port row: the header, the body's padding,
+ * the two-line summary and the border. Measured against the stylesheet.
+ */
+const NODE_CHROME = 72;
+/** Node width, matching `.ts-node`. */
+const NODE_WIDTH = 176;
 /** Height of one port row; matches `.ts-port` in the stylesheet. */
 const PORT_HEIGHT = 18;
+/**
+ * Height of the thumbnail strip, matching `.ts-node-preview`.
+ *
+ * Reserved on every node rather than only on the ones that have rendered a
+ * thumbnail yet. Thumbnails arrive a second after the graph settles, so a
+ * layout that measured what was on screen at the time would be wrong by the
+ * time the user looked at it — and a column of nodes that overlap once the
+ * pictures land is worse than one with a little slack in it.
+ */
+const PREVIEW_HEIGHT = 57;
 
-/** Rendered height of a node, which depends on how many ports it has. */
-function nodeHeight(def: NodeDefinition<never> | undefined): number {
+/**
+ * Rendered height of a node: its chrome, a row per port, and the thumbnail
+ * strip on the nodes that have one.
+ *
+ * Exported because React Flow needs it too. Its minimap only draws nodes whose
+ * size it knows, and this editor drops the dimension changes React Flow sends
+ * back — so declaring the size up front is both what makes the minimap work
+ * and what saves a measurement pass.
+ */
+export function nodeHeight(def: NodeDefinition<never> | undefined): number {
   if (!def) return 90;
-  return NODE_CHROME + (def.inputs.length + def.outputs.length) * PORT_HEIGHT;
+  const ports = (def.inputs.length + def.outputs.length) * PORT_HEIGHT;
+  return NODE_CHROME + ports + (hasPreview(def) ? PREVIEW_HEIGHT : 0);
 }
+
+/** Rendered width of every node, matching `.ts-node`. */
+export const nodeWidth = NODE_WIDTH;
 
 /**
  * Assign every node a position.
@@ -139,9 +167,10 @@ export function hasOverlap(graph: Graph): boolean {
     for (let j = i + 1; j < boxes.length; j++) {
       const a = boxes[i];
       const b = boxes[j];
-      // Nodes are about 180 units wide; anything closer than that horizontally
-      // and overlapping vertically is drawn on top of its neighbour.
-      if (Math.abs(a.x - b.x) < 180 && a.y < b.y + b.h && b.y < a.y + a.h) return true;
+      // Every node is the same width, so anything closer than that
+      // horizontally and overlapping vertically is drawn on top of its
+      // neighbour.
+      if (Math.abs(a.x - b.x) < NODE_WIDTH && a.y < b.y + b.h && b.y < a.y + a.h) return true;
     }
   }
   return false;

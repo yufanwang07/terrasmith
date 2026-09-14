@@ -79,7 +79,7 @@ export const ROLLING_HILLS: Template = {
     // one height, and BAR has no terraform command: a base wants roughly
     // 400x400 elmos within about 10 elmos of level, and it has to be in the map
     // before it ships.
-    g.node('gentle', 'selector.slope', { low: 0, high: 10, falloff: 5, soften: 220 }, 500, 440);
+    g.node('gentle', 'selector.slope', { low: 0, high: 10, falloff: 5, soften: 220 }, 500, 520);
     g.node('pads', 'filter.smooth', { radius: 380, strength: 0.9 }, 720, 300);
 
     // Sharpening after the levelling rather than before. On ground that has

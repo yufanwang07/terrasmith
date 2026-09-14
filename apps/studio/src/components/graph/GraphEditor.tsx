@@ -26,14 +26,17 @@ import {
 } from '@xyflow/react';
 import { useEditor } from '../../state/store.js';
 import { registry } from '../../state/store.js';
-import { TerrainNode, categoryColor, type TerrainNodeData } from './TerrainNode.js';
-import { autoLayout } from './autoLayout.js';
+import { TerrainNode, categoryColorValue, type TerrainNodeData } from './TerrainNode.js';
+import { autoLayout, nodeHeight, nodeWidth } from './autoLayout.js';
+import { useNodeThumbnails } from '../../state/thumbnails.js';
 
 const nodeTypes = { terrain: TerrainNode };
 
 interface Props {
   /** Node ids that failed in the last evaluation, keyed to their message. */
   errors?: Record<string, string>;
+  /** Draw each node's output on it. Off while the main preview is busy. */
+  thumbnails?: boolean;
 }
 
 export function GraphEditor(props: Props) {
@@ -44,7 +47,7 @@ export function GraphEditor(props: Props) {
   );
 }
 
-function GraphCanvas({ errors }: Props) {
+function GraphCanvas({ errors, thumbnails = true }: Props) {
   const project = useEditor((s) => s.project);
   const selection = useEditor((s) => s.selection);
   const select = useEditor((s) => s.select);
@@ -56,6 +59,15 @@ function GraphCanvas({ errors }: Props) {
   const { screenToFlowPosition, fitView } = useReactFlow();
   const wrapperRef = useRef<HTMLDivElement>(null);
 
+  // Every node is a thumbnail candidate. Culling to the viewport would save
+  // work on a huge graph, but React Flow does not report visibility cheaply and
+  // a terrain graph is tens of nodes, not thousands.
+  const thumbnailTargets = useMemo(
+    () => (thumbnails ? project.graph.nodes.map((n) => n.id) : []),
+    [thumbnails, project.graph.nodes],
+  );
+  const { byNode } = useNodeThumbnails(project, thumbnailTargets, thumbnails);
+
   const nodes = useMemo<Node<TerrainNodeData>[]>(
     () =>
       project.graph.nodes.map((node) => ({
@@ -63,15 +75,21 @@ function GraphCanvas({ errors }: Props) {
         type: 'terrain',
         position: node.position,
         selected: selection.includes(node.id),
+        // Declared rather than measured: this editor drops React Flow's
+        // dimension changes to keep the undo stack clean, so without these the
+        // minimap has no sizes to draw with and comes out empty.
+        width: nodeWidth,
+        height: nodeHeight(registry.get(node.type)),
         data: {
           type: node.type,
           params: node.params,
           title: node.title,
           bypassed: node.bypassed,
           error: errors?.[node.id],
+          thumbnail: byNode.get(node.id),
         },
       })),
-    [project.graph.nodes, selection, errors],
+    [project.graph.nodes, selection, errors, byNode],
   );
 
   const edges = useMemo<Edge[]>(
@@ -193,7 +211,7 @@ function GraphCanvas({ errors }: Props) {
           style={{ background: '#15181d', border: '1px solid #2e343d' }}
           nodeColor={(node) => {
             const def = registry.get((node.data as TerrainNodeData).type);
-            return def ? categoryColor(def.category) : '#7a8494';
+            return categoryColorValue(def?.category ?? 'utility');
           }}
         />
       </ReactFlow>
