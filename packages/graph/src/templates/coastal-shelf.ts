@@ -67,13 +67,6 @@ export const COASTAL_SHELF: Template = {
 
     g.node('bluff', 'combiner.combine', { mode: 'add', factor: 1 }, 520, 300);
 
-    g.node('erode', 'natural.hydraulic', {
-      method: 'pipe',
-      amount: 0.7,
-      scale: 300,
-      deposition: 0.6,
-    }, 740, 300);
-
     g.node('gentle', 'selector.slope', { low: 0, high: 10, falloff: 5, soften: 220 }, 740, 560);
     g.node('pads', 'filter.smooth', { radius: 460, strength: 0.9 }, 960, 300);
 
@@ -94,9 +87,8 @@ export const COASTAL_SHELF: Template = {
       .link('crest', 'bluff:b')
       .link('floor', 'rise')
       .link('rise:mask', 'bluff:mask')
-      .link('bluff', 'erode')
-      .link('erode', 'pads')
-      .link('erode', 'gentle')
+      .link('bluff', 'pads')
+      .link('bluff', 'gentle')
       .link('gentle:mask', 'pads:mask')
       .link('pads', 'fair')
       .link('fair', 'sea')

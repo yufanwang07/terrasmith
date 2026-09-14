@@ -112,14 +112,17 @@ export const noiseNode: NodeDefinition<NoiseParams> = {
         'means more small detail and a slower build.',
     }),
     seedParam(),
-    num('gain', 'Roughness', 0.5, {
+    num('gain', 'Roughness', 0.55, {
       min: 0.05,
       max: 0.95,
       step: 0.01,
       tier: 'advanced',
       description:
-        'How much each detail level contributes relative to the one before. Below 0.5 gives smooth ' +
-        'terrain; above 0.6 gives jagged, noisy terrain.',
+        'How much each detail level contributes relative to the one before. It sets the spectral ' +
+        'slope, and real landscapes measure 0.55 to 0.65 in the DEM literature. Below about 0.5 the ' +
+        'terrain is smoother at every scale than any real landscape, which is half of why a ridge ' +
+        'crest then looks pasted onto the ground rather than growing out of it; above 0.7 it is ' +
+        'noise.',
     }),
     num('lacunarity', 'Detail spacing', 2.02, {
       min: 1.2,
@@ -131,14 +134,18 @@ export const noiseNode: NodeDefinition<NoiseParams> = {
         'same grid and the alignment shows as faint straight creases, which is why the default is ' +
         'just off it.',
     }),
-    num('sharpness', 'Ridge sharpness', 1, {
+    num('sharpness', 'Ridge sharpness', 0.625, {
       min: 0.25,
-      max: 3,
+      max: 1.5,
       step: 0.05,
       visibleWhen: (p) => p.fractal === 'ridged',
       description:
         'How narrow the crests are. Low values give broad rounded whalebacks, high values give ' +
-        'knife edges with wide valleys between them.',
+        'knife edges with wide valleys between them. Past about 1 it stops sharpening the crest and ' +
+        'starts flattening everything else: a seventh of the map is clamped dead at every detail ' +
+        'level, so it has no detail at any scale while the rest has all of it, which is what makes a ' +
+        'map look like two terrains stuck together. The old slider went to 3, where more than half ' +
+        'the map is clamped.',
     }),
     choice(
       'type',

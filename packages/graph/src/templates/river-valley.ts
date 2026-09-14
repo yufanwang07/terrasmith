@@ -75,7 +75,7 @@ export const RIVER_VALLEY: Template = {
           id: 'river-main',
           kind: 'polyline',
           smooth: true,
-          value: -45,
+          value: -52,
           width: 900,
           falloff: 500,
           points: [
@@ -86,6 +86,40 @@ export const RIVER_VALLEY: Template = {
             { x: 6840, z: 3936 },
             { x: 8680, z: 4396 },
             { x: 10840, z: 3882 },
+          ],
+        },
+        // Two broad reaches, one in each half of the map. A river drawn as a
+        // single line comes out as a canal — two edges exactly `width` apart
+        // for ten kilometres — and no setting on the Flatten node fixes that,
+        // because the bank it produces is an offset curve of the line. A second
+        // and third shape overlapping the first at a different width is what
+        // makes the water widen and narrow along its length. They sit between
+        // the crossings, so the wide slow water is never what an army has to
+        // hold.
+        {
+          id: 'river-pool-west',
+          kind: 'polyline',
+          smooth: true,
+          value: -30,
+          width: 1500,
+          falloff: 620,
+          points: [
+            { x: 2700, z: 4000 },
+            { x: 3400, z: 4256 },
+            { x: 4100, z: 4230 },
+          ],
+        },
+        {
+          id: 'river-pool-east',
+          kind: 'polyline',
+          smooth: true,
+          value: -30,
+          width: 1500,
+          falloff: 620,
+          points: [
+            { x: 6140, z: 3962 },
+            { x: 6840, z: 3936 },
+            { x: 7540, z: 4192 },
           ],
         },
         // Three crossings, which is what the gameplay notes ask for on a team
@@ -125,12 +159,12 @@ export const RIVER_VALLEY: Template = {
     // division this map wants — flat by the water where bases go, broken on the
     // shoulders where positions are.
     g.node('land', 'generator.noise', {
-      fractal: 'hybrid',
-      featureSize: 3600,
-      amplitude: 560,
+      fractal: 'fbm',
+      featureSize: 3400,
+      amplitude: 520,
       octaves: 5,
-      gain: 0.52,
-      offset: -270,
+      gain: 0.5,
+      offset: 110,
       warpAmount: 900,
       warpSize: 5200,
       seed: 3,
@@ -140,18 +174,18 @@ export const RIVER_VALLEY: Template = {
     // edge of the map so nothing comes back as a capped plateau.
     g.node('sides', 'layout.distance', {
       signed: false,
-      maxDistance: 2200,
+      maxDistance: 3000,
       grow: 0,
       only: 'river-main',
     }, 280, 260);
 
     // ...added back as height, at 75 elmos of rise per 1 000 elmos out. This is
     // what makes the map a valley rather than a trench across a plain.
-    g.node('valley', 'combiner.combine', { mode: 'add', factor: 0.17 }, 520, 380);
+    g.node('valley', 'combiner.combine', { mode: 'add', factor: 0.12 }, 520, 380);
 
     // Level the gentle ground, and only that, before anything is cut into it.
-    g.node('gentle', 'selector.slope', { low: 0, high: 12, falloff: 5, soften: 220 }, 760, 620);
-    g.node('pads', 'filter.smooth', { radius: 420, strength: 0.9 }, 1000, 380);
+    g.node('gentle', 'selector.slope', { low: 0, high: 8, falloff: 4, soften: 200 }, 760, 620);
+    g.node('pads', 'filter.smooth', { radius: 700, strength: 1 }, 1000, 380);
 
     // The plain and the channel, from the two river shapes above.
     g.node('bed', 'layout.flatten', {
@@ -175,7 +209,7 @@ export const RIVER_VALLEY: Template = {
     }, 1480, 380);
 
     g.node('fair', 'gameplay.symmetry', { kind: 'rotate180', feather: 0 }, 1720, 380);
-    g.node('sea', 'filter.seaLevel', { mode: 'coverage', coverage: 0.142 }, 1960, 380);
+    g.node('sea', 'filter.seaLevel', { mode: 'coverage', coverage: 0.213 }, 1960, 380);
     g.node('out', 'output.height', {
       autoRange: false,
       minHeight: -60,
