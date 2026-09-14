@@ -1189,6 +1189,79 @@ describe('baked lighting', () => {
   });
 });
 
+describe('what the ground reads as from a map camera', () => {
+  /**
+   * A 16x16 map's worth of rolling ground: 8 192 elmos across, 400 of relief,
+   * features from four thousand elmos down to a few hundred. The world scale
+   * is the part that matters — slope is a height over a distance, and a toy
+   * grid with 8-elmo samples turns the same shape into a cliff field, which
+   * both of these tests would then read as normal.
+   */
+  const ROLLING_SIZE = 192;
+  const ROLLING_CELL = 8192 / (ROLLING_SIZE - 1);
+
+  function rolling(size: number, amplitude = 400): Field {
+    const f = createField(size, size);
+    for (let y = 0; y < size; y++) {
+      for (let x = 0; x < size; x++) {
+        const u = (x / (size - 1)) * Math.PI * 2;
+        const v = (y / (size - 1)) * Math.PI * 2;
+        f.data[y * size + x] =
+          amplitude *
+            (0.5 * Math.sin(u * 1.7) * Math.cos(v * 1.3) +
+              0.28 * Math.sin(u * 3.1 + 0.7) * Math.cos(v * 2.7 + 2.1) +
+              0.14 * Math.sin(u * 6.3 + 1.9) * Math.cos(v * 5.9)) -
+          60;
+      }
+    }
+    return f;
+  }
+
+  /** What fraction of the map each palette entry is the dominant material on. */
+  function dominantShares(palette: MaterialPalette, terrain: Field, cellSize: number): number[] {
+    const resolved = resolveTextureInputs(
+      { height: terrain },
+      { cellSize, need: channelsUsedBy(palette) },
+    );
+    const weights = evaluateMaterialWeights({ ...resolved }, palette, {});
+    const dominant = dominantMaterial(weights);
+    const shares = new Array(palette.length).fill(0);
+    for (let i = 0; i < dominant.data.length; i++) shares[dominant.data[i] | 0]++;
+    return shares.map((n) => n / dominant.data.length);
+  }
+
+  it.each(PALETTE_PRESETS.map((p) => [p.id, p] as const))(
+    '%s: no slope material takes over the map in thin strips',
+    (_id, preset) => {
+      const terrain = rolling(ROLLING_SIZE);
+      const range = fieldRange(terrain);
+      const palette = rescalePaletteHeights(preset.palette, range);
+      const shares = dominantShares(palette, terrain, ROLLING_CELL);
+
+      // The mid-slope materials — exposed soil, sandstone, talus, scoria — used
+      // to come on at 15 degrees, which on rolling ground is every shoulder
+      // between a hollow and a ridge. That is a *web* of one-texel strips, and
+      // 15% of the map in strips that thin is not a landform at map view, it is
+      // noise: it was the single biggest reason a generated texture read as
+      // camouflage rather than as terrain.
+      //
+      // Cliff rock is allowed to take whatever it takes. A cliff really is the
+      // rock, and its mask is a solid face rather than a web.
+      for (let i = 0; i < palette.length; i++) {
+        const { rule, material } = palette[i];
+        const isMidSlope =
+          rule.slope?.min !== undefined && rule.slope.min < 40 && rule.cap !== undefined;
+        if (!isMidSlope) continue;
+        expect(
+          shares[i],
+          `${material.id} is dominant on ${(shares[i] * 100).toFixed(1)}% of a rolling map`,
+        ).toBeLessThan(0.12);
+      }
+    },
+  );
+
+});
+
 describe('macro variation', () => {
   const terrain = filledField(256, 256, 100);
   const flatGrey: MaterialPalette = [

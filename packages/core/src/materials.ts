@@ -505,6 +505,39 @@ export const PALETTE_REFERENCE_HEIGHTS = { min: -120, max: 400 } as const;
 const UPLAND_CROSSOVER = 240;
 const UPLAND_FEATHER = 330;
 
+/**
+ * Where the ground stops being ground and starts being the stuff under it.
+ *
+ * Every palette has a mid-slope material — exposed soil, sandstone, talus,
+ * scoria — between its grass and its cliff rock, and this is where it comes on.
+ *
+ * It used to be 22 to 24 degrees with a 14-degree feather, so it began at 15
+ * and was fully on by 31. That is a low bar, and on a rolling map it put 15% of
+ * the whole texture into a web of one-texel strips winding over every shoulder
+ * between a hollow and a ridge. At map view a contrasting colour in strips that
+ * thin is not a landform, it is noise, and it was the single biggest reason a
+ * generated texture read as camouflage rather than as terrain.
+ *
+ * 30 with a 10-degree feather starts it at 25 and fills it at 35. That is not
+ * an arbitrary retune: 27 degrees is where a vehicle stops, so the band now
+ * begins where the ground genuinely changes character *and* tells the player
+ * something. On the shipped templates it takes the mid-slope share from about
+ * 15% of the map to about 4%, in patches broad enough to read.
+ */
+const MID_SLOPE_ONSET = 30;
+const MID_SLOPE_FEATHER = 10;
+
+/**
+ * The most of a texel a mid-slope material may claim.
+ *
+ * A cap turns it from a stencil into a stain: the grass or sand underneath
+ * stays visible through it, so the boundary is a change of shade rather than a
+ * change of colour and a thin strip of it reads as a worn shoulder instead of
+ * as a painted line. Cliff rock is deliberately *not* capped — a cliff really
+ * is the rock, and it wants to replace what it covers.
+ */
+const MID_SLOPE_CAP = 0.62;
+
 // Every shipped palette runs least-specific first: two depth zones, two
 // shoreline zones, the dominant ground, an upland variant of that ground, two
 // slope materials, and last the accents. Later entries outrank earlier ones, so
@@ -639,7 +672,8 @@ export const TEMPERATE: MaterialPalette = [
     },
     rule: {
       weight: 1.2,
-      slope: { min: 24, blend: 14 },
+      cap: MID_SLOPE_CAP,
+      slope: { min: MID_SLOPE_ONSET, blend: MID_SLOPE_FEATHER },
       curvature: { from: 0.35, to: 0.75, amount: 0.3 },
     },
   },
@@ -773,7 +807,7 @@ export const ARID_DESERT: MaterialPalette = [
       splatChannel: SPLAT_CHANNELS.rock,
       detailScale: 75,
     },
-    rule: { weight: 1.2, slope: { min: 22, blend: 14 } },
+    rule: { weight: 1.2, cap: MID_SLOPE_CAP, slope: { min: MID_SLOPE_ONSET, blend: MID_SLOPE_FEATHER } },
   },
   {
     material: {
@@ -898,7 +932,8 @@ export const ALPINE_SNOW: MaterialPalette = [
     },
     rule: {
       weight: 1.2,
-      slope: { min: 26, blend: 14 },
+      cap: MID_SLOPE_CAP,
+      slope: { min: MID_SLOPE_ONSET, blend: MID_SLOPE_FEATHER },
       deposition: { from: 0.1, to: 0.55, amount: 0.3 },
     },
   },
@@ -1068,7 +1103,7 @@ export const VOLCANIC: MaterialPalette = [
       splatChannel: SPLAT_CHANNELS.rock,
       detailScale: 55,
     },
-    rule: { weight: 1.2, slope: { min: 24, blend: 14 } },
+    rule: { weight: 1.2, cap: MID_SLOPE_CAP, slope: { min: MID_SLOPE_ONSET, blend: MID_SLOPE_FEATHER } },
   },
   {
     material: {
@@ -1205,7 +1240,7 @@ export const TROPICAL_ISLAND: MaterialPalette = [
       splatChannel: SPLAT_CHANNELS.rock,
       detailScale: 60,
     },
-    rule: { weight: 1.25, slope: { min: 30, blend: 14 } },
+    rule: { weight: 1.25, cap: MID_SLOPE_CAP, slope: { min: MID_SLOPE_ONSET, blend: MID_SLOPE_FEATHER } },
   },
   {
     material: {
@@ -1321,7 +1356,7 @@ export const TUNDRA: MaterialPalette = [
       splatChannel: SPLAT_CHANNELS.rock,
       detailScale: 58,
     },
-    rule: { weight: 1.2, slope: { min: 22, blend: 14 } },
+    rule: { weight: 1.2, cap: MID_SLOPE_CAP, slope: { min: MID_SLOPE_ONSET, blend: MID_SLOPE_FEATHER } },
   },
   {
     material: {
@@ -1452,7 +1487,7 @@ export const MARS_RED: MaterialPalette = [
       splatChannel: SPLAT_CHANNELS.rock,
       detailScale: 65,
     },
-    rule: { weight: 1.2, slope: { min: 24, blend: 14 } },
+    rule: { weight: 1.2, cap: MID_SLOPE_CAP, slope: { min: MID_SLOPE_ONSET, blend: MID_SLOPE_FEATHER } },
   },
   {
     material: {

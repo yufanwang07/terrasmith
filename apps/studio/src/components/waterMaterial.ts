@@ -86,6 +86,10 @@ export function createWaterMaterial(options: WaterMaterialOptions): THREE.Shader
       waveScale: { value: new THREE.Vector2(1 / 800, 1 / 800) },
       windSpeed: { value: 0.5 },
       foamIntensity: { value: 1 },
+      /** Elmos one device pixel covers at unit distance. */
+      pixelScale: { value: 0.001 },
+      /** Elmos per texel of the wave tile, for the footprint fade. */
+      waveTexelElmos: { value: new THREE.Vector3(1, 1, 1) },
       fogColorEngine: { value: new THREE.Vector3(0.7, 0.7, 0.8) },
       fogStart: { value: 2000 },
       fogEnd: { value: 20000 },
@@ -142,9 +146,22 @@ export function setWaterTiling(
   repeatX: number,
   repeatY: number,
 ): void {
+  const scaleX = repeatX / Math.max(1, worldWidth);
   (material.uniforms.waveScale.value as THREE.Vector2).set(
-    repeatX / Math.max(1, worldWidth),
+    scaleX,
     repeatY / Math.max(1, worldHeight),
+  );
+  // How many elmos one texel of each of the three wave samples covers. The
+  // shader fades each toward flat once a screen pixel is wider than that, for
+  // the same reason the ground fades its detail normals: whatever survives the
+  // mip chain at a dozen texels a pixel is not a wave, it is per-frame noise
+  // that changes when the camera moves — and on a sea it is far more obvious
+  // than on ground, because there is nothing else there to look at.
+  const texel = 1 / (scaleX * WAVE_TILE_SIZE);
+  (material.uniforms.waveTexelElmos.value as THREE.Vector3).set(
+    texel,
+    texel / FINE_WAVE_SCALE,
+    texel / SWELL_SCALE,
   );
 }
 
@@ -173,7 +190,16 @@ export function setWaterFog(
  * Sampled twice at different rates and directions in the shader, which is what
  * stops a tiling normal map reading as a repeating pattern on a flat sheet.
  */
-function buildWaveNormal(size = 256): THREE.DataTexture {
+/** Edge of the wave normal tile, in texels. */
+const WAVE_TILE_SIZE = 256;
+
+/** How much faster than the base sample the second, finer one runs. */
+const FINE_WAVE_SCALE = 1.87;
+
+/** And how much slower the swell runs. It is the only one visible from a map camera. */
+const SWELL_SCALE = 0.14;
+
+function buildWaveNormal(size = WAVE_TILE_SIZE): THREE.DataTexture {
   const height = new Float32Array(size * size);
   const octave = (freq: number, amplitude: number, seed: number) => {
     for (let y = 0; y < size; y++) {
@@ -281,6 +307,19 @@ const FRAGMENT = /* glsl */ `
   varying float vDepth;
 
   /**
+   * How flat a wave sample has to be pulled at this distance.
+   *
+   * The same rule the ground uses on its detail normals: once a screen pixel is
+   * wider than a texel of the tile, what is left is aliasing rather than
+   * detail. On the sea it matters more than on the ground — a flat sheet has
+   * nothing else on it, so the noise is the only thing moving, and it reads as
+   * a dirty texture rather than as water.
+   */
+  float footprintFade(float elmosPerPixel, float texelElmos) {
+    return clamp(1.0 - log2(max(elmosPerPixel, 1e-6) / texelElmos) / 3.0, 0.0, 1.0);
+  }
+
+  /**
    * How close to the shore foam reaches, in elmos of depth.
    *
    * Twelve, which on a gentle beach is a band a few tens of elmos wide and on a
@@ -298,8 +337,19 @@ const FRAGMENT = /* glsl */ `
     // Two samples running at different rates and crossing directions. One alone
     // is a repeating pattern sliding over a flat sheet, however good the tile
     // is; two that never line up again read as water.
-    vec3 a = texture2D(waveMap, uv + vec2(0.031, 0.019) * t).rgb * 2.0 - 1.0;
-    vec3 b = texture2D(waveMap, uv * 1.87 + vec2(-0.017, 0.041) * t).rgb * 2.0 - 1.0;
+    vec3 toCamera = cameraPos - vWorld;
+    float dist = length(toCamera);
+    vec3 V = toCamera / max(dist, 1e-4);
+
+    float elmosPerPixel = dist * pixelScale;
+    vec3 fade = vec3(
+      footprintFade(elmosPerPixel, waveTexelElmos.x),
+      footprintFade(elmosPerPixel, waveTexelElmos.y),
+      footprintFade(elmosPerPixel, waveTexelElmos.z)
+    );
+
+    vec3 a = (texture2D(waveMap, uv + vec2(0.031, 0.019) * t).rgb * 2.0 - 1.0) * fade.x;
+    vec3 b = (texture2D(waveMap, uv * 1.87 + vec2(-0.017, 0.041) * t).rgb * 2.0 - 1.0) * fade.y;
     // A third, much slower swell. The two above are a few elmos a texel, so
     // from a map camera they are mipped into a flat sheet and the sea stops
     // reading as water; this one is one repeat per several thousand elmos and
@@ -309,17 +359,14 @@ const FRAGMENT = /* glsl */ `
     // Deliberately gentle. Turned up, it tilts the surface far enough that the
     // Fresnel term climbs everywhere and the whole sea becomes sky, which hides
     // the sea bed the absorption just spent a shader working out.
-    vec3 swell = texture2D(waveMap, uv * 0.14 + vec2(0.006, -0.004) * t).rgb * 2.0 - 1.0;
+    vec3 swell =
+      (texture2D(waveMap, uv * 0.14 + vec2(0.006, -0.004) * t).rgb * 2.0 - 1.0) * fade.z;
 
     vec3 wave = normalize(vec3(
       a.x + b.x * 0.6 + swell.x * 0.55,
       1.0 / 0.45,
       a.y + b.y * 0.6 + swell.y * 0.55
     ));
-
-    vec3 toCamera = cameraPos - vWorld;
-    float dist = length(toCamera);
-    vec3 V = toCamera / max(dist, 1e-4);
 
     // Fresnel: nearly clear looking straight down, mirror-like along the
     // surface. This is the whole reason a lake reads as wet from a low camera
@@ -344,8 +391,15 @@ const FRAGMENT = /* glsl */ `
     // without it every beach gets a smooth white halo, which is the thing that
     // makes rendered water look like fog.
     float shore = 1.0 - clamp(vDepth / FOAM_DEPTH, 0.0, 1.0);
-    float crest = clamp(0.5 + (a.x + b.y) * 1.6, 0.0, 1.0);
-    float foam = clamp(smoothstep(0.35, 0.95, shore) * crest * foamIntensity, 0.0, 1.0);
+    // The crest comes from the swell rather than from the two fine samples,
+    // because those are faded to nothing at map view and the foam would go
+    // back to being a smooth halo exactly where it is least wanted.
+    float crest = clamp(0.5 + (swell.x + swell.y) * 1.4, 0.0, 1.0);
+    // And the whole band fades with the waves. A shoreline seen from a map
+    // camera is a line one preview texel wide, so a bright edge on it does not
+    // read as surf — it reads as the staircase the preview grid actually is.
+    float reach = mix(0.25, 1.0, fade.y);
+    float foam = clamp(smoothstep(0.35, 0.95, shore) * crest * reach * foamIntensity, 0.0, 1.0);
 
     vec3 colour = mix(surfaceColor * surfaceAlpha + reflection * fresnel, vec3(1.0), foam);
     colour += specular;
