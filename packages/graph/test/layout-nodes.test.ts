@@ -213,6 +213,23 @@ describe('layout.shapes', () => {
     expect(shapes[0].closed).toBe(true);
   });
 
+  it('still loads a layout saved with the old `y` spelling', () => {
+    // The port type named the second ground axis `y` before it was unified with
+    // core's, so a project saved then has `y` where the loader now wants `z`.
+    // Refusing those would break a saved map to gain nothing.
+    const old = parseShapes('[{"id":"a","kind":"polyline","points":[{"x":100,"y":200},{"x":300,"y":400}]}]');
+    expect(old[0].points).toEqual([
+      { x: 100, z: 200 },
+      { x: 300, z: 400 },
+    ]);
+    // `z` wins where a file somehow carries both, because that is the spelling
+    // the writer uses today.
+    expect(parseShapes('[{"id":"a","kind":"point","points":[{"x":0,"y":9,"z":5}]}]')[0].points[0]).toEqual({
+      x: 0,
+      z: 5,
+    });
+  });
+
   it('keeps a shape the author explicitly straightened straight', () => {
     expect(parseShapes('[{"id":"a","kind":"polyline","points":[{"x":0,"y":0}],"smooth":false}]')[0].smooth).toBe(
       false,

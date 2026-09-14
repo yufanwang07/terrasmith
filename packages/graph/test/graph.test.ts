@@ -14,7 +14,9 @@ import {
   deriveSeed,
   mapDimensionsOf,
   parseProject,
+  projectFromTemplate,
   serializeProject,
+  TEMPLATES,
   topologicalOrder,
 } from '../src/index.js';
 import type { EvalContext, Graph, NodeDefinition } from '../src/index.js';
@@ -350,6 +352,34 @@ describe('project', () => {
   it('round-trips through serialise and parse', () => {
     const p = createProject({ metadata: { name: 'Round Trip' } });
     expect(parseProject(serializeProject(p))).toEqual(p);
+  });
+
+  it('round-trips a real project, not just an empty one', () => {
+    // The empty case above only proves the defaults survive. What a user
+    // actually saves is a template's graph plus everything they placed on top
+    // of it, and each of those is a separate chance for a field to be dropped
+    // on the way through.
+    for (const template of TEMPLATES) {
+      const project = projectFromTemplate(template);
+      project.metalSpots = [
+        { id: 'm1', x: 600, z: 1400, income: 2 },
+        { id: 'm2', x: 3000, z: 900, income: 1.5 },
+      ];
+      project.startPositions = [
+        { id: 's1', x: 400, z: 400, team: 0 },
+        { id: 's2', x: 3600, z: 3600, team: 1 },
+      ];
+      project.metadata = { ...project.metadata, author: 'A Mapper', tags: ['ffa', 'land'] };
+
+      const back = parseProject(serializeProject(project));
+      expect(back, `${template.id} did not survive a save and load`).toEqual(project);
+      // Named separately, because `toEqual` on the whole object makes a failure
+      // in any one of them read as "the project changed".
+      expect(back.graph.nodes.length).toBe(project.graph.nodes.length);
+      expect(back.graph.edges).toEqual(project.graph.edges);
+      expect(back.metalSpots).toEqual(project.metalSpots);
+      expect(back.startPositions).toEqual(project.startPositions);
+    }
   });
 
   it('rejects a project saved by a newer format', () => {
