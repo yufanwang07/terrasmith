@@ -647,8 +647,8 @@ describe('gameplay.rampCarve', () => {
               id: 'r1',
               kind: 'polyline',
               points: [
-                { x: 400, y: middle },
-                { x: 1600, y: middle },
+                { x: 400, z: middle },
+                { x: 1600, z: middle },
               ],
             },
           ],
@@ -679,16 +679,16 @@ describe('gameplay.metalSpots', () => {
       params: { symmetry: 'rotate180' },
       ctx: metalCtx,
     });
-    const shapes = (result.spots as { shapes: Array<{ points: Array<{ x: number; y: number }>; value?: number }> }).shapes;
+    const shapes = (result.spots as { shapes: Array<{ points: Array<{ x: number; z: number }>; value?: number }> }).shapes;
     expect(shapes.length).toBeGreaterThan(4);
     expect(shapes.length % 2).toBe(0);
 
     for (const s of shapes) {
       const p = s.points[0];
       const partner = shapes.find(
-        (o) => Math.abs(o.points[0].x - (4096 - p.x)) < 1 && Math.abs(o.points[0].y - (4096 - p.y)) < 1,
+        (o) => Math.abs(o.points[0].x - (4096 - p.x)) < 1 && Math.abs(o.points[0].z - (4096 - p.z)) < 1,
       );
-      expect(partner, `no half-turn partner for the spot at ${p.x},${p.y}`).toBeTruthy();
+      expect(partner, `no half-turn partner for the spot at ${p.x},${p.z}`).toBeTruthy();
       expect(partner?.value).toBeCloseTo(s.value ?? 0, 6);
     }
   });
@@ -719,12 +719,12 @@ describe('gameplay.metalSpots', () => {
       params: { symmetry: 'rotate180', minSeparation: 320 },
       ctx: metalCtx,
     });
-    const shapes = (result.spots as { shapes: Array<{ points: Array<{ x: number; y: number }> }> }).shapes;
+    const shapes = (result.spots as { shapes: Array<{ points: Array<{ x: number; z: number }> }> }).shapes;
     for (let i = 0; i < shapes.length; i++) {
       for (let j = i + 1; j < shapes.length; j++) {
         const a = shapes[i].points[0];
         const b = shapes[j].points[0];
-        expect(Math.hypot(a.x - b.x, a.y - b.y)).toBeGreaterThanOrEqual(320 - 1e-6);
+        expect(Math.hypot(a.x - b.x, a.z - b.z)).toBeGreaterThanOrEqual(320 - 1e-6);
       }
     }
   });
@@ -735,20 +735,20 @@ describe('gameplay.metalSpots', () => {
         terrain: flat,
         starts: {
           shapes: [
-            { id: 's1', kind: 'point', points: [{ x: 512, y: 512 }] },
-            { id: 's2', kind: 'point', points: [{ x: 3584, y: 3584 }] },
+            { id: 's1', kind: 'point', points: [{ x: 512, z: 512 }] },
+            { id: 's2', kind: 'point', points: [{ x: 3584, z: 3584 }] },
           ],
         },
       },
       params: { symmetry: 'rotate180', baseSpots: 2, expansionSpots: 0, contestedOrbits: 0 },
       ctx: metalCtx,
     });
-    const shapes = (result.spots as { shapes: Array<{ points: Array<{ x: number; y: number }> }> }).shapes;
+    const shapes = (result.spots as { shapes: Array<{ points: Array<{ x: number; z: number }> }> }).shapes;
     expect(shapes.length).toBe(4);
     // Every base spot must be inside its own start's 600-elmo ring.
     for (const s of shapes) {
       const p = s.points[0];
-      const d = Math.min(Math.hypot(p.x - 512, p.y - 512), Math.hypot(p.x - 3584, p.y - 3584));
+      const d = Math.min(Math.hypot(p.x - 512, p.z - 512), Math.hypot(p.x - 3584, p.z - 3584));
       expect(d).toBeLessThanOrEqual(600);
     }
   });

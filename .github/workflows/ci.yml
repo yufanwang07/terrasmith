@@ -40,7 +40,7 @@ jobs:
       # links, and a type error is a faster, clearer failure than whatever it
       # turns into at runtime.
       - name: Typecheck
-        run: npx tsc -b packages/core packages/format packages/graph packages/build packages/cli
+        run: npm run typecheck
 
       - name: Test
         run: npx vitest run --reporter=dot

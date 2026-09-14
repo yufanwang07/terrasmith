@@ -13,8 +13,8 @@ import {
   layoutShapesNode,
   parseShapes,
   serializeShapes,
-  type LayoutShape,
-  type LayoutShapeSet,
+  type Shape,
+  type ShapeSet,
 } from '../src/nodes/layout.js';
 
 /** A 16x16 BAR map (8192 elmos) at whatever grid resolution a test asks for. */
@@ -51,7 +51,7 @@ async function run<P>(
   });
 }
 
-function shapeSet(shapes: LayoutShape[]): LayoutShapeSet {
+function shapeSet(shapes: Shape[]): ShapeSet {
   return { shapes };
 }
 
@@ -112,16 +112,16 @@ function compareResolutions(coarse: Field, fine: Field, tolerance: number): numb
  * wherever the author dropped them, so the test uses an offset square and the
  * area comes out exact.
  */
-function square(id: string, cx: number, cz: number, side: number, extra: Partial<LayoutShape> = {}): LayoutShape {
+function square(id: string, cx: number, cz: number, side: number, extra: Partial<Shape> = {}): Shape {
   const h = side / 2;
   return {
     id,
     kind: 'polygon',
     points: [
-      { x: cx - h, y: cz - h },
-      { x: cx + h, y: cz - h },
-      { x: cx + h, y: cz + h },
-      { x: cx - h, y: cz + h },
+      { x: cx - h, z: cz - h },
+      { x: cx + h, z: cz - h },
+      { x: cx + h, z: cz + h },
+      { x: cx - h, z: cz + h },
     ],
     closed: true,
     ...extra,
@@ -160,7 +160,7 @@ describe('layout node definitions', () => {
 describe('layout.shapes', () => {
   it('ships a default layout that is already a balanced map', async () => {
     const out = await run(layoutShapesNode, { ctx: ctx(64) });
-    const set = out.shapes as LayoutShapeSet;
+    const set = out.shapes as ShapeSet;
     const ids = set.shapes.map((s) => s.id);
     expect(ids).toContain('ridge-centre');
     expect(ids).toContain('river-main');
@@ -169,14 +169,14 @@ describe('layout.shapes', () => {
     const b = set.shapes.find((s) => s.id === 'base-southeast');
     expect(a).toBeDefined();
     expect(b).toBeDefined();
-    const centre = (s: LayoutShape): { x: number; y: number } => ({
+    const centre = (s: Shape): { x: number; z: number } => ({
       x: s.points.reduce((t, p) => t + p.x, 0) / s.points.length,
-      y: s.points.reduce((t, p) => t + p.y, 0) / s.points.length,
+      z: s.points.reduce((t, p) => t + p.z, 0) / s.points.length,
     });
-    const ca = centre(a as LayoutShape);
-    const cb = centre(b as LayoutShape);
+    const ca = centre(a as Shape);
+    const cb = centre(b as Shape);
     expect(ca.x + cb.x).toBeCloseTo(8192, 3);
-    expect(ca.y + cb.y).toBeCloseTo(8192, 3);
+    expect(ca.z + cb.z).toBeCloseTo(8192, 3);
   });
 
   it('places the default layout exactly on its 180-degree partner', async () => {
@@ -185,12 +185,12 @@ describe('layout.shapes', () => {
     // to it. Every point of every stock shape has to land on the image of
     // another under a half turn about the middle, to the elmo.
     const out = await run(layoutShapesNode, { ctx: ctx(64) });
-    const all = (out.shapes as LayoutShapeSet).shapes;
+    const all = (out.shapes as ShapeSet).shapes;
     const points = all.flatMap((s) => s.points);
     expect(points.length).toBeGreaterThan(10);
     for (const p of points) {
-      const image = points.find((q) => Math.abs(q.x - (8192 - p.x)) < 1e-9 && Math.abs(q.y - (8192 - p.y)) < 1e-9);
-      expect(image, `no half-turn partner for ${p.x},${p.y}`).toBeDefined();
+      const image = points.find((q) => Math.abs(q.x - (8192 - p.x)) < 1e-9 && Math.abs(q.z - (8192 - p.z)) < 1e-9);
+      expect(image, `no half-turn partner for ${p.x},${p.z}`).toBeDefined();
     }
   });
 
@@ -199,7 +199,7 @@ describe('layout.shapes', () => {
     // parameter of the node drawing it, and the author sees a slider that does
     // nothing on the one layout everybody starts from.
     const out = await run(layoutShapesNode, { ctx: ctx(64) });
-    for (const s of (out.shapes as LayoutShapeSet).shapes) {
+    for (const s of (out.shapes as ShapeSet).shapes) {
       expect(s.value, `${s.id} carries a height`).toBeUndefined();
       expect(s.width, `${s.id} carries a width`).toBeUndefined();
     }
@@ -208,7 +208,7 @@ describe('layout.shapes', () => {
   it('round-trips through its serialised form', () => {
     const shapes = parseShapes(serializeShapes([square('pad', 1000, 2000, 400, { value: 55, falloff: 12 })]));
     expect(shapes).toHaveLength(1);
-    expect(shapes[0].points[0]).toEqual({ x: 800, y: 1800 });
+    expect(shapes[0].points[0]).toEqual({ x: 800, z: 1800 });
     expect(shapes[0].value).toBe(55);
     expect(shapes[0].closed).toBe(true);
   });
@@ -222,7 +222,7 @@ describe('layout.shapes', () => {
   it('says what is wrong rather than dropping a shape silently', () => {
     expect(() => parseShapes('{oops')).toThrow(/not valid JSON/);
     expect(() => parseShapes([{ kind: 'polygon' }])).toThrow(/shape 0 has no points/);
-    expect(() => parseShapes([{ kind: 'blob', points: [{ x: 0, y: 0 }] }])).toThrow(/kind/);
+    expect(() => parseShapes([{ kind: 'blob', points: [{ x: 0, z: 0 }] }])).toThrow(/kind/);
     expect(() => parseShapes([{ kind: 'polyline', points: [{ x: 0 }] }])).toThrow(/point 0/);
   });
 
@@ -230,13 +230,13 @@ describe('layout.shapes', () => {
     // NaN is caught nowhere downstream: it poisons the shape's bounding box, so
     // the rasteriser draws a different shape from the one asked for and says
     // nothing. It does not even survive a save — JSON writes it as null.
-    expect(() => parseShapes([{ kind: 'point', points: [{ x: NaN, y: 1 }] }])).toThrow(/point 0/);
-    expect(() => parseShapes([{ kind: 'point', points: [{ x: 1, y: Infinity }] }])).toThrow(/point 0/);
+    expect(() => parseShapes([{ kind: 'point', points: [{ x: NaN, z: 1 }] }])).toThrow(/point 0/);
+    expect(() => parseShapes([{ kind: 'point', points: [{ x: 1, z: Infinity }] }])).toThrow(/point 0/);
     expect(() =>
-      parseShapes([{ kind: 'point', points: [{ x: 1, y: 1 }], value: NaN }]),
+      parseShapes([{ kind: 'point', points: [{ x: 1, z: 1 }], value: NaN }]),
     ).toThrow(/shape 0 has a height/);
     expect(() =>
-      parseShapes([{ kind: 'point', points: [{ x: 1, y: 1 }], falloff: 'wide' }]),
+      parseShapes([{ kind: 'point', points: [{ x: 1, z: 1 }], falloff: 'wide' }]),
     ).toThrow(/shape 0 has a soft edge/);
   });
 
@@ -246,8 +246,8 @@ describe('layout.shapes', () => {
       ctx: ctx(64, { worldWidth: 16384, worldHeight: 16384 }),
       params,
     });
-    const s = (out.shapes as LayoutShapeSet).shapes[0];
-    expect(s.points[0]).toEqual({ x: 7168, y: 7168 });
+    const s = (out.shapes as ShapeSet).shapes[0];
+    expect(s.points[0]).toEqual({ x: 7168, z: 7168 });
     expect(s.falloff).toBe(200);
   });
 
@@ -259,7 +259,7 @@ describe('layout.shapes', () => {
         shapes: serializeShapes([square('pad', 4096, 4096, 1024)]),
       },
     });
-    expect((out.shapes as LayoutShapeSet).shapes[0].points[0]).toEqual({ x: 3584, y: 3584 });
+    expect((out.shapes as ShapeSet).shapes[0].points[0]).toEqual({ x: 3584, z: 3584 });
   });
 
   it('keeps shapes from the input ahead of its own, so its own win an overlap', async () => {
@@ -268,7 +268,7 @@ describe('layout.shapes', () => {
       inputs: { add: shapeSet([square('earlier', 100, 100, 50)]) },
       params: { shapes: serializeShapes([square('later', 200, 200, 50)]) },
     });
-    expect((out.shapes as LayoutShapeSet).shapes.map((s) => s.id)).toEqual(['earlier', 'later']);
+    expect((out.shapes as ShapeSet).shapes.map((s) => s.id)).toEqual(['earlier', 'later']);
   });
 });
 
@@ -308,7 +308,7 @@ describe('layout.mask', () => {
 
   it('gives a line its width without dilating an area by the same amount', async () => {
     const lineAndArea = shapeSet([
-      { id: 'road', kind: 'polyline', points: [{ x: 1000, y: 2000 }, { x: 7000, y: 2000 }] },
+      { id: 'road', kind: 'polyline', points: [{ x: 1000, z: 2000 }, { x: 7000, z: 2000 }] },
       square('pad', 4104, 6104, 1024),
     ]);
     const out = await run(layoutMaskNode, {
@@ -353,7 +353,7 @@ describe('layout.distance', () => {
 
   it('reports the distance to a line in elmos', async () => {
     const line = shapeSet([
-      { id: 'ridge', kind: 'polyline', points: [{ x: 1000, y: 4096 }, { x: 7000, y: 4096 }] },
+      { id: 'ridge', kind: 'polyline', points: [{ x: 1000, z: 4096 }, { x: 7000, z: 4096 }] },
     ]);
     const out = await run(layoutDistanceNode, { ctx: c, inputs: { shapes: line } });
     const field = out.out as Field;
@@ -376,7 +376,7 @@ describe('layout.distance', () => {
 
   it('measures from the line itself, not from a widened version of it', async () => {
     const line = shapeSet([
-      { id: 'r', kind: 'polyline', points: [{ x: 1000, y: 4096 }, { x: 7000, y: 4096 }], width: 900 },
+      { id: 'r', kind: 'polyline', points: [{ x: 1000, z: 4096 }, { x: 7000, z: 4096 }], width: 900 },
     ]);
     const out = await run(layoutDistanceNode, { ctx: c, inputs: { shapes: line } });
     expect(atWorld(out.out as Field, c, 4096, 4096 + 320)).toBeCloseTo(320, 4);
@@ -384,7 +384,7 @@ describe('layout.distance', () => {
 
   it('moves the zero line outward by the growth, so "within 300 elmos" is one setting', async () => {
     const line = shapeSet([
-      { id: 'r', kind: 'polyline', points: [{ x: 1000, y: 4096 }, { x: 7000, y: 4096 }] },
+      { id: 'r', kind: 'polyline', points: [{ x: 1000, z: 4096 }, { x: 7000, z: 4096 }] },
     ]);
     const out = await run(layoutDistanceNode, { ctx: c, inputs: { shapes: line }, params: { grow: 300 } });
     const field = out.out as Field;
@@ -395,7 +395,7 @@ describe('layout.distance', () => {
   it('clamps beyond the distance it was asked to measure', async () => {
     const out = await run(layoutDistanceNode, {
       ctx: c,
-      inputs: { shapes: shapeSet([{ id: 'p', kind: 'point', points: [{ x: 4096, y: 4096 }] }]) },
+      inputs: { shapes: shapeSet([{ id: 'p', kind: 'point', points: [{ x: 4096, z: 4096 }] }]) },
       params: { maxDistance: 512 },
     });
     expect(atWorld(out.out as Field, c, 0, 0)).toBeCloseTo(512, 4);
@@ -487,14 +487,14 @@ describe('layout.flatten', () => {
 
 describe('layout.river', () => {
   const c = ctx(512);
-  const river = (): LayoutShapeSet =>
+  const river = (): ShapeSet =>
     shapeSet([
       {
         id: 'river-main',
         kind: 'polyline',
         points: [
-          { x: 600, y: 4096 },
-          { x: 7600, y: 4096 },
+          { x: 600, z: 4096 },
+          { x: 7600, z: 4096 },
         ],
         smooth: false,
       },
@@ -579,14 +579,14 @@ describe('layout.river', () => {
 
 describe('layout.ridge', () => {
   const c = ctx(256);
-  const spine = (): LayoutShapeSet =>
+  const spine = (): ShapeSet =>
     shapeSet([
       {
         id: 'ridge-main',
         kind: 'polyline',
         points: [
-          { x: 1200, y: 6800 },
-          { x: 6800, y: 1200 },
+          { x: 1200, z: 6800 },
+          { x: 6800, z: 1200 },
         ],
         smooth: false,
       },
@@ -667,7 +667,7 @@ describe('layout.ridge', () => {
     // The stock ridge shape must not carry a height of its own: if it does, the
     // node's Height slider moves nothing on the layout every new project opens
     // with, which reads as a broken control.
-    const shapes = (await run(layoutShapesNode, { ctx: c })).shapes as LayoutShapeSet;
+    const shapes = (await run(layoutShapesNode, { ctx: c })).shapes as ShapeSet;
     const crest = async (height: number): Promise<number> => {
       const out = await run(layoutRidgeNode, {
         ctx: c,
@@ -690,8 +690,8 @@ describe('layout.ridge', () => {
         id: 'ridge-high',
         kind: 'polyline',
         points: [
-          { x: 1200, y: 1200 },
-          { x: 6800, y: 6800 },
+          { x: 1200, z: 1200 },
+          { x: 6800, z: 6800 },
         ],
         value: 450,
         smooth: false,
@@ -700,8 +700,8 @@ describe('layout.ridge', () => {
         id: 'ridge-trench',
         kind: 'polyline',
         points: [
-          { x: 600, y: 2200 },
-          { x: 7600, y: 2200 },
+          { x: 600, z: 2200 },
+          { x: 7600, z: 2200 },
         ],
         value: -300,
         smooth: false,
@@ -726,12 +726,12 @@ describe('layout.ridge', () => {
     // off, or the rim opens a gap straight into the middle.
     const c2 = ctx(256);
     const corners = 14;
-    const ring: LayoutShape = {
+    const ring: Shape = {
       id: 'rim',
       kind: 'polygon',
       points: Array.from({ length: corners }, (_, k) => {
         const a = (k / corners) * Math.PI * 2;
-        return { x: 4096 + 2200 * Math.cos(a), y: 4096 + 2200 * Math.sin(a) };
+        return { x: 4096 + 2200 * Math.cos(a), z: 4096 + 2200 * Math.sin(a) };
       }),
       closed: true,
     };
@@ -762,11 +762,11 @@ describe('layout.ridge', () => {
 describe('layout.radial', () => {
   const c = ctx(128);
 
-  async function positions(params: Record<string, unknown>): Promise<{ x: number; y: number }[]> {
+  async function positions(params: Record<string, unknown>): Promise<{ x: number; z: number }[]> {
     const out = await run(layoutRadialNode, { ctx: c, params });
-    return (out.shapes as LayoutShapeSet).shapes.map((s) => ({
+    return (out.shapes as ShapeSet).shapes.map((s) => ({
       x: s.points.reduce((t, p) => t + p.x, 0) / s.points.length,
-      y: s.points.reduce((t, p) => t + p.y, 0) / s.points.length,
+      z: s.points.reduce((t, p) => t + p.z, 0) / s.points.length,
     }));
   }
 
@@ -774,8 +774,8 @@ describe('layout.radial', () => {
     const pts = await positions({ count: 4, symmetry: 'rotate180', radius: 2400, form: 'pads' });
     expect(pts).toHaveLength(4);
     for (const p of pts) {
-      const partner = pts.find((q) => Math.hypot(q.x - (8192 - p.x), q.y - (8192 - p.y)) < 1e-6);
-      expect(partner, `no partner for ${p.x},${p.y}`).toBeDefined();
+      const partner = pts.find((q) => Math.hypot(q.x - (8192 - p.x), q.z - (8192 - p.z)) < 1e-6);
+      expect(partner, `no partner for ${p.x},${p.z}`).toBeDefined();
     }
   });
 
@@ -789,14 +789,14 @@ describe('layout.radial', () => {
   it('keeps a mirrored pair distinct instead of collapsing it onto the axis', async () => {
     const pts = await positions({ count: 2, symmetry: 'mirrorX', radius: 2400, form: 'points' });
     expect(pts).toHaveLength(2);
-    expect(pts[0].y).toBeCloseTo(pts[1].y, 6);
+    expect(pts[0].z).toBeCloseTo(pts[1].z, 6);
     expect(pts[0].x + pts[1].x).toBeCloseTo(8192, 6);
     expect(Math.abs(pts[0].x - pts[1].x)).toBeGreaterThan(1000);
   });
 
   it('spaces evenly around the circle when no symmetry is asked for', async () => {
     const pts = await positions({ count: 4, symmetry: 'none', radius: 2000, form: 'points', startAngle: 0 });
-    const angles = pts.map((p) => Math.round((Math.atan2(p.y - 4096, p.x - 4096) * 180) / Math.PI));
+    const angles = pts.map((p) => Math.round((Math.atan2(p.z - 4096, p.x - 4096) * 180) / Math.PI));
     expect(angles.sort((a, b) => a - b)).toEqual([-90, 0, 90, 180]);
   });
 
@@ -805,7 +805,7 @@ describe('layout.radial', () => {
       ctx: c,
       params: { count: 2, symmetry: 'rotate180', form: 'pads', size: 500, setHeight: true, value: 80 },
     });
-    const pad = (out.shapes as LayoutShapeSet).shapes[0];
+    const pad = (out.shapes as ShapeSet).shapes[0];
     const width = Math.max(...pad.points.map((p) => p.x)) - Math.min(...pad.points.map((p) => p.x));
     // 500 rounds up to 512, which is 32 whole 16-elmo build squares.
     expect(width).toBe(512);
@@ -818,12 +818,12 @@ describe('layout.radial', () => {
       ctx: c,
       params: { count: 4, symmetry: 'rotate90', form: 'spokes', radius: 3000, innerRadius: 800 },
     });
-    const shapes = (out.shapes as LayoutShapeSet).shapes;
+    const shapes = (out.shapes as ShapeSet).shapes;
     expect(shapes).toHaveLength(4);
     for (const s of shapes) {
       expect(s.kind).toBe('polyline');
-      expect(Math.hypot(s.points[0].x - 4096, s.points[0].y - 4096)).toBeCloseTo(800, 6);
-      expect(Math.hypot(s.points[1].x - 4096, s.points[1].y - 4096)).toBeCloseTo(3000, 6);
+      expect(Math.hypot(s.points[0].x - 4096, s.points[0].z - 4096)).toBeCloseTo(800, 6);
+      expect(Math.hypot(s.points[1].x - 4096, s.points[1].z - 4096)).toBeCloseTo(3000, 6);
     }
   });
 
@@ -832,10 +832,10 @@ describe('layout.radial', () => {
       ctx: c,
       params: { count: 6, symmetry: 'rotate180', form: 'ring', radius: 2500 },
     });
-    const ring = (out.shapes as LayoutShapeSet).shapes[0];
+    const ring = (out.shapes as ShapeSet).shapes[0];
     expect(ring.kind).toBe('polygon');
     expect(ring.points).toHaveLength(6);
-    const angles = ring.points.map((p) => Math.atan2(p.y - 4096, p.x - 4096));
+    const angles = ring.points.map((p) => Math.atan2(p.z - 4096, p.x - 4096));
     for (let i = 1; i < angles.length; i++) expect(angles[i]).toBeGreaterThan(angles[i - 1]);
   });
 
@@ -845,12 +845,12 @@ describe('layout.radial', () => {
     // it overrides the Ridge node's own Height with nothing at all.
     for (const form of ['pads', 'points', 'spokes', 'ring']) {
       const out = await run(layoutRadialNode, { ctx: c, params: { form } });
-      for (const s of (out.shapes as LayoutShapeSet).shapes) {
+      for (const s of (out.shapes as ShapeSet).shapes) {
         expect(s.value, `${form} carries a height`).toBeUndefined();
       }
     }
     const asked = await run(layoutRadialNode, { ctx: c, params: { form: 'pads', setHeight: true, value: 240 } });
-    expect((asked.shapes as LayoutShapeSet).shapes[0].value).toBe(240);
+    expect((asked.shapes as ShapeSet).shapes[0].value).toBe(240);
   });
 
   it('lays pads that level to the ground instead of dropping to the water line', async () => {
@@ -920,7 +920,7 @@ describe('layout.radial', () => {
       ctx: c,
       params: { symmetry: 'mirrorZ', startAngle: 30, count: 4, form: 'points' },
     });
-    expect((ok.shapes as LayoutShapeSet).shapes).toHaveLength(4);
+    expect((ok.shapes as ShapeSet).shapes).toHaveLength(4);
   });
 
   it('says what to do when a ring has too few corners to be an area', async () => {
@@ -985,15 +985,15 @@ describe('degenerate layouts', () => {
 describe('resolution independence', () => {
   const coarse = ctx(128);
   const fine = ctx(512);
-  const layout = (): LayoutShapeSet =>
+  const layout = (): ShapeSet =>
     shapeSet([
       square('pad', 4104, 4104, 2048, { value: 220, falloff: 384 }),
       {
         id: 'ridge-main',
         kind: 'polyline',
         points: [
-          { x: 1200, y: 6800 },
-          { x: 6800, y: 1200 },
+          { x: 1200, z: 6800 },
+          { x: 6800, z: 1200 },
         ],
         smooth: false,
       },
@@ -1050,8 +1050,8 @@ describe('resolution independence', () => {
         id: 'river-main',
         kind: 'polyline',
         points: [
-          { x: 600, y: 4096 },
-          { x: 7600, y: 4096 },
+          { x: 600, z: 4096 },
+          { x: 7600, z: 4096 },
         ],
         smooth: false,
       },

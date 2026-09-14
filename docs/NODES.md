@@ -45,6 +45,7 @@ shape control changes the *character* while every other control keeps its meanin
 | Roughness | number | 0.05 – 0.95 | 0.5 | *Advanced.* How much each detail level contributes relative to the one before. Below 0.5 is smooth, above 0.6 is jagged. |
 | Detail spacing | number | 1.2 – 4 | 2.02 | *Advanced.* How much smaller each level is than the last. Exactly 2 lines every level up on the same grid and shows as faint straight creases, which is why the default sits just off it. |
 | Noise basis | choice | Perlin / Simplex / Value / Cellular | Perlin | *Advanced.* The underlying random function. Changes texture more than shape; Cellular gives cracked, cell-like ground. |
+| Cell shape | choice | Mounds / Cracks / Basins / Flat cells | Mounds | *Advanced.* Only shown for Cellular. What the cells measure, which changes the shape far more than the basis itself does. Mounds are rounded hummocks; Cracks is the lava-field look, a network of fissures along the cell walls; Basins are broad bowls with raised rims; Flat cells gives one height per cell, which terraces into flat-topped platforms. |
 | Warp strength | elmos | 0 – 8192 (slider to 2048) | 0 | *Advanced.* Distorts the noise with more noise. A little is the cheapest way to stop terrain looking procedural. |
 | Warp size | elmos | 64 – 65536, log slider | 4096 | *Advanced.* How broad the distortion is. Hidden when warp strength is 0. |
 | Warp passes | int | 1 – 3 | 1 | *Advanced.* Warping the warp. Two give the swirling eroded look; three rarely help. |

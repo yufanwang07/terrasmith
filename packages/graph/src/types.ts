@@ -31,16 +31,16 @@ export interface CurvePoint {
 }
 
 /** A closed or open polyline in world (elmo) coordinates. */
-export interface Shape {
-  id: string;
-  kind: 'polyline' | 'polygon' | 'point';
-  points: { x: number; y: number }[];
-  /** Per-shape scalar the consuming node interprets — height, width, weight. */
-  value?: number;
-  /** Falloff distance in elmos. */
-  falloff?: number;
-  closed?: boolean;
-}
+/*
+ * A layout's shapes are core's shapes, re-exported rather than redeclared.
+ *
+ * There were two: this one named the ground plane `x`/`y` while core named it
+ * `x`/`z`, and carried neither `width` nor `smooth`. Nothing was broken, but a
+ * `y` in a heightfield tool reads as elevation and is not, which is a bug
+ * waiting for whoever writes the next consumer.
+ */
+import type { Shape } from '@terrasmith/core';
+export type { Shape, ShapeKind } from '@terrasmith/core';
 
 /** The layout layer's payload. */
 export interface ShapeSet {

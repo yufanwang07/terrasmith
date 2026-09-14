@@ -65,31 +65,14 @@ import {
 
 // --- The shapes that travel on a port --------------------------------------
 
-/**
- * A shape as it travels on a `shapes` port.
- *
- * The graph's `Shape` names the ground plane `x`/`y` while core names it
- * `x`/`z`. **`y` is the world Z axis here** — the second horizontal axis, not
- * elevation. Nothing in a layout is an elevation except a shape's `value`.
- * {@link toWorldShapes} is the single place the two spellings meet, so no node
- * body ever has to think about it.
- *
- * The two extra fields are ones core's shape carries and the port type does
- * not: `width` (stroke width for a line, dilation for a polygon) and `smooth`
- * (treat the points as spline control points rather than corners). Both are
- * optional, so a plain `ShapeSet` from anywhere else still works.
+/*
+ * A shape on a `shapes` port is core's shape, coordinates and all. The graph
+ * used to declare its own with the ground plane spelled `x`/`y`, which meant
+ * every layout node crossed a rename on the way into core and back — and a `y`
+ * in a heightfield tool invites the reading it does not have. There is one
+ * spelling now: `x` and `z` are the ground plane, and the only elevation a
+ * layout carries is a shape's `value`.
  */
-export interface LayoutShape extends Shape {
-  /** Stroke width in elmos for lines and points; outward dilation for polygons. */
-  width?: number;
-  /** Treat the points as spline control points rather than as corners. */
-  smooth?: boolean;
-}
-
-/** The payload of a `shapes` port, as the layout nodes produce it. */
-export interface LayoutShapeSet extends ShapeSet {
-  shapes: LayoutShape[];
-}
 
 /** The standard layout input port. */
 export function shapesIn(id = 'shapes', label = 'Shapes', description?: string): PortDef {
@@ -102,18 +85,18 @@ export function shapesOut(id = 'shapes', label = 'Shapes'): PortDef {
 }
 
 /** Read a layout input, throwing a message that names the port when it is absent. */
-export function readShapes(value: PortValue, portLabel = 'Shapes'): LayoutShape[] {
+export function readShapes(value: PortValue, portLabel = 'Shapes'): Shape[] {
   if (value && typeof value === 'object' && 'shapes' in value) {
-    const set = value as LayoutShapeSet;
+    const set = value as ShapeSet;
     return Array.isArray(set.shapes) ? set.shapes : [];
   }
   throw new Error(`the "${portLabel}" input needs a layout connected`);
 }
 
 /** Read an optional layout input, treating an empty connection as no shapes. */
-function optionalShapes(value: PortValue): LayoutShape[] {
+function optionalShapes(value: PortValue): Shape[] {
   if (value && typeof value === 'object' && 'shapes' in value) {
-    const set = value as LayoutShapeSet;
+    const set = value as ShapeSet;
     return Array.isArray(set.shapes) ? set.shapes : [];
   }
   return [];
@@ -132,7 +115,7 @@ const SHAPE_KINDS: readonly Shape['kind'][] = ['point', 'polyline', 'polygon'];
  * silently loses the ridge an author drew is far worse than one that refuses to
  * evaluate and says which shape is wrong.
  */
-export function parseShapes(raw: unknown): LayoutShape[] {
+export function parseShapes(raw: unknown): Shape[] {
   let data: unknown = raw;
   if (typeof data === 'string') {
     const text = data.trim();
@@ -151,7 +134,7 @@ export function parseShapes(raw: unknown): LayoutShape[] {
 
   return data.map((entry, i) => {
     if (typeof entry !== 'object' || entry === null) throw new Error(`shape ${i} is not an object`);
-    const s = entry as Partial<LayoutShape>;
+    const s = entry as Partial<Shape>;
     const kind = s.kind ?? 'polyline';
     if (!SHAPE_KINDS.includes(kind)) {
       throw new Error(`shape ${i} has kind ${JSON.stringify(kind)}; expected point, polyline or polygon`);
@@ -165,10 +148,14 @@ export function parseShapes(raw: unknown): LayoutShape[] {
       // quietly draws a different shape from the one that was asked for instead
       // of failing. It does not even survive a save — `JSON.stringify` writes
       // NaN and Infinity as `null`.
-      if (typeof p !== 'object' || p === null || !Number.isFinite(p.x) || !Number.isFinite(p.y)) {
+      // `y` is accepted as a spelling of `z`: layouts written against the
+      // older port type used it for the same axis, and refusing them would
+      // break a saved project to gain nothing.
+      const z = (p as { z?: number; y?: number }).z ?? (p as { y?: number }).y;
+      if (typeof p !== 'object' || p === null || !Number.isFinite(p.x) || !Number.isFinite(z)) {
         throw new Error(`shape ${i} point ${k} is not a pair of numbers in elmos`);
       }
-      return { x: p.x, y: p.y };
+      return { x: p.x, z: z as number };
     });
     return {
       id: typeof s.id === 'string' && s.id !== '' ? s.id : `shape-${i}`,
@@ -205,12 +192,12 @@ function finiteOrUndefined(v: unknown, shapeIndex: number, field: string): numbe
 }
 
 /** Serialise a layout to the JSON text the `layout.shapes` parameter holds. */
-export function serializeShapes(shapes: readonly LayoutShape[]): string {
+export function serializeShapes(shapes: readonly Shape[]): string {
   return JSON.stringify(shapes);
 }
 
 /** Whether a shape's points form a ring. Mirrors core's rule, on the port type. */
-function isClosed(shape: LayoutShape): boolean {
+function isClosed(shape: Shape): boolean {
   if (shape.kind === 'point') return false;
   return shape.closed ?? shape.kind === 'polygon';
 }
@@ -236,7 +223,7 @@ interface ShapeDefaults {
  * line-width control happened to be 64.
  */
 export function toWorldShapes(
-  shapes: readonly LayoutShape[],
+  shapes: readonly Shape[],
   defaults: ShapeDefaults = {},
 ): WorldShape[] {
   return shapes.map((s) => {
@@ -244,8 +231,7 @@ export function toWorldShapes(
     return {
       id: s.id,
       kind: s.kind,
-      // The one place `y` becomes `z`.
-      points: s.points.map((p) => ({ x: p.x, z: p.y })),
+      points: s.points,
       closed,
       value: defaults.valueOverride ?? s.value,
       width: closed ? s.width : s.width ?? defaults.strokeWidth,
@@ -256,11 +242,11 @@ export function toWorldShapes(
 }
 
 /** Convert a core shape back to the port representation. */
-export function fromWorldShape(shape: WorldShape): LayoutShape {
+export function fromWorldShape(shape: WorldShape): Shape {
   return {
     id: shape.id,
     kind: shape.kind,
-    points: shape.points.map((p) => ({ x: p.x, y: p.z })),
+    points: shape.points,
     closed: shape.closed,
     value: shape.value,
     width: shape.width,
@@ -277,7 +263,7 @@ export function fromWorldShape(shape: WorldShape): LayoutShape {
  * node then takes the part that is its own, which is why this exists rather
  * than forcing a separate layout node per feature.
  */
-export function selectShapes(shapes: readonly LayoutShape[], query: string): LayoutShape[] {
+export function selectShapes(shapes: readonly Shape[], query: string): Shape[] {
   const q = query.trim().toLowerCase();
   if (q === '') return [...shapes];
   return shapes.filter((s) => s.id.toLowerCase().includes(q));
@@ -299,7 +285,7 @@ function onlyParam(): ParamDef {
 }
 
 /** Shapes selected by a node's `only` parameter, from a required input. */
-function inputShapes(value: PortValue, only: string): LayoutShape[] {
+function inputShapes(value: PortValue, only: string): Shape[] {
   return selectShapes(readShapes(value), only);
 }
 
@@ -339,15 +325,15 @@ const DEFAULT_DESIGN_SIZE = 8192;
  * point rather than a decoration — drop the node in, wire it to Flatten, and
  * the result is already balanced.
  */
-function defaultLayout(): LayoutShape[] {
-  const pad = (id: string, x: number, y: number): LayoutShape => ({
+function defaultLayout(): Shape[] {
+  const pad = (id: string, x: number, z: number): Shape => ({
     id,
     kind: 'polygon',
     points: [
-      { x: x - 384, y: y - 384 },
-      { x: x + 384, y: y - 384 },
-      { x: x + 384, y: y + 384 },
-      { x: x - 384, y: y + 384 },
+      { x: x - 384, z: z - 384 },
+      { x: x + 384, z: z - 384 },
+      { x: x + 384, z: z + 384 },
+      { x: x - 384, z: z + 384 },
     ],
     closed: true,
     // No height of its own on purpose: a pad with no height levels to the
@@ -364,9 +350,9 @@ function defaultLayout(): LayoutShape[] {
       id: 'ridge-centre',
       kind: 'polyline',
       points: [
-        { x: 6800, y: 1392 },
-        { x: 4096, y: 4096 },
-        { x: 1392, y: 6800 },
+        { x: 6800, z: 1392 },
+        { x: 4096, z: 4096 },
+        { x: 1392, z: 6800 },
       ],
       // No height and no width of its own, for the same reason: a stock shape
       // that carries them makes the Ridge node's own Height and Width controls
@@ -381,10 +367,10 @@ function defaultLayout(): LayoutShape[] {
       id: 'river-main',
       kind: 'polyline',
       points: [
-        { x: 200, y: 4600 },
-        { x: 2400, y: 4900 },
-        { x: 5792, y: 3292 },
-        { x: 7992, y: 3592 },
+        { x: 200, z: 4600 },
+        { x: 2400, z: 4900 },
+        { x: 5792, z: 3292 },
+        { x: 7992, z: 3592 },
       ],
       smooth: true,
     },
@@ -464,13 +450,13 @@ export const layoutShapesNode: NodeDefinition<ShapesParams> = {
         const s = (sx + sz) / 2;
         shapes = shapes.map((shape) => ({
           ...shape,
-          points: shape.points.map((p) => ({ x: p.x * sx, y: p.y * sz })),
+          points: shape.points.map((p) => ({ x: p.x * sx, z: p.z * sz })),
           width: shape.width === undefined ? undefined : shape.width * s,
           falloff: shape.falloff === undefined ? undefined : shape.falloff * s,
         }));
       }
     }
-    return { shapes: { shapes: [...optionalShapes(inputs.add), ...shapes] } satisfies LayoutShapeSet };
+    return { shapes: { shapes: [...optionalShapes(inputs.add), ...shapes] } satisfies ShapeSet };
   },
 };
 
@@ -865,7 +851,7 @@ export const layoutRiverNode: NodeDefinition<RiverParams> = {
       // A ring cannot be monotonically downhill all the way round, and a single
       // point has no length to run along.
       if (isClosed(shape) || shape.points.length < 2) continue;
-      const line: Vec2World[] = shape.points.map((p) => ({ x: p.x, z: p.y }));
+      const line: Vec2World[] = shape.points;
       // A mouth height on its own only pins the very last station, leaving the
       // bed to follow the ground and then fall off a cliff into the sea in the
       // final cell. Pinning the source as well turns it into an even grade over
@@ -1048,7 +1034,7 @@ export const layoutRidgeNode: NodeDefinition<RidgeParams> = {
     for (const shape of shapes) {
       if (shape.points.length < 2) continue;
       const closed = isClosed(shape);
-      const points: Vec2World[] = shape.points.map((p) => ({ x: p.x, z: p.y }));
+      const points: Vec2World[] = shape.points;
       // A ring is carved as a path that comes back to where it started; without
       // the repeated point the spine would stop one segment short and leave a
       // notch in the rim.
@@ -1374,7 +1360,7 @@ export const layoutRadialNode: NodeDefinition<RadialParams> = {
     // nothing at all.
     const value = params.setHeight ? params.value : undefined;
 
-    const shapes: LayoutShape[] = [];
+    const shapes: Shape[] = [];
     if (params.form === 'ring') {
       // Two positions bound no area, and one bounds nothing at all; core would
       // take either as a degenerate outline and stroke it as a line.
@@ -1394,7 +1380,7 @@ export const layoutRadialNode: NodeDefinition<RadialParams> = {
       shapes.push({
         id: 'radial-ring',
         kind: 'polygon',
-        points: sorted.map((p) => ({ x: p.x, y: p.z })),
+        points: sorted.map((p) => ({ x: p.x, z: p.z })),
         closed: true,
         value,
         falloff: params.falloff,
@@ -1418,7 +1404,7 @@ export const layoutRadialNode: NodeDefinition<RadialParams> = {
           shapes.push({
             id,
             kind: 'point',
-            points: [{ x: p.x, y: p.z }],
+            points: [{ x: p.x, z: p.z }],
             value,
             width: params.size,
             falloff: params.falloff,
@@ -1432,8 +1418,8 @@ export const layoutRadialNode: NodeDefinition<RadialParams> = {
           id,
           kind: 'polyline',
           points: [
-            { x: cx + (dx / len) * params.innerRadius, y: cz + (dz / len) * params.innerRadius },
-            { x: p.x, y: p.z },
+            { x: cx + (dx / len) * params.innerRadius, z: cz + (dz / len) * params.innerRadius },
+            { x: p.x, z: p.z },
           ],
           value,
           falloff: params.falloff,
@@ -1441,7 +1427,7 @@ export const layoutRadialNode: NodeDefinition<RadialParams> = {
       });
     }
 
-    return { shapes: { shapes: [...optionalShapes(inputs.add), ...shapes] } satisfies LayoutShapeSet };
+    return { shapes: { shapes: [...optionalShapes(inputs.add), ...shapes] } satisfies ShapeSet };
   },
 };
 

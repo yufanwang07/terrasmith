@@ -19,6 +19,7 @@ import {
   type Field,
   type FractalType,
   type NoiseType,
+  type WorleyMetric,
 } from '@terrasmith/core';
 import type { NodeDefinition, ParamDef } from '../types.js';
 import { bool, choice, elmos, int, num, seedParam, terrainOut } from './helpers.js';
@@ -37,6 +38,7 @@ function frequencyFromFeatureSize(featureSizeElmos: number, worldWidth: number):
 
 interface NoiseParams {
   type: NoiseType;
+  worleyMetric: WorleyMetric;
   fractal: FractalType;
   featureSize: number;
   octaves: number;
@@ -150,6 +152,32 @@ export const noiseNode: NodeDefinition<NoiseParams> = {
       ],
       { tier: 'advanced', description: 'The underlying random function. Changes texture more than shape.' },
     ),
+    choice(
+      'worleyMetric',
+      'Cell shape',
+      'f1',
+      [
+        { value: 'f1', label: 'Mounds', description: 'Distance to the nearest cell point: rounded hummocks.' },
+        {
+          value: 'f2-f1',
+          label: 'Cracks',
+          description: 'The gap between the two nearest points, so cell walls read as a network of fissures.',
+        },
+        { value: 'f2', label: 'Basins', description: 'Distance to the second nearest: broad bowls with raised rims.' },
+        {
+          value: 'cell',
+          label: 'Flat cells',
+          description: 'One constant value per cell, which terraces into flat-topped platforms.',
+        },
+      ],
+      {
+        tier: 'advanced',
+        visibleWhen: (p) => p.type === 'worley',
+        description:
+          'What the cellular basis measures. This is the difference between lava-field cracks and ' +
+          'rounded hummocks, and it changes the shape far more than the other basis settings do.',
+      },
+    ),
     elmos('warpAmount', 'Warp strength', 0, {
       min: 0,
       max: 8192,
@@ -198,6 +226,7 @@ export const noiseNode: NodeDefinition<NoiseParams> = {
       lacunarity: params.lacunarity,
       gain: params.gain,
       sharpness: params.sharpness,
+      worleyMetric: params.worleyMetric,
       seed: noiseSeed,
     });
 

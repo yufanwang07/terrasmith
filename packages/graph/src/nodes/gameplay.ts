@@ -1199,7 +1199,7 @@ export const metalSpotsNode: NodeDefinition<MetalSpotsParams> = {
     const shapes: GraphShape[] = spots.map((s, i) => ({
       id: `metal-${i}`,
       kind: 'point',
-      points: [{ x: s.x, y: s.z }],
+      points: [{ x: s.x, z: s.z }],
       value: s.income,
       falloff: s.widthElmos / 2,
     }));

@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json.schemastore.org/tsconfig",
+  // A solution file: it holds no sources of its own, only the list of projects
+  // and the order they depend on each other in. Without it `tsc --build` at the
+  // repo root — which is what `npm run typecheck` runs — has no project to
+  // build and fails with TS5083 before it type-checks anything.
+  "files": [],
+  "references": [
+    { "path": "packages/core" },
+    { "path": "packages/format" },
+    { "path": "packages/graph" },
+    { "path": "packages/build" },
+    { "path": "packages/cli" },
+    { "path": "apps/studio" }
+  ]
+}
