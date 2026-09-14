@@ -25,6 +25,17 @@ jobs:
 
       - run: npm ci
 
+      # `packages/build/test/archive.test.ts` deliberately checks the archive
+      # with readers that are not this code: a real Lua interpreter for
+      # `mapinfo.lua`, and two independent 7-Zip implementations for the `.sd7`.
+      # It fails rather than skips when they are missing, because a silently
+      # skipped cross-check is worse than no cross-check, so CI installs them.
+      - name: Install the external archive readers
+        run: |
+          python3 -m pip install --quiet --break-system-packages lupa py7zr
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libarchive-tools
+
       # Build the packages first: the tests import them through the workspace
       # links, and a type error is a faster, clearer failure than whatever it
       # turns into at runtime.
