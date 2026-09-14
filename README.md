@@ -19,7 +19,11 @@ the archive client-side, and needs no account.
 so the passes through the range are the green threads across it. The graph that made it is underneath,
 each node showing what comes out of it.*
 
-![The same map's node graph on its own](docs/images/studio-graph.jpg)
+![The same map with the fairness overlay on, showing where it breaks a mirror symmetry](docs/images/studio-symmetry.jpg)
+
+*The same map asked a different question: "does this match itself under a mirror?" Red is where it does
+not. Every shipped template is exactly symmetric under the symmetry it declares — this is what it looks
+like when you declare the wrong one.*
 
 ## Why this exists
 

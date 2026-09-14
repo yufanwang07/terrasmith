@@ -2,8 +2,8 @@
  * Volcanic shelf — the one where getting anywhere is the problem.
  *
  * Every other template treats steep ground as something to put round the edges.
- * This one makes it the subject: a tenth of the map is past 54 degrees,
- * impassable to everything except spiders and air, and another fifth is bots
+ * This one makes it the subject: a ninth of the map is past 54 degrees,
+ * impassable to everything except spiders and air, and another seventh is bots
  * only, so the question it asks is not "where do I attack" but "how do I get
  * there at all".
  *
@@ -14,7 +14,8 @@
  * terraced map with nothing crossing the risers is a set of concentric shelves
  * that no unit can move between — measured on the first version of this map,
  * bots could reach 29% of it and vehicles 4%. The `ways` pass cuts routes
- * across the risers, and without it the rest of the design is decoration.
+ * across the risers, and the symmetry pass at the end now unions those routes
+ * into all four sectors; without one or the other the rest is decoration.
  *
  * The second is that there is no terraform command in BAR, so if the broken
  * ground leaves nowhere flat then nobody can build. That is what the slope mask
@@ -34,7 +35,7 @@ export const VOLCANIC_SHELF: Template = {
     'flat ground, but you have to look for it.',
   sizeX: 16,
   sizeZ: 16,
-  symmetry: 'mirrorZ',
+  symmetry: 'rotate90',
   palette: 'volcanic',
   minPlayers: 4,
   maxPlayers: 12,
@@ -46,10 +47,19 @@ export const VOLCANIC_SHELF: Template = {
     // hundred elmos above the trough beside it, which is what puts a wall
     // across most short journeys. Four octaves — the ridged fractal weights its
     // own detail onto the crests, and more octaves only add speckle.
+    //
+    // 1 050 elmos of amplitude, up from the 760 this carried before the quarter
+    // turn went in. The symmetry node at the end keeps the lowest of the four
+    // sectors at every point (see there for why), and the lower envelope of
+    // four rotations of a ridged field is far smoother than the field itself:
+    // at 760 the map came out 890 elmos tall with 4% of it past 54 degrees,
+    // which is a bowl and not a shelf system. 1 050 buys that back — 1 178
+    // elmos of relief and 11.6% impassable, where the map started — and costs
+    // the declared height range below, which has to grow to hold it.
     g.node('rock', 'generator.noise', {
       fractal: 'ridged',
       featureSize: 2400,
-      amplitude: 760,
+      amplitude: 1050,
       octaves: 4,
       gain: 0.45,
       sharpness: 1.2,
@@ -59,7 +69,9 @@ export const VOLCANIC_SHELF: Template = {
 
     // The caldera. The sharp falloff keeps the floor broad and low across most
     // of the map and brings the shelf back up quickly around the outside, so
-    // the rim is a place rather than a gradient.
+    // the rim is a place rather than a gradient. It is also the one landform
+    // here that is already symmetric under a quarter turn, being radial, so it
+    // comes through the symmetry pass untouched.
     g.node('crater', 'generator.gradient', {
       direction: 'radial',
       low: 200,
@@ -67,46 +79,6 @@ export const VOLCANIC_SHELF: Template = {
       falloff: 'sharp',
     }, 40, 340);
 
-    // The symmetry goes on the rock field, not on the finished map, and that
-    // placement is most of what makes this map work symmetric at all.
-    //
-    // Copying half the finished map onto the other half does produce a
-    // symmetric heightmap and leaves 7% of it reachable in one piece against
-    // the 18% it owes a player, because the routes across the risers were cut
-    // on the asymmetric map and half of them are in the half being thrown away.
-    // Averaging the two halves instead keeps the routes and destroys what the
-    // map is: averaging a 62-degree talus face with whatever was opposite it
-    // gives a moderate slope, and the tenth of the map that is meant to be
-    // impassable to everything went to nothing at all.
-    //
-    // The half turn in that paragraph is whatever this map declares; see the
-    // note below on why it is a mirror.
-    //
-    // Symmetrising the rock field fixes both. The crater gradient is radial and
-    // is already symmetric under any turn; everything downstream of these two
-    // is a terrace, a smooth or a threshold, which maps symmetric input to
-    // symmetric output. So the risers land in the same places on both sides,
-    // the routes are cut across both at once, and the faces stay as steep as
-    // they were drawn: 8% of the map impassable against the 10% the asymmetric
-    // original had, a base site 496 elmos across and a quarter of the map
-    // reachable in one piece — which is what it had before.
-    //
-    // A mirror and not the quarter turn this map used to declare, and not a
-    // half turn either. This is the one map here where the kind of symmetry
-    // matters more than the fact of it, and the reason is what its risers are.
-    // A route across them runs radially, out from the crater; under a mirror it
-    // maps onto its own continuation and the crossing survives, and under a
-    // turn it maps to the far side of the map and the crossing breaks in the
-    // middle. Measured on this terrain: a mirror leaves bots 78% of the map in
-    // one piece and vehicles 52%, a half turn 39% and 26%, a quarter turn 26%
-    // and 10%. The asymmetric original managed 74% and 25%, so the mirror is
-    // not a compromise here — it is better than what it replaced.
-    //
-    // The cost is handedness: a ramp that turns left on one side turns right on
-    // the other, which is a real asymmetry for a unit that has to turn. On a
-    // map whose routes are this constrained that is the cheaper of the two
-    // prices.
-    g.node('fairRock', 'gameplay.symmetry', { kind: 'mirrorZ' }, 280, 60);
     g.node('mix', 'combiner.combine', { mode: 'add', factor: 1 }, 280, 220);
 
     // The shelves themselves. Cutting the height range into benches is what
@@ -115,15 +87,28 @@ export const VOLCANIC_SHELF: Template = {
     // them run from bot-climbable on the gentlest ground to flatly impassable
     // on the steepest, and that spread is what makes route-finding the game.
     //
-    // Six steps rather than seven. Each extra step is another closed ring of
-    // wall to get across, and the count trades directly against how much of the
-    // map a vehicle can reach: seven leaves the largest connected vehicle area
-    // at about a tenth of the map, six at about a quarter.
+    // Four steps, down from six. The count has always traded against how much
+    // of the map a vehicle can reach in one piece, and the quarter turn made
+    // that trade dearer: six benches come out as four concentric rings with no
+    // vehicle crossing between them, the largest holding 20% of the map but
+    // only 34% of everything drivable — under the 40% the tests ask for, which
+    // is the line between "a map with hard ground on it" and "a set of islands
+    // that happen to be dry". Four benches leave two shelf systems that do
+    // join: 28% of the map in the largest, 49% of all the drivable ground.
+    //
+    // The floor of the terraced range is -380 rather than -560, and that number
+    // decides where the flattest ground is rather than how much of it there is.
+    // At -560 the best lab pad sat in the dead-flat map corners, which are a
+    // shelf of their own outside the rim and not in the main vehicle region —
+    // and under a quarter turn the four best pads are one orbit of the same
+    // site, so "at least one of the four is reachable" stops being four chances
+    // and becomes a single yes or no. At -380 the best pad is a 560-elmo shelf
+    // at (5800, 2264), inside the region vehicles actually hold.
     g.node('shelf', 'filter.terrace', {
-      steps: 6,
+      steps: 4,
       sharpness: 0.85,
       useRange: true,
-      low: -560,
+      low: -380,
       high: 940,
     }, 480, 220);
 
@@ -138,76 +123,102 @@ export const VOLCANIC_SHELF: Template = {
     // faces, which on this map is most of what you are looking at.
     g.node('slump', 'natural.thermal', { angle: 62, amount: 1.3 }, 680, 220);
 
-    // Ash and rubble. Sixteen elmos across 800 works out at about four elmos of
-    // rise over a factory's footprint, well inside the ten it tolerates, so it
-    // roughens the shelves without costing anything that matters.
-    g.node('grit', 'generator.noise', {
-      fractal: 'billow',
-      featureSize: 800,
-      amplitude: 16,
-      octaves: 3,
-      warpAmount: 260,
-      warpSize: 1400,
-      seed: 17,
-    }, 680, 440);
-    g.node('rough', 'combiner.combine', { mode: 'add', factor: 1 }, 880, 300);
-
     // The ways up. A mid-height band of the rock field picks out ribbons that
     // run across the ridges rather than along them, and because the crater
     // gradient runs radially they cross the terrace risers too. Smoothing over
     // 2 600 elmos there turns the risers under each ribbon into slopes a unit
-    // can climb, which is what joins the shelves into one map: bots go from
-    // reaching 29% of it to 74%, vehicles from 4% to 25%.
+    // can climb.
+    //
+    // It carries less of the map than it did. The symmetry node keeps the
+    // lowest sector at every point, which is itself a union of every route cut
+    // anywhere, so this is no longer the only thing joining the shelves:
+    // turning it off now costs bots two points of reach, 72% to 70%, rather
+    // than the 45 it cost before. What it still does is build the *second*
+    // shelf system — without it the map is one vehicle region of 28% and three
+    // of 6%; with it, one of 28% and one of 23% — and that is the difference
+    // between a map with two theatres on it and a map with one.
     //
     // Keep the band narrow. Widening it smooths away the shelves themselves and
     // the map stops being the steep one.
-    // 260 to 520, widened from 300 to 460 once the rock field was symmetric.
-    // The band picks the ribbons out of the rock, and a symmetric rock field
-    // has each ribbon in two places rather than one, so a band this narrow
-    // finds fewer of them in total: at the old width a quarter of the drivable
-    // ground was joined to the main region against the two fifths that is the
-    // difference between a map and confetti. Widened, it is 43%, and the map
-    // keeps 8% of itself impassable.
-    g.node('ways', 'selector.height', { low: 260, high: 520, falloff: 60, soften: 250 }, 880, 60);
+    g.node('ways', 'selector.height', { low: 300, high: 460, falloff: 60, soften: 250 }, 880, 60);
     g.node('climbs', 'filter.smooth', { radius: 2600, strength: 1 }, 1080, 220);
 
     // Find the shelves — everything under about 22 degrees once the falloff is
     // counted — and iron them flat. This is what turns a field of rock into a
     // map: without it there is no 400x400 pad anywhere and the commander has
-    // nowhere to put a factory. It is also the second half of the movement
-    // story, because the gentler risers fall inside this mask too and come out
-    // of it as drivable slopes rather than as walls.
+    // nowhere to put a factory. It is also the load-bearing half of the
+    // movement story: turn it off and bots go from reaching 72% of the map to
+    // 33%, because the gentler risers stop coming out of it as drivable slopes
+    // and go back to being walls.
     g.node('shelves', 'selector.slope', { low: 0, high: 16, falloff: 6, soften: 220 }, 880, 540);
     g.node('flat', 'filter.smooth', { radius: 520, strength: 1 }, 1280, 380);
 
-    // A second pass, to make it exact. The scree solver and the ash
-    // noise above are the two stages that do not preserve a symmetry, and this
-    // costs nothing by the time it runs: the map already matches to within a
-    // few elmos, so copying a quadrant moves almost nothing.
-    g.node('fair', 'gameplay.symmetry', { kind: 'mirrorZ' }, 1480, 380);
+    // Make the map fair. A map that declares a symmetry and does not have one
+    // is the complaint BAR players make most: nobody measures a 200-elmo
+    // difference between one quarter and the next, they lose to it and say the
+    // map is unfair. This one was 160 elmos RMS off its own declared quarter
+    // turn, worst point 660 elmos out — half the relief of the map.
+    //
+    // Last, so nothing after it can reintroduce a difference, with one
+    // exception: the shoreline below. `filter.seaLevel` in coverage mode finds
+    // a height quantile and subtracts it from every sample, and one constant
+    // taken off the whole field cannot make a symmetric field asymmetric. So
+    // the sea is the only thing allowed downstream — and it has to be, because
+    // with the symmetry truly last the terrain moved after the quantile had
+    // been chosen and the map flooded 27% against a declared 16%. This way the
+    // coverage is exact and the residual is still zero. Anything earlier is
+    // worse for a different reason: the two masked smoothing passes above are
+    // not equivariant under a quarter turn, and a symmetry node placed before
+    // them leaves 22 to 35 elmos RMS of deviation in the map that ships.
+    //
+    // **Keeping the lowest sector rather than copying one.** A quarter turn is
+    // the awkward member of the family here. Its fundamental domain is a
+    // triangle between the two diagonals, and the turn identifies that
+    // triangle's two edges *with each other* — so copying one sector onto the
+    // rest joins ground taken from the main diagonal to ground taken from the
+    // anti-diagonal and leaves a cliff along both. It is an X straight across
+    // the map, plain in a render, and it cut the largest vehicle region to 5.3%
+    // in four equal pieces, one per triangle. A half turn has no such problem:
+    // its domain's single edge maps to itself, which is why rolling-hills can
+    // copy a sector and this cannot.
+    //
+    // The three blends that read the whole orbit are all continuous, and each
+    // keeps something different. Averaging softens every disagreement and took
+    // the map to 0.2% impassable — the premise of the template, gone. `max`
+    // welds plateaus and so unions every sector's *walls*: it looks right and
+    // the largest vehicle region is 3.2%. `min` unions every sector's low
+    // ground, which on a map whose connectivity is a handful of low ribbons cut
+    // across risers is exactly the right union — every route that existed
+    // anywhere ends up in all four sectors. 28% largest vehicle region, and the
+    // deviation output reads zero behind it.
+    g.node('fair', 'gameplay.symmetry', { kind: 'rotate90', mode: 'min' }, 1480, 380);
 
     // The caldera floods. Enough water to be a feature and to give the crater a
     // reason to exist; little enough that the map is still decided on land.
     g.node('sea', 'filter.seaLevel', { mode: 'coverage', coverage: 0.16 }, 1680, 380);
 
-    // The terrain runs about -180..1020. Declaring 1320, as an earlier version
+    // The terrain runs about -145..1035. Declaring 1320, as an earlier version
     // did, spends a fifth of the engine's 65536 height steps on air.
     g.node('out', 'output.height', {
       autoRange: false,
-      minHeight: -240,
-      maxHeight: 1140,
+      minHeight: -210,
+      maxHeight: 1090,
     }, 1880, 380);
 
+    // A billow-noise ash layer used to sit between the scree and the ways,
+    // adding 16 elmos of rubble to the benches. It came out to keep the graph
+    // inside the dozen-odd nodes a template can still be read as documentation
+    // at, once the symmetry node went in. Measured cost of dropping it: the
+    // largest vehicle region moved from 0.2793 of the map to 0.2795, the
+    // impassable share not at all, and the best lab pad grew from 544 elmos to
+    // 560. The volcanic palette's own detail textures cover the same ground.
     return g
-      .link('rock', 'fairRock')
-      .link('fairRock', 'mix:a')
+      .link('rock', 'mix:a')
       .link('crater', 'mix:b')
       .link('mix', 'shelf')
       .link('shelf', 'slump')
-      .link('slump', 'rough:a')
-      .link('grit', 'rough:b')
-      .link('fairRock', 'ways')
-      .link('rough', 'climbs')
+      .link('rock', 'ways')
+      .link('slump', 'climbs')
       .link('ways:mask', 'climbs:mask')
       .link('climbs', 'flat')
       .link('climbs', 'shelves')
