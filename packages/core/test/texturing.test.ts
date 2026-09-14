@@ -783,7 +783,34 @@ describe('rescalePaletteHeights', () => {
     expect(band?.max).toBeCloseTo(5, 6);
     expect(band?.blendMin).toBeCloseTo(40 * below, 6);
     expect(band?.blendMax).toBeCloseTo(Math.max(4 * above, 4), 6); // floored, not 1 elmo
-    expect(band?.blend).toBeCloseTo(10 * ((below + above) / 2), 6);
+    // Rescaling resolves the shared feather into the two per-edge ones, so
+    // there is nothing left for `blend` to say.
+    expect(band?.blend).toBeUndefined();
+  });
+
+  it('splits a shared feather between the two sides of the water', () => {
+    // The bug: one `blend` describing both edges was scaled by the mean of the
+    // two sides' factors and applied to both. On a map with shallow water and
+    // tall peaks the mean is dominated by the land side, so a shore band's
+    // underwater edge feathered several times further out to sea than the edge
+    // itself moved, and wet shore sand painted its way down the lake bed.
+    const straddling: MaterialPalette = [
+      {
+        material: { id: 'shore', label: 'Shore', color: [0.5, 0.5, 0.5] },
+        rule: { height: { min: -14, max: 20, blend: 16 } },
+      },
+    ];
+    const below = 52 / 120;
+    const above = 920 / 400;
+    const band = rescalePaletteHeights(straddling, { min: -52, max: 920 })[0].rule.height;
+    expect(band?.blendMin).toBeCloseTo(16 * below, 6);
+    expect(band?.blendMax).toBeCloseTo(16 * above, 6);
+
+    // The whole point is where the band's lower skirt ends up: half a feather
+    // below the rescaled edge. With the mean it reached 17 elmos under water.
+    const foot = (band?.min ?? 0) - (band?.blendMin ?? 0) / 2;
+    expect(foot).toBeGreaterThan(-10);
+    expect(evaluateBand(-12, band)).toBeLessThan(0.02);
   });
 
   it('keeps a feather wide enough to stay a feather on a map with a puddle', () => {
@@ -791,9 +818,10 @@ describe('rescalePaletteHeights', () => {
     // 0.3 elmos, which is a hard cut: a contour line drawn round the water.
     const scaled = rescalePaletteHeights(TEMPERATE, { min: -2, max: 300 });
     for (const layer of scaled) {
-      const blend = layer.rule.height?.blend;
-      if (blend === undefined) continue;
-      expect(blend).toBeGreaterThan(3);
+      for (const blend of [layer.rule.height?.blendMin, layer.rule.height?.blendMax]) {
+        if (blend === undefined) continue;
+        expect(blend).toBeGreaterThan(3);
+      }
     }
   });
 
@@ -859,14 +887,35 @@ describe('resolution independence', () => {
     return f;
   }
 
+  /**
+   * Smooth rolling terrain over a fixed 4096-elmo square, so the same world is
+   * sampled at 32, 16, 8 and 4 elmos. Every wavelength is long enough to be
+   * resolved at the coarsest of those, which is what makes a difference between
+   * the readings a property of the code rather than of aliasing.
+   */
+  function rolling(n: number): { field: Field; cellSize: number } {
+    const world = 4096;
+    const cellSize = world / n;
+    const field = createField(n, n);
+    for (let y = 0; y < n; y++) {
+      for (let x = 0; x < n; x++) {
+        const wx = x * cellSize;
+        const wz = y * cellSize;
+        field.data[y * n + x] =
+          300 * Math.sin(wx / 700) * Math.cos(wz / 610) +
+          120 * Math.sin(wx / 330 + 1.3) * Math.sin(wz / 410) +
+          40 * Math.sin(wx / 190) * Math.cos(wz / 210);
+      }
+    }
+    return { field, cellSize };
+  }
+
   it('keys the flow mask off drainage area, not off the sample count', () => {
     // Flow accumulation counts CELLS, so refining the grid multiplies every
     // reading by four while the terrain is unchanged. Normalising those raw
     // counts against their own maximum is not scale-free: it drifts the mask
     // upward at every point and converges on 1 everywhere as the grid refines,
     // so a stream accent tuned on a 512 preview paints far wider at 8192.
-    // Multiplying by the cell footprint first turns the count into a drainage
-    // area in elmos², which is a property of the terrain and not of the grid.
     const along = [0.25, 0.5, 0.75];
     const readings = ([
       [32, 16],
@@ -882,10 +931,77 @@ describe('resolution independence', () => {
       return along.map((q) => flow.data[mid * n + Math.round(q * (n - 1))]);
     });
 
+    // A perfect V-trough converges to a single cell, so its channel has no
+    // width of its own and no reading taken there can be exactly scale-free.
+    // What has to hold is that the trunk reads as a trunk everywhere.
     for (let i = 0; i < along.length; i++) {
       const values = readings.map((r) => r[i]);
-      const spread = Math.max(...values) - Math.min(...values);
-      expect(spread, `flow at ${along[i]} of the valley: ${values.join(', ')}`).toBeLessThan(0.03);
+      expect(Math.min(...values), `flow at ${along[i]}: ${values.join(', ')}`).toBeGreaterThan(0.8);
+    }
+  });
+
+  it('puts the same fraction of the same terrain in the channel network', () => {
+    // The bug this catches is the expensive half of scale dependence. Taking
+    // the drainage area as `cells * cellSize²` reads a planar hillside as
+    // draining an area proportional to the cell's own width, so a coarse
+    // preview floats its whole hillside over the channel threshold: 28% of this
+    // terrain at 32 elmos per sample against 0.8% at 4, a 36-fold spread, and a
+    // flow accent that covers a third of the preview and none of the build.
+    const covered = [128, 256, 512, 1024].map((n) => {
+      const { field, cellSize } = rolling(n);
+      const { flow } = resolveTextureInputs(
+        { height: field },
+        { cellSize, need: new Set(['flow'] as const) },
+      );
+      let wet = 0;
+      for (const v of flow.data) if (v > 0.01) wet++;
+      return wet / flow.data.length;
+    });
+
+    const label = covered.map((v) => `${(v * 100).toFixed(2)}%`).join(', ');
+    expect(Math.min(...covered), `channel coverage at 32..4 elmos: ${label}`).toBeGreaterThan(0.005);
+    expect(Math.max(...covered) / Math.min(...covered), label).toBeLessThan(1.6);
+  });
+
+  it('widens the channel to the same world width at every cell size', () => {
+    // The dilation covers 2r + 1 samples, so the radius has to be solved for
+    // that and not for width / 2. Taking `round(width / (2 * cellSize))`
+    // rounded to 1 at 7 elmos per sample — a 21-elmo channel — and to 0 at 8,
+    // so a 13% change of analysis resolution moved the painted stream by a
+    // factor of 2.6.
+    // One fixed 2048-elmo world sampled at 16, 8, 6.99 and 4 elmos. 6.99 and 8
+    // are the pair that used to disagree: a single incised channel came out 21
+    // elmos wide at one and 8 at the other.
+    const widths = [128, 256, 293, 512].map((n) => {
+      const cellSize = 2048 / n;
+      // A plane tilted along +x with a deeply incised groove down the centre
+      // row, so the drainage network is one channel of known position and the
+      // ground either side of it stays well under the channel threshold.
+      const mid = n >> 1;
+      const field = createField(n, n);
+      for (let y = 0; y < n; y++) {
+        for (let x = 0; x < n; x++) {
+          field.data[y * n + x] = -x * cellSize * 0.5 + (y === mid ? -400 : 0);
+        }
+      }
+      const { flow } = resolveTextureInputs(
+        { height: field },
+        { cellSize, need: new Set(['flow'] as const) },
+      );
+      const x = n - 8;
+      let across = 0;
+      for (let y = 0; y < n; y++) if (flow.data[y * n + x] > 0.5) across++;
+      return { cellSize, elmos: across * cellSize };
+    });
+
+    const label = widths.map((w) => `${w.cellSize.toFixed(2)}->${w.elmos.toFixed(1)}`).join(', ');
+    for (const { cellSize, elmos } of widths) {
+      // Never wider than the 7 elmos it is authored as, and never wider than a
+      // single sample when one sample already covers more than that.
+      expect(elmos, `channel width in elmos (${label})`).toBeGreaterThan(0);
+      expect(elmos, `channel width in elmos (${label})`).toBeLessThanOrEqual(
+        Math.max(cellSize, 7) + 1e-6,
+      );
     }
   });
 
@@ -1109,6 +1225,63 @@ describe('robustness', () => {
       if (Math.abs(noisy.data[i] - noisy.data[i + 1]) > 1e-4) differing++;
     }
     expect(differing).toBeGreaterThan(200);
+  });
+
+  it('paints the fallback colour where the heightfield went NaN', () => {
+    // One NaN — from a divide in an upstream node, or an erosion step that
+    // ran away — used to multiply straight through every band, every weight and
+    // `linearToSrgb`, and land in the PNG as a black pixel with nothing in the
+    // image or the console to say where it came from.
+    const terrain = filledField(8, 8, 40);
+    terrain.data[19] = NaN;
+    const unlit = generateSatmap({ height: terrain }, TEMPERATE, {
+      lighting: false,
+      fallbackColor: [1, 0, 1],
+    });
+    expect(texelRgb(unlit, 3, 2)).toEqual([1, 0, 1]);
+    for (const v of unlit.data) expect(Number.isFinite(v)).toBe(true);
+
+    // Baked lighting reads two masks derived from the same heightfield, so it
+    // gets its own chance to multiply the fallback back into NaN.
+    const lit = generateSatmap({ height: terrain }, TEMPERATE, { fallbackColor: [1, 0, 1] });
+    for (const v of lit.data) expect(Number.isFinite(v)).toBe(true);
+    expect(texelRgb(lit, 3, 2)[0]).toBeGreaterThan(0.5);
+
+    // And the weight masks say "no material here" rather than NaN, so the
+    // typemap and the splat map agree with the diffuse.
+    const weights = evaluateMaterialWeights({ height: terrain }, TEMPERATE);
+    for (const field of weights) expect(field.data[19]).toBe(0);
+    expect(dominantMaterial(weights).data[19]).toBe(0);
+  });
+
+  it('refuses a NaN elevation range rather than blanking the palette', () => {
+    // The inverted-range guard exists because a bad range silently paints
+    // nothing. NaN does exactly the same thing and used to slip through it:
+    // every band edge becomes NaN, every comparison against NaN is false, and
+    // the whole map comes out the fallback colour.
+    expect(() => rescalePaletteHeights(TEMPERATE, { min: NaN, max: 400 })).toThrow(/finite/);
+    expect(() => rescalePaletteHeights(TEMPERATE, { min: -100, max: Infinity })).toThrow(/finite/);
+    expect(() =>
+      rescalePaletteHeights(TEMPERATE, { min: 0, max: 400 }, { min: NaN, max: 400 }),
+    ).toThrow(/finite/);
+  });
+
+  it('keeps the flow mask a mask when the channel threshold is zero', () => {
+    // `log(0)` is -Infinity and `log(NaN)` is NaN, either of which would put a
+    // non-finite number at the bottom of the ramp and hand back a mask that
+    // says nothing about the terrain.
+    const terrain = hillField(48, 48, 180);
+    for (const channelArea of [0, -1, NaN]) {
+      const { flow } = resolveTextureInputs(
+        { height: terrain },
+        { cellSize: 8, channelArea, need: new Set(['flow'] as const) },
+      );
+      for (const v of flow.data) {
+        expect(Number.isFinite(v), `channelArea ${channelArea}`).toBe(true);
+        expect(v).toBeGreaterThanOrEqual(0);
+        expect(v).toBeLessThanOrEqual(1);
+      }
+    }
   });
 });
 

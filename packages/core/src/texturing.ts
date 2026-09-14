@@ -316,9 +316,11 @@ export function resolveTextureInputs(
  * This is a channel-initiation threshold: the catchment a hillside has to
  * gather before overland flow stops being a sheet and cuts a defined channel.
  * 0.0015 of a 16x16 map is about 10^5 elmos², a catchment 300 elmos on a side,
- * and it puts roughly 5-10% of a typical template's texels somewhere on the
- * ramp with about 1% up near the top — a dendritic network with a trunk, which
- * is what a flow accent is for.
+ * and on the shipped templates it puts 1.5-2.5% of the texels somewhere on the
+ * ramp with a twentieth of a percent up near the top — a dendritic network with
+ * a trunk, which is what a flow accent is for. Those figures now hold at 8 and
+ * at 21 elmos per sample alike; see {@link deriveFlow} for why that took
+ * measuring the catchment per channel width rather than per cell.
  *
  * It is a fraction of the map rather than an absolute area on purpose. The
  * physical threshold is absolute, but a texture tool that used one would put a
@@ -347,11 +349,18 @@ const CHANNEL_AREA_DECADES = 2;
  * dependence this is here to remove. Taking the maximum over the window widens
  * without touching the value, and a light blur afterwards only rounds the edge
  * of the plateau it leaves.
+ *
+ * The same number is also the contour width the drainage threshold is measured
+ * against — see {@link deriveFlow} — so the channel the mask decides to paint
+ * and the width it paints it at are two statements about one stream rather than
+ * two constants free to drift apart.
  */
 const CHANNEL_WIDTH_ELMOS = 7;
 
 /**
- * Separable maximum filter, radius in samples.
+ * Separable maximum filter, radius in samples. **Writes back into `field`** and
+ * returns it: the one caller owns its buffer and a second full-resolution copy
+ * of an 8192² field is 268 MB to save a line.
  *
  * Naive two-pass rather than a monotonic deque: the radius here is a handful of
  * samples even at build resolution, and the deque's bookkeeping costs more than
@@ -404,13 +413,37 @@ function dilate(field: Field, radius: number, mode: WrapMode): Field {
  * instead means the mask is *zero* on a hillside and only leaves zero where
  * water has somewhere real to have come from.
  *
- * The log is taken of the drainage **area in elmos²**, not of the raw cell
- * count. `flowAccumulation` counts cells, so the same stream on the same terrain
- * accumulates four times as much when the grid is sampled twice as finely.
- * Catchment area is a property of the terrain and not of the grid, so scaling by
- * the cell footprint makes the mask read the same at a given place on the map
- * whatever the resolution — and then a blur to {@link CHANNEL_WIDTH_ELMOS}
- * gives the channel a world-constant width to go with it.
+ * **The log is taken of drainage area per channel width, not of cell count and
+ * not of raw upslope area.** `flowAccumulation` counts cells, so the obvious
+ * conversion is to multiply by the cell's footprint and call the result the
+ * upslope area in elmos². That looks grid-independent and is not. On a planar
+ * hillside the flow stays in its own column of cells, so the area draining
+ * through one cell is the distance to the divide times the *column's width* —
+ * and the column is as wide as the grid. Read that way, a 32-elmo preview
+ * reports four times the drainage of an 8-elmo build at the same point on the
+ * same hill, and the preview's hillsides sail over a channel threshold the
+ * build never reaches: on a smooth test terrain 28% of the map is above the
+ * threshold at 32 elmos per sample against 0.8% at 4, a 36-fold spread, and
+ * that is the preview lying about the build in the most visible way available.
+ *
+ * What does not move with the grid is drainage area per unit of contour width,
+ * `acc * cellSize`, which has units of length. In a channel the flow occupies
+ * roughly `width / cellSize` cells, so the cell size cancels; on a hillside it
+ * is simply the distance to the divide. Multiplying that back up by one
+ * {@link CHANNEL_WIDTH_ELMOS} restores area units, so {@link DEFAULT_CHANNEL_AREA}
+ * still means what it says — the catchment a channel of the map's own channel
+ * width has to carry — and the same threshold now lands in the same place at
+ * every resolution. Over the same cell sizes the spread falls from 36x to 1.1x.
+ *
+ * The one case this reads worse on is an idealised channel that converges to a
+ * single cell, such as a mathematically perfect V-trough: it has no width for a
+ * specific catchment area to be specific to, so the reading climbs as the grid
+ * refines. That costs a trunk stream 0.86 instead of 1.0 at 32 elmos per
+ * sample — the saturated end of the ramp, where the mask already says
+ * "channel". Moving the threshold itself is much the more expensive error.
+ *
+ * The channel is then dilated to {@link CHANNEL_WIDTH_ELMOS}, which gives it a
+ * world-constant width to go with its world-constant threshold.
  */
 function deriveFlow(
   height: Field,
@@ -423,16 +456,20 @@ function deriveFlow(
   // the area that drains *into* the cell: zero on a ridge line at any
   // resolution, where leaving the seed in would report one cell's worth of
   // footprint and move the whole mask's floor with the grid.
-  const cellArea = cellSize * cellSize;
-  const mapArea = height.width * height.height * cellArea;
-  const fraction = Math.max(channelArea ?? DEFAULT_CHANNEL_AREA, Number.MIN_VALUE);
+  const areaPerCell = cellSize * CHANNEL_WIDTH_ELMOS;
+  const mapArea = height.width * height.height * cellSize * cellSize;
+  // A zero, negative or NaN threshold would put `log(0)` or a NaN at the bottom
+  // of the ramp and hand back a mask that is either saturated everywhere or NaN
+  // everywhere, neither of which says anything about the terrain.
+  const requested = channelArea ?? DEFAULT_CHANNEL_AREA;
+  const fraction = requested > 0 ? requested : Number.MIN_VALUE;
   const startArea = fraction * mapArea;
   const span = CHANNEL_AREA_DECADES * Math.LN10;
   const logStart = Math.log(startArea);
 
   for (let i = 0; i < acc.data.length; i++) {
-    const area = (acc.data[i] - 1) * cellArea;
-    if (area <= startArea) {
+    const area = (acc.data[i] - 1) * areaPerCell;
+    if (!(area > startArea)) {
       acc.data[i] = 0;
       continue;
     }
@@ -441,7 +478,19 @@ function deriveFlow(
     acc.data[i] = t * t * (3 - 2 * t);
   }
 
-  const radius = Math.round(CHANNEL_WIDTH_ELMOS / (2 * cellSize));
+  // A dilation of radius r covers 2r + 1 samples, so solving for the target
+  // width has to account for the centre sample. Taking `width / (2 * cellSize)`
+  // instead is off by half a cell at every resolution and, worse, is not
+  // monotone in the grid: it rounds to 1 at 7 elmos per sample (a 21-elmo
+  // channel) and to 0 at 8 (an 8-elmo one), so a 13% change in analysis
+  // resolution moved the channel width by a factor of 2.6.
+  //
+  // Rounded down, not to nearest, because a dilation can only ever add width:
+  // the painted channel is then never wider than it was authored, and never
+  // wider than a single sample when one sample already covers more than 7
+  // elmos. Overshooting is the failure that reads — a stream twice its width
+  // is a river — and undershooting by less than a sample is invisible.
+  const radius = Math.max(0, Math.floor((CHANNEL_WIDTH_ELMOS / cellSize - 1) / 2));
   if (radius <= 0) return acc;
   return gaussianBlur(dilate(acc, radius, mode), radius * 0.5, mode, acc);
 }
@@ -607,7 +656,11 @@ function weightsOf(
       }
       // The explicit zero short-circuit matters: `Math.pow(0, 0)` is 1, so an
       // exclusion of 0 would otherwise turn every excluded material back on.
-      data[i] = c <= 0 ? 0 : (exclusion === 1 ? c : Math.pow(c, exclusion)) * scale;
+      // Written as `c > 0` rather than `c <= 0` so a NaN texel — one NaN in the
+      // heightfield is enough — resolves to no material rather than to a NaN
+      // weight, which survives normalisation, comes out of `linearToSrgb` as
+      // NaN, and is written to the PNG as a black pixel with nothing to say why.
+      data[i] = c > 0 ? (exclusion === 1 ? c : Math.pow(c, exclusion)) * scale : 0;
     }
   }
 
@@ -635,27 +688,33 @@ function weightsOf(
  * would fall through to the fallback colour and punch a hole in the map.
  */
 function applyCaps(weights: Field[], palette: MaterialPalette): void {
-  let limits: Float64Array | undefined;
+  // Split the palette once rather than re-deciding per texel, and hold the
+  // backing arrays directly. A shipped palette plus the two slope bands is
+  // eleven layers; at build resolution the texel loop below runs 67 million
+  // times, so `weights[layer].data[i]` inside it is two property lookups and a
+  // branch repeated well over a billion times for an answer that never changes.
+  const capped: Float32Array[] = [];
+  const capLimits: number[] = [];
+  const uncapped: Float32Array[] = [];
   for (let layer = 0; layer < palette.length; layer++) {
     const cap = palette[layer].rule.cap;
-    if (cap === undefined || cap >= 1) continue;
-    limits ??= new Float64Array(palette.length).fill(-1);
-    limits[layer] = cap <= 0 ? 0 : cap / (1 - cap);
+    if (cap === undefined || cap >= 1) {
+      uncapped.push(weights[layer].data);
+      continue;
+    }
+    capped.push(weights[layer].data);
+    capLimits.push(cap <= 0 ? 0 : cap / (1 - cap));
   }
-  if (limits === undefined) return;
+  if (capped.length === 0) return;
 
   const n = weights[0].data.length;
   for (let i = 0; i < n; i++) {
     let base = 0;
-    for (let layer = 0; layer < palette.length; layer++) {
-      if (limits[layer] < 0) base += weights[layer].data[i];
-    }
+    for (let k = 0; k < uncapped.length; k++) base += uncapped[k][i];
     if (base <= 0) continue;
-    for (let layer = 0; layer < palette.length; layer++) {
-      const k = limits[layer];
-      if (k < 0) continue;
-      const limit = k * base;
-      if (weights[layer].data[i] > limit) weights[layer].data[i] = limit;
+    for (let k = 0; k < capped.length; k++) {
+      const limit = capLimits[k] * base;
+      if (capped[k][i] > limit) capped[k][i] = limit;
     }
   }
 }
@@ -810,29 +869,38 @@ export function generateSatmap(
     shade = bakeShading(inputs.height, resolved.occlusion, lighting, options);
   }
 
+  // Hoisted for the same reason the noise parameters are: this loop runs once
+  // per texel, 67 million times on an 8192² diffuse, and reaching through
+  // `weights[layer]` to its `data` inside it is a property lookup per layer per
+  // texel for a value fixed before the loop started.
+  const layers = weights.map((f) => f.data);
+
   for (let i = 0; i < n; i++) {
     let sum = 0;
-    for (let layer = 0; layer < palette.length; layer++) sum += weights[layer].data[i];
+    for (let layer = 0; layer < layers.length; layer++) sum += layers[layer][i];
 
     let r: number;
     let g: number;
     let b: number;
-    if (sum <= 0) {
-      r = fallbackLinear[0];
-      g = fallbackLinear[1];
-      b = fallbackLinear[2];
-    } else {
+    // `sum > 0` rather than `sum <= 0`, so a texel whose weights came out NaN
+    // takes the fallback colour instead of multiplying NaN through the mix and
+    // landing in the PNG as an unexplained black pixel.
+    if (sum > 0) {
       r = 0;
       g = 0;
       b = 0;
       const inv = 1 / sum;
-      for (let layer = 0; layer < palette.length; layer++) {
-        const w = weights[layer].data[i] * inv;
+      for (let layer = 0; layer < layers.length; layer++) {
+        const w = layers[layer][i] * inv;
         if (w === 0) continue;
         r += linear[layer * 3] * w;
         g += linear[layer * 3 + 1] * w;
         b += linear[layer * 3 + 2] * w;
       }
+    } else {
+      r = fallbackLinear[0];
+      g = fallbackLinear[1];
+      b = fallbackLinear[2];
     }
 
     if (shade !== undefined) {
@@ -861,6 +929,12 @@ export function generateSatmap(
  * caller-supplied occlusion field that is not really 0..1) and two of them
  * multiply back to a *positive*, so the deepest, most shadowed texel on the map
  * comes out brighter than the plateau beside it.
+ *
+ * A mask value that is not a number at all reads as fully open rather than
+ * fully dark. A NaN in the heightfield already costs that texel its material
+ * mix and leaves it on the fallback colour; letting the shading multiply it to
+ * NaN as well turns a visible wrong colour into a black pixel, which is much
+ * harder to trace back to the node that produced it.
  */
 function bakeShading(
   height: Field,
@@ -875,7 +949,7 @@ function bakeShading(
   out.fill(1);
 
   if (aoStrength > 0) {
-    for (let i = 0; i < n; i++) out[i] = 1 - aoStrength * (1 - clamp01(occlusion.data[i]));
+    for (let i = 0; i < n; i++) out[i] = 1 - aoStrength * (1 - clampMask(occlusion.data[i]));
   }
   if (hsStrength > 0) {
     const hs = hillshade(height, {
@@ -884,7 +958,7 @@ function bakeShading(
       cellSize: options.cellSize ?? 1,
       mode: options.mode ?? 'clamp',
     });
-    for (let i = 0; i < n; i++) out[i] *= 1 - hsStrength * (1 - clamp01(hs.data[i]));
+    for (let i = 0; i < n; i++) out[i] *= 1 - hsStrength * (1 - clampMask(hs.data[i]));
   }
   return out;
 }
@@ -907,6 +981,17 @@ function compassToHillshadeAzimuth(bearing: number): number {
 
 function clamp01(v: number): number {
   return v < 0 ? 0 : v > 1 ? 1 : v;
+}
+
+/**
+ * {@link clamp01} for a value read out of a mask, where NaN means "no reading"
+ * and the safe reading is the one that darkens nothing.
+ */
+function clampMask(v: number): number {
+  if (v >= 0) return v > 1 ? 1 : v;
+  // Below zero clamps; the only value left that is neither is NaN, and that
+  // reads as open sky so a texel with no reading keeps the colour it was given.
+  return v < 0 ? 0 : 1;
 }
 
 // --- Splat weights ---------------------------------------------------------
@@ -950,17 +1035,22 @@ export function generateSplatWeights(
   const weights = evaluateMaterialWeights(inputs, palette, options);
   const normalize = options.normalize ?? true;
   const n = width * height;
-  const channels = palette.map((layer) => layer.material.splatChannel);
+  // Only the materials that declare a channel do any work here, so the loop is
+  // over those alone with their backing arrays already in hand — the palette's
+  // other layers would otherwise cost a lookup and a branch on every texel.
+  const routed: { channel: 0 | 1 | 2 | 3; data: Float32Array }[] = [];
+  for (let layer = 0; layer < palette.length; layer++) {
+    const channel = palette[layer].material.splatChannel;
+    if (channel !== undefined) routed.push({ channel, data: weights[layer].data });
+  }
 
   for (let i = 0; i < n; i++) {
     const o = i * 4;
     let sum = 0;
-    for (let layer = 0; layer < palette.length; layer++) {
-      const channel = channels[layer];
-      if (channel === undefined) continue;
-      const w = weights[layer].data[i];
+    for (let k = 0; k < routed.length; k++) {
+      const w = routed[k].data[i];
       if (w <= 0) continue;
-      out.data[o + channel] += w;
+      out.data[o + routed[k].channel] += w;
       sum += w;
     }
     if (normalize && sum > 0) {

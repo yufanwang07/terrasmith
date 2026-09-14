@@ -354,9 +354,12 @@ export const PALETTE_REFERENCE_HEIGHTS = { min: -120, max: 400 } as const;
  *
  * The feather is deliberately enormous — wider than the band it feathers. That
  * is because it is doing the work of a hypsometric tint rather than drawing a
- * treeline: rescaled onto a real map it runs from about a tenth of the peak
- * height to about nine tenths, so ground colour gives way to upland colour
- * smoothly across the whole of the terrain's relief. Generated heightfields are
+ * treeline. {@link evaluateBand} centres a feather on its edge, so the handover
+ * spans 240 ± 165 of the reference frame's 400-elmo peak: rescaled onto a real
+ * map it runs from 0.19 of the peak height to 1.01 of it, crossing the halfway
+ * point at 0.6. Ground colour therefore gives way to upland colour smoothly
+ * across the whole of the terrain's relief, and the upland reaches full
+ * strength only at the very summit. Generated heightfields are
  * strongly bottom-heavy, so a crisp line anywhere high paints almost nothing,
  * and one placed low cuts the map in half; a gradient is right at any
  * hypsometry, and it is the only elevation cue a map too flat to produce slope
@@ -1390,10 +1393,10 @@ const MIN_RESCALED_BLEND = 4;
 /**
  * Rescale one band about the water line, which sits at 0 in both frames.
  *
- * Each edge is scaled by whichever side of the water it is on. A band's feather
- * gets the mean of the scales its own edges used: it is one number describing
- * two edges, and a band that straddles the shoreline (wet sand, say) has one
- * edge under water and one above.
+ * Each edge is scaled by whichever side of the water it is on, and so is the
+ * feather on that edge: a band that straddles the shoreline (wet sand, say) has
+ * one edge under water and one above, and the two sides of the water almost
+ * never scale by the same factor.
  */
 function scaleBlend(blend: number | undefined, scale: number): number | undefined {
   if (blend === undefined) return undefined;
@@ -1407,23 +1410,31 @@ function rescaleBand(band: Band | undefined, below: number, above: number): Band
   const out: {
     min?: number;
     max?: number;
-    blend?: number;
     blendMin?: number;
     blendMax?: number;
   } = {};
   const minScale = band.min === undefined ? undefined : band.min < 0 ? below : above;
   const maxScale = band.max === undefined ? undefined : band.max < 0 ? below : above;
-  if (band.min !== undefined) out.min = band.min * (minScale as number);
-  if (band.max !== undefined) out.max = band.max * (maxScale as number);
 
-  // A per-edge feather knows which side of the water its own edge is on; the
-  // shared one has to serve both, so it gets the mean of the scales the band's
-  // edges used.
-  const edges = [minScale, maxScale].filter((s): s is number => s !== undefined);
-  const shared = edges.length === 0 ? above : edges.reduce((a, b) => a + b, 0) / edges.length;
-  out.blend = scaleBlend(band.blend, shared);
-  out.blendMin = scaleBlend(band.blendMin, minScale ?? shared);
-  out.blendMax = scaleBlend(band.blendMax, maxScale ?? shared);
+  // A shared `blend` is one number standing in for two edges, so rescaling it
+  // once — by either side's factor, or by the mean of the two — is wrong for at
+  // least one of them. Giving both edges the mean is what put ALPINE_SNOW's
+  // shore band 17 elmos down the lake bed of a map with 52 elmos of water and
+  // 920-elmo peaks: the underwater edge is scaled by 0.43 but its feather was
+  // scaled by 1.37, so "wet shore sand" feathered three times further out to
+  // sea than its own edge moved. Resolving the shared feather into the two
+  // per-edge ones, each scaled by the side its edge landed on, is exactly what
+  // {@link Band.blendMin} exists for, and it leaves `blend` with nothing left
+  // to say — so a rescaled band carries per-edge feathers only, and only for
+  // the edges it actually has.
+  if (minScale !== undefined) {
+    out.min = (band.min as number) * minScale;
+    out.blendMin = scaleBlend(band.blendMin ?? band.blend, minScale);
+  }
+  if (maxScale !== undefined) {
+    out.max = (band.max as number) * maxScale;
+    out.blendMax = scaleBlend(band.blendMax ?? band.blend, maxScale);
+  }
   return out;
 }
 
@@ -1468,10 +1479,21 @@ export function rescalePaletteHeights(
   // that `min` lands above `max`. Every rule then evaluates to zero and the
   // whole palette paints nothing — the exact silent blanking this module works
   // to avoid — so it is worth refusing loudly instead.
-  if (targetSpan < 0 || refSpan < 0) {
+  //
+  // A non-finite edge is refused for the same reason. NaN reaches here from a
+  // partly NaN heightfield or an unfilled number box in the UI, and it fails
+  // the same way only more quietly: NaN scales every band edge to NaN, every
+  // comparison against NaN is false, and the whole map comes out the fallback
+  // colour with nothing in the output to say which number was missing.
+  const finite =
+    Number.isFinite(target.min) &&
+    Number.isFinite(target.max) &&
+    Number.isFinite(reference.min) &&
+    Number.isFinite(reference.max);
+  if (!finite || targetSpan < 0 || refSpan < 0) {
     throw new Error(
-      `rescalePaletteHeights needs min <= max, got target ${target.min}..${target.max} ` +
-        `and reference ${reference.min}..${reference.max}`,
+      `rescalePaletteHeights needs finite min <= max, got target ` +
+        `${target.min}..${target.max} and reference ${reference.min}..${reference.max}`,
     );
   }
   if (refSpan === 0) return palette;
